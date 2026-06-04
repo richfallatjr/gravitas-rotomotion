@@ -3,9 +3,44 @@ import AVFoundation
 import Combine
 import Foundation
 import SwiftUI
+import simd
 
 @MainActor
 final class RotoMotionViewModel: ObservableObject {
+    enum RaySolveMode: String, CaseIterable, Identifiable {
+        case spineOnly
+        case fullBody
+
+        var id: String { rawValue }
+
+        var displayName: String {
+            switch self {
+            case .spineOnly:
+                return "Spine Only"
+            case .fullBody:
+                return "Full Body"
+            }
+        }
+
+        var solverMode: RotoRayRigSolver.SolveMode {
+            switch self {
+            case .spineOnly:
+                return .spineOnly
+            case .fullBody:
+                return .fullBody
+            }
+        }
+
+        var animationSolverMode: RotoRayConstrainedIKSolver.Mode {
+            switch self {
+            case .spineOnly:
+                return .spineOnly
+            case .fullBody:
+                return .fullBody
+            }
+        }
+    }
+
     let objectWillChange = ObservableObjectPublisher()
 
     @Published var videoURL: URL?
@@ -65,6 +100,29 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var animatedUSDZClipID = "rotomotion_anim_test_01"
     @Published var animatedUSDZExportStatus = "No animated USDZ exported."
     @Published var openUSDToolStatus: OpenUSDToolStatus?
+
+    @Published var referenceSolveUSDZURL: URL?
+    @Published var targetCharacterUSDZURL: URL?
+    @Published var retargetClipID = "rotomotion_ray_solve_01"
+    @Published var includeHipsTranslationInUSDZ = true
+    @Published var scaleRootMotionToTargetHeight = true
+    @Published var referenceRigProfile: USDZSkeletonProfile?
+    @Published var targetRigProfile: USDZSkeletonProfile?
+    @Published var usdzRetargetStatus = "No animated target USDZ exported."
+
+    @Published var showVisionRays = true
+    @Published var showRaySolvedRig = true
+    @Published var rayLength = Double(RotoRayRigSolver.defaultRayLength)
+    @Published var rayTargetHeightMeters = 1.74
+    @Published var raySceneUnitsPerMeter = 5.0
+    @Published var raySolveMode: RaySolveMode = .fullBody
+    @Published var currentVideoPlaneSize: CGSize?
+    @Published var currentRaySolveResult: RotoRaySolveResult?
+    @Published var raySolveStatus = "Ray solve not run."
+    @Published var rayAnimationSolveResult: RotoRayAnimationSolveResult?
+    @Published var rayAnimationSolveStatus = "Ray animation solve not run."
+    @Published var raySolvedUSDZClipID = "rotomotion_ray_solve_01"
+    @Published var raySolvedUSDZExportStatus = "No ray solve USDZ exported."
 
     @Published var status = "Open a video to begin."
     @Published var logLines: [String] = ["Ready."]
@@ -191,6 +249,19 @@ final class RotoMotionViewModel: ObservableObject {
             ?? (frames.indices.contains(currentFrameIndex) ? frames[currentFrameIndex] : nil)
     }
 
+    var currentRaySolvedFrame: RotoRayAnimationSolveResult.Frame? {
+        guard let frames = rayAnimationSolveResult?.frames,
+              !frames.isEmpty else {
+            return nil
+        }
+
+        let time = currentVideoTimeSeconds
+
+        return frames.min {
+            abs($0.timeSeconds - time) < abs($1.timeSeconds - time)
+        }
+    }
+
     var currentVideoTimeSeconds: Double {
         guard decodedFrames.indices.contains(currentFrameIndex) else {
             return currentTimeSeconds
@@ -236,6 +307,49 @@ final class RotoMotionViewModel: ObservableObject {
         return frames.min {
             abs($0.timeSeconds - time) < abs($1.timeSeconds - time)
         }
+    }
+
+    private func calibratedRayReferenceArmature() -> RotoReferenceArmature {
+        if let referenceRigProfile {
+            return RotoReferenceArmature.fromUSDZProfile(
+                referenceRigProfile,
+                sceneUnitsPerMeter: raySceneUnitsPerMeter
+            )
+        }
+
+        let targetMeters = max(rayTargetHeightMeters, 0.0001)
+        let sceneUnitsPerMeter = max(raySceneUnitsPerMeter, 0.0001)
+        let targetSceneHeight = targetMeters * sceneUnitsPerMeter
+        let scale = targetSceneHeight / RotoReferenceArmature.meshy24Default.restHeight
+
+        return RotoReferenceArmature.meshy24Default.scaled(by: scale)
+    }
+
+    private func checkedOpenUSDPythonForRetarget(
+        requireUSDZip: Bool = false
+    ) -> String? {
+        let toolStatus = OpenUSDToolChecker.check()
+        openUSDToolStatus = toolStatus
+
+        guard toolStatus.pythonOK,
+              let pythonExecutablePath = toolStatus.pythonExecutablePath else {
+            usdzRetargetStatus = """
+            OpenUSD Python missing.
+            \(toolStatus.pythonMessage)
+            """
+            status = usdzRetargetStatus
+            diagnostics.log(usdzRetargetStatus)
+            return nil
+        }
+
+        if requireUSDZip && !toolStatus.usdzipOK {
+            usdzRetargetStatus = "usdzip missing. Cannot export animated target USDZ."
+            status = usdzRetargetStatus
+            diagnostics.log(usdzRetargetStatus)
+            return nil
+        }
+
+        return pythonExecutablePath
     }
 
     var videoSize: CGSize {
@@ -313,6 +427,79 @@ final class RotoMotionViewModel: ObservableObject {
         return String(format: "%.4f", average)
     }
 
+    func solveCurrentFrameRays(videoPlaneSize: CGSize) {
+        guard let normalizedFrame = currentNormalizedFrame else {
+            raySolveStatus = "Cannot solve rays: no normalized Meshy24 frame."
+            diagnostics.log(raySolveStatus)
+            return
+        }
+
+        let result = RotoRayRigSolver.solveFrame(
+            frameIndex: currentFrameIndex,
+            normalizedFrame: normalizedFrame,
+            armature: calibratedRayReferenceArmature(),
+            cameraOrigin: SIMD3<Float>(0, 0, 10),
+            videoPlaneSize: videoPlaneSize,
+            videoPlaneZ: 0,
+            solveMode: raySolveMode.solverMode,
+            rayLength: Float(rayLength)
+        )
+
+        currentRaySolveResult = result
+        raySolveStatus = """
+        Ray solve complete.
+        frame: \(currentFrameIndex)
+        mode: \(raySolveMode.displayName)
+        joints: \(result.joints.count)
+        rays: \(result.rays.count)
+        errors: \(result.errors.count)
+        """
+
+        diagnostics.log(raySolveStatus)
+    }
+
+    func solveFullAnimationWithCameraRays() {
+        guard let normalizedCapture else {
+            rayAnimationSolveStatus = "Normalize Meshy24 before ray solve."
+            status = rayAnimationSolveStatus
+            diagnostics.log(rayAnimationSolveStatus)
+            return
+        }
+
+        guard let videoPlaneSize = currentVideoPlaneSize else {
+            rayAnimationSolveStatus = "No video plane size available."
+            status = rayAnimationSolveStatus
+            diagnostics.log(rayAnimationSolveStatus)
+            return
+        }
+
+        let result = RotoRayAnimationSolver.solveAnimation(
+            normalized: normalizedCapture,
+            videoPlaneSize: videoPlaneSize,
+            mode: raySolveMode.animationSolverMode,
+            targetHeightMeters: rayTargetHeightMeters,
+            sceneUnitsPerMeter: raySceneUnitsPerMeter,
+            referenceArmature: calibratedRayReferenceArmature()
+        )
+
+        rayAnimationSolveResult = result
+        currentRaySolveResult = nil
+        raySolveStatus = "Single-frame ray solve cleared."
+        rayAnimationSolveStatus = "Solved \(result.frames.count) frames at \(String(format: "%.2f", result.targetHeightMeters)) m."
+        status = rayAnimationSolveStatus
+        diagnostics.log("""
+        Ray animation solve complete:
+          frames: \(result.frames.count)
+          mode: \(raySolveMode.displayName)
+          targetHeightMeters: \(String(format: "%.3f", result.targetHeightMeters))
+          sceneUnitsPerMeter: \(String(format: "%.3f", result.sceneUnitsPerMeter))
+          armatureSceneScale: \(String(format: "%.3f", result.armatureSceneScale))
+          referenceUSDZ: \(referenceSolveUSDZURL?.lastPathComponent ?? "none")
+          videoPlaneSize: \(videoPlaneSize)
+          firstSolvedJoints: \(result.frames.first?.solvedJoints.count ?? 0)
+        """)
+    }
+
     func openVideo() {
         diagnostics.log("Open Video requested.")
 
@@ -343,6 +530,13 @@ final class RotoMotionViewModel: ObservableObject {
         lastVisionError = nil
         lastNormalizeError = nil
         lastSmoothingError = nil
+        currentRaySolveResult = nil
+        rayAnimationSolveResult = nil
+        currentVideoPlaneSize = nil
+        raySolveStatus = "Ray solve not run."
+        rayAnimationSolveStatus = "Ray animation solve not run."
+        raySolvedUSDZExportStatus = "No ray solve USDZ exported."
+        usdzRetargetStatus = "No animated target USDZ exported."
         decodedFrames = []
         currentVideoFrameImage = nil
         currentFrameIndex = 0
@@ -660,6 +854,12 @@ final class RotoMotionViewModel: ObservableObject {
             normalizedCapture = nil
             smoothedCapture = nil
             fitResult = nil
+            currentRaySolveResult = nil
+            rayAnimationSolveResult = nil
+            raySolveStatus = "Ray solve not run."
+            rayAnimationSolveStatus = "Ray animation solve not run."
+            raySolvedUSDZExportStatus = "No ray solve USDZ exported."
+            usdzRetargetStatus = "No animated target USDZ exported."
             maxFrameIndex = max(maxFrameIndex, max(0, capture.frames.count - 1))
             if currentFrameIndex > maxFrameIndex {
                 setCurrentFrameIndex(maxFrameIndex)
@@ -727,6 +927,12 @@ final class RotoMotionViewModel: ObservableObject {
         normalizedCapture = PoseNormalizer.normalize(rawCapture: rawCapture)
         smoothedCapture = nil
         fitResult = nil
+        currentRaySolveResult = nil
+        rayAnimationSolveResult = nil
+        raySolveStatus = "Ray solve not run."
+        rayAnimationSolveStatus = "Ray animation solve not run."
+        raySolvedUSDZExportStatus = "No ray solve USDZ exported."
+        usdzRetargetStatus = "No animated target USDZ exported."
         maxFrameIndex = max(maxFrameIndex, max(0, (normalizedCapture?.frames.count ?? 0) - 1))
         let frameCount = normalizedCapture?.frames.count ?? 0
         let firstJointCount = normalizedCapture?.frames.first?.joints.count ?? 0
@@ -790,6 +996,12 @@ final class RotoMotionViewModel: ObservableObject {
             settings: settings
         )
         fitResult = nil
+        currentRaySolveResult = nil
+        rayAnimationSolveResult = nil
+        raySolveStatus = "Ray solve not run."
+        rayAnimationSolveStatus = "Ray animation solve not run."
+        raySolvedUSDZExportStatus = "No ray solve USDZ exported."
+        usdzRetargetStatus = "No animated target USDZ exported."
         let frameCount = smoothedCapture?.frames.count ?? 0
         let firstJointCount = smoothedCapture?.frames.first?.joints.count ?? 0
         let firstDeltaMagnitude: Double = {
@@ -1071,6 +1283,216 @@ final class RotoMotionViewModel: ObservableObject {
         }
     }
 
+    func chooseReferenceSolveUSDZ() {
+        guard let url = FilePanelHelpers.openUSDZURL() else {
+            usdzRetargetStatus = "Reference USDZ selection canceled."
+            status = usdzRetargetStatus
+            diagnostics.log(usdzRetargetStatus)
+            return
+        }
+
+        referenceSolveUSDZURL = url
+        referenceRigProfile = nil
+        rayAnimationSolveResult = nil
+        rayAnimationSolveStatus = "Ray animation solve cleared because reference USDZ changed."
+        usdzRetargetStatus = "Selected reference USDZ: \(url.lastPathComponent)"
+        status = usdzRetargetStatus
+        diagnostics.log("Selected reference solve USDZ: \(url.path)")
+
+        inspectReferenceUSDZ()
+    }
+
+    func chooseTargetCharacterUSDZ() {
+        guard let url = FilePanelHelpers.openUSDZURL() else {
+            usdzRetargetStatus = "Target USDZ selection canceled."
+            status = usdzRetargetStatus
+            diagnostics.log(usdzRetargetStatus)
+            return
+        }
+
+        targetCharacterUSDZURL = url
+        targetRigProfile = nil
+        usdzRetargetStatus = "Selected target USDZ: \(url.lastPathComponent)"
+        status = usdzRetargetStatus
+        diagnostics.log("Selected target character USDZ: \(url.path)")
+
+        inspectTargetUSDZ()
+    }
+
+    func checkOpenUSDToolsForRetarget() {
+        let toolStatus = OpenUSDToolChecker.check()
+        openUSDToolStatus = toolStatus
+
+        if toolStatus.ready {
+            usdzRetargetStatus = "OpenUSD tools ready: \(toolStatus.pythonExecutablePath ?? "python unknown")"
+        } else {
+            usdzRetargetStatus = """
+            OpenUSD tools missing.
+            Python OK: \(toolStatus.pythonOK)
+            usdzip OK: \(toolStatus.usdzipOK)
+            \(toolStatus.pythonMessage)
+            """
+        }
+
+        status = usdzRetargetStatus
+        diagnostics.log(usdzRetargetStatus)
+    }
+
+    func inspectReferenceUSDZ() {
+        guard let url = referenceSolveUSDZURL else {
+            return
+        }
+
+        guard let pythonExecutablePath = checkedOpenUSDPythonForRetarget() else {
+            return
+        }
+
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        do {
+            let profile = try USDZSkeletonInspector.inspectUSDZ(
+                url,
+                pythonExecutablePath: pythonExecutablePath
+            )
+            referenceRigProfile = profile
+
+            if let height = profile.estimatedHeightMeters, height > 0 {
+                rayTargetHeightMeters = height
+            }
+
+            usdzRetargetStatus = """
+            Reference USDZ inspected.
+            Matched: \(profile.canonicalMatchedJoints.count)
+            Missing: \(profile.missingCanonicalJoints.isEmpty ? "none" : profile.missingCanonicalJoints.joined(separator: ", "))
+            Height: \(profile.estimatedHeightMeters.map { String(format: "%.3f m", $0) } ?? "unknown")
+            """
+            status = usdzRetargetStatus
+            diagnostics.log(usdzRetargetStatus)
+        } catch {
+            referenceRigProfile = nil
+            usdzRetargetStatus = "Reference USDZ inspect failed: \(error.localizedDescription)"
+            status = usdzRetargetStatus
+            diagnostics.log(usdzRetargetStatus)
+        }
+    }
+
+    func inspectTargetUSDZ() {
+        guard let url = targetCharacterUSDZURL else {
+            return
+        }
+
+        guard let pythonExecutablePath = checkedOpenUSDPythonForRetarget() else {
+            return
+        }
+
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        do {
+            let profile = try USDZSkeletonInspector.inspectUSDZ(
+                url,
+                pythonExecutablePath: pythonExecutablePath
+            )
+            targetRigProfile = profile
+
+            usdzRetargetStatus = """
+            Target USDZ inspected.
+            Matched: \(profile.canonicalMatchedJoints.count)
+            Missing: \(profile.missingCanonicalJoints.isEmpty ? "none" : profile.missingCanonicalJoints.joined(separator: ", "))
+            Height: \(profile.estimatedHeightMeters.map { String(format: "%.3f m", $0) } ?? "unknown")
+            """
+            status = usdzRetargetStatus
+            diagnostics.log(usdzRetargetStatus)
+        } catch {
+            targetRigProfile = nil
+            usdzRetargetStatus = "Target USDZ inspect failed: \(error.localizedDescription)"
+            status = usdzRetargetStatus
+            diagnostics.log(usdzRetargetStatus)
+        }
+    }
+
+    func exportAnimatedTargetUSDZFromRaySolve() {
+        guard let targetCharacterUSDZURL else {
+            usdzRetargetStatus = "Choose target character USDZ first."
+            status = usdzRetargetStatus
+            diagnostics.log(usdzRetargetStatus)
+            return
+        }
+
+        guard let solve = rayAnimationSolveResult else {
+            usdzRetargetStatus = "Run full ray animation solve first."
+            status = usdzRetargetStatus
+            diagnostics.log(usdzRetargetStatus)
+            return
+        }
+
+        guard let pythonExecutablePath = checkedOpenUSDPythonForRetarget(requireUSDZip: true) else {
+            return
+        }
+
+        if targetRigProfile == nil {
+            inspectTargetUSDZ()
+        }
+
+        guard let outputDir = FilePanelHelpers.chooseOutputDirectory() else {
+            usdzRetargetStatus = "Animated target USDZ export canceled."
+            status = usdzRetargetStatus
+            diagnostics.log(usdzRetargetStatus)
+            return
+        }
+
+        let didAccessTarget = targetCharacterUSDZURL.startAccessingSecurityScopedResource()
+        defer {
+            if didAccessTarget {
+                targetCharacterUSDZURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let sourceHeight = max(referenceRigProfile?.estimatedHeightMeters ?? solve.targetHeightMeters, 0.0001)
+        let targetHeight = max(targetRigProfile?.estimatedHeightMeters ?? sourceHeight, 0.0001)
+        let rootTranslationScale = scaleRootMotionToTargetHeight
+            ? targetHeight / sourceHeight
+            : 1.0
+
+        do {
+            let output = try RetargetedAnimatedUSDZExporter.exportAnimatedTargetUSDZ(
+                targetUSDZ: targetCharacterUSDZURL,
+                solve: solve,
+                clipID: retargetClipID,
+                includeHipsTranslation: includeHipsTranslationInUSDZ,
+                rootTranslationScale: rootTranslationScale,
+                pythonExecutablePath: pythonExecutablePath,
+                outputDirectory: outputDir
+            )
+
+            usdzRetargetStatus = "Exported animated target USDZ: \(output.path)"
+            status = usdzRetargetStatus
+            diagnostics.log("""
+            Animated target USDZ export complete:
+              output: \(output.path)
+              target: \(targetCharacterUSDZURL.lastPathComponent)
+              frames: \(solve.frames.count)
+              includeHipsTranslation: \(includeHipsTranslationInUSDZ)
+              rootTranslationScale: \(String(format: "%.4f", rootTranslationScale))
+              python: \(pythonExecutablePath)
+            """)
+            NSWorkspace.shared.open(output.deletingLastPathComponent())
+        } catch {
+            usdzRetargetStatus = "Animated target USDZ export failed: \(error.localizedDescription)"
+            status = usdzRetargetStatus
+            diagnostics.log("Animated target USDZ export failed: \(error)")
+        }
+    }
+
     func chooseSourceCharacterUSDZ() {
         guard let url = FilePanelHelpers.openUSDZURL() else {
             exportStatus = "Source USDZ selection canceled."
@@ -1251,6 +1673,44 @@ final class RotoMotionViewModel: ObservableObject {
             animatedUSDZExportStatus = "Animated USDZ export failed: \(error.localizedDescription)"
             status = animatedUSDZExportStatus
             diagnostics.log("Animated USDZ export failed: \(error)")
+        }
+    }
+
+    func exportRaySolvedArmatureUSDZ() {
+        guard let result = rayAnimationSolveResult else {
+            raySolvedUSDZExportStatus = "Solve full animation before USDZ export."
+            status = raySolvedUSDZExportStatus
+            diagnostics.log(raySolvedUSDZExportStatus)
+            return
+        }
+
+        guard let outputDir = FilePanelHelpers.chooseOutputDirectory() else {
+            raySolvedUSDZExportStatus = "Ray solve USDZ export canceled."
+            status = raySolvedUSDZExportStatus
+            diagnostics.log(raySolvedUSDZExportStatus)
+            return
+        }
+
+        do {
+            let output = try RotoRaySolvedUSDZExporter.exportUSDZ(
+                result: result,
+                clipID: raySolvedUSDZClipID,
+                outputDirectory: outputDir
+            )
+
+            raySolvedUSDZExportStatus = "Exported ray solve USDZ: \(output.path)"
+            status = raySolvedUSDZExportStatus
+            diagnostics.log("""
+            Ray solve USDZ export complete:
+              output: \(output.path)
+              frames: \(result.frames.count)
+              joints: \(result.frames.first?.jointPositions.count ?? 0)
+            """)
+            NSWorkspace.shared.open(output.deletingLastPathComponent())
+        } catch {
+            raySolvedUSDZExportStatus = "Ray solve USDZ export failed: \(error.localizedDescription)"
+            status = raySolvedUSDZExportStatus
+            diagnostics.log("Ray solve USDZ export failed: \(error)")
         }
     }
 

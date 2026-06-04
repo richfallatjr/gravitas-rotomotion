@@ -1,6 +1,7 @@
 import AppKit
 import SceneKit
 import SwiftUI
+import simd
 
 struct RotoSceneVideoViewport: NSViewRepresentable {
     let image: NSImage?
@@ -11,11 +12,16 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let smoothedFrame: SmoothedMeshyPoseCapture.Frame?
 
     let groundPlane: GroundPlaneController?
+    let raySolveResult: RotoRaySolveResult?
+    let raySolvedFrame: RotoRayAnimationSolveResult.Frame?
 
     let showRawVision: Bool
     let showNormalizedMeshy: Bool
     let showSmoothedMeshy: Bool
     let showGroundPlane: Bool
+    let showVisionRays: Bool
+    let showRaySolvedRig: Bool
+    let onVideoPlaneSizeChanged: ((CGSize) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -26,6 +32,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     }
 
     func updateNSView(_ view: SCNView, context: Context) {
+        context.coordinator.onVideoPlaneSizeChanged = onVideoPlaneSizeChanged
         context.coordinator.update(
             view: view,
             image: image,
@@ -34,10 +41,14 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             normalizedFrame: normalizedFrame,
             smoothedFrame: smoothedFrame,
             groundPlane: groundPlane,
+            raySolveResult: raySolveResult,
+            raySolvedFrame: raySolvedFrame,
             showRawVision: showRawVision,
             showNormalizedMeshy: showNormalizedMeshy,
             showSmoothedMeshy: showSmoothedMeshy,
-            showGroundPlane: showGroundPlane
+            showGroundPlane: showGroundPlane,
+            showVisionRays: showVisionRays,
+            showRaySolvedRig: showRaySolvedRig
         )
     }
 
@@ -49,6 +60,11 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private let normalizedOverlayRoot = SCNNode()
         private let smoothedOverlayRoot = SCNNode()
         private let groundRoot = SCNNode()
+        private let visionRayRoot = SCNNode()
+        private let solvedRigRoot = SCNNode()
+        private let solveErrorRoot = SCNNode()
+
+        var onVideoPlaneSizeChanged: ((CGSize) -> Void)?
 
         private var lastImageToken = -1
         private var lastImageObjectID: ObjectIdentifier?
@@ -99,11 +115,17 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             normalizedOverlayRoot.name = "NormalizedMeshyOverlayRoot"
             smoothedOverlayRoot.name = "SmoothedMeshyOverlayRoot"
             groundRoot.name = "GroundPlaneRoot"
+            visionRayRoot.name = "VisionRayRoot"
+            solvedRigRoot.name = "RaySolvedRigRoot"
+            solveErrorRoot.name = "RaySolveErrorRoot"
 
             scene.rootNode.addChildNode(groundRoot)
             scene.rootNode.addChildNode(rawOverlayRoot)
             scene.rootNode.addChildNode(normalizedOverlayRoot)
             scene.rootNode.addChildNode(smoothedOverlayRoot)
+            scene.rootNode.addChildNode(visionRayRoot)
+            scene.rootNode.addChildNode(solvedRigRoot)
+            scene.rootNode.addChildNode(solveErrorRoot)
 
             groundRoot.addChildNode(makeGroundPlaneNode())
         }
@@ -116,10 +138,14 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             normalizedFrame: NormalizedMeshyPoseCapture.Frame?,
             smoothedFrame: SmoothedMeshyPoseCapture.Frame?,
             groundPlane: GroundPlaneController?,
+            raySolveResult: RotoRaySolveResult?,
+            raySolvedFrame: RotoRayAnimationSolveResult.Frame?,
             showRawVision: Bool,
             showNormalizedMeshy: Bool,
             showSmoothedMeshy: Bool,
-            showGroundPlane: Bool
+            showGroundPlane: Bool,
+            showVisionRays: Bool,
+            showRaySolvedRig: Bool
         ) {
             view.allowsCameraControl = false
             view.pointOfView = cameraNode
@@ -138,6 +164,12 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             updateRawOverlay(rawFrame, visible: showRawVision)
             updateNormalizedOverlay(normalizedFrame, visible: showNormalizedMeshy)
             updateSmoothedOverlay(smoothedFrame, visible: showSmoothedMeshy)
+            updateRaySolveDebug(
+                result: raySolveResult,
+                raySolvedFrame: raySolvedFrame,
+                showRays: showVisionRays,
+                showSolvedRig: showRaySolvedRig
+            )
         }
 
         private func updateVideoPlaneIfNeeded(
@@ -161,6 +193,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             let planeWidth = planeHeight * aspect
 
             videoPlaneSize = CGSize(width: planeWidth, height: planeHeight)
+            onVideoPlaneSizeChanged?(videoPlaneSize)
 
             videoPlaneNode.geometry = makeVideoPlaneGeometry(
                 width: planeWidth,
@@ -188,6 +221,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             lastImageToken = -1
             lastImageObjectID = nil
             videoPlaneSize = CGSize(width: 9.0, height: 16.0)
+            onVideoPlaneSizeChanged?(videoPlaneSize)
             videoPlaneNode.geometry = makeVideoPlaneGeometry(
                 width: videoPlaneSize.width,
                 height: videoPlaneSize.height,
@@ -457,6 +491,156 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             }
         }
 
+        private func updateRaySolveDebug(
+            result: RotoRaySolveResult?,
+            raySolvedFrame: RotoRayAnimationSolveResult.Frame?,
+            showRays: Bool,
+            showSolvedRig: Bool
+        ) {
+            removeAllChildren(from: visionRayRoot)
+            removeAllChildren(from: solvedRigRoot)
+            removeAllChildren(from: solveErrorRoot)
+
+            guard let result else {
+                visionRayRoot.isHidden = true
+                solvedRigRoot.isHidden = !showSolvedRig || raySolvedFrame == nil
+                solveErrorRoot.isHidden = true
+
+                if showSolvedRig, let raySolvedFrame {
+                    drawSolvedRig(raySolvedFrame)
+                }
+
+                return
+            }
+
+            visionRayRoot.isHidden = !showRays
+            solvedRigRoot.isHidden = !showSolvedRig
+            solveErrorRoot.isHidden = !showSolvedRig
+
+            if showRays {
+                for (_, ray) in result.rays {
+                    visionRayRoot.addChildNode(
+                        makeLineNode(
+                            from: SCNVector3(ray.origin),
+                            to: SCNVector3(ray.end),
+                            color: NSColor.systemBlue.withAlphaComponent(0.35)
+                        )
+                    )
+                }
+            }
+
+            if showSolvedRig {
+                drawSolvedRig(result)
+                drawSolveErrors(result)
+            }
+        }
+
+        private func drawSolvedRig(_ frame: RotoRayAnimationSolveResult.Frame) {
+            for (a, b) in solvedRigBones {
+                guard let ja = frame.jointPositions[a],
+                      let jb = frame.jointPositions[b] else {
+                    continue
+                }
+
+                solvedRigRoot.addChildNode(
+                    makeLineNode(
+                        from: SCNVector3(ja),
+                        to: SCNVector3(jb),
+                        color: NSColor.systemGreen.withAlphaComponent(0.95)
+                    )
+                )
+            }
+
+            for (name, position) in frame.jointPositions {
+                let solved = frame.solvedJoints.contains(name)
+                let node = makePointNode(
+                    color: solved ? NSColor.systemGreen : NSColor.systemRed,
+                    radius: solved ? 0.08 : 0.06
+                )
+                node.position = SCNVector3(position)
+                solvedRigRoot.addChildNode(node)
+            }
+        }
+
+        private func drawSolvedRig(_ result: RotoRaySolveResult) {
+            for (a, b) in solvedRigBones {
+                guard let ja = result.joints[a],
+                      let jb = result.joints[b] else {
+                    continue
+                }
+
+                solvedRigRoot.addChildNode(
+                    makeLineNode(
+                        from: SCNVector3(ja.worldPosition),
+                        to: SCNVector3(jb.worldPosition),
+                        color: NSColor.systemGreen.withAlphaComponent(0.95)
+                    )
+                )
+            }
+
+            for (_, joint) in result.joints {
+                let node = makePointNode(
+                    color: joint.solved ? NSColor.systemGreen : NSColor.systemRed,
+                    radius: joint.solved ? 0.08 : 0.06
+                )
+                node.position = SCNVector3(joint.worldPosition)
+                solvedRigRoot.addChildNode(node)
+            }
+        }
+
+        private var solvedRigBones: [(String, String)] {
+            [
+                ("Hips", "Spine02"),
+                ("Spine02", "Spine01"),
+                ("Spine01", "Spine"),
+                ("Spine", "neck"),
+                ("neck", "Head"),
+                ("Head", "head_end"),
+                ("Head", "headfront"),
+                ("Spine", "LeftShoulder"),
+                ("LeftShoulder", "LeftArm"),
+                ("LeftArm", "LeftForeArm"),
+                ("LeftForeArm", "LeftHand"),
+                ("Spine", "RightShoulder"),
+                ("RightShoulder", "RightArm"),
+                ("RightArm", "RightForeArm"),
+                ("RightForeArm", "RightHand"),
+                ("Hips", "LeftUpLeg"),
+                ("LeftUpLeg", "LeftLeg"),
+                ("LeftLeg", "LeftFoot"),
+                ("LeftFoot", "LeftToeBase"),
+                ("Hips", "RightUpLeg"),
+                ("RightUpLeg", "RightLeg"),
+                ("RightLeg", "RightFoot"),
+                ("RightFoot", "RightToeBase")
+            ]
+        }
+
+        private func drawSolveErrors(_ result: RotoRaySolveResult) {
+            for (jointName, joint) in result.joints {
+                guard let ray = result.rays[jointName] else {
+                    continue
+                }
+
+                let closest = RotoRayRigSolver.closestPointOnRay(
+                    to: joint.worldPosition,
+                    ray: ray
+                )
+
+                guard simd_length(joint.worldPosition - closest) > 0.001 else {
+                    continue
+                }
+
+                solveErrorRoot.addChildNode(
+                    makeLineNode(
+                        from: SCNVector3(joint.worldPosition),
+                        to: SCNVector3(closest),
+                        color: NSColor.systemRed.withAlphaComponent(0.75)
+                    )
+                )
+            }
+        }
+
         private func updateGroundPlane(
             groundPlane: GroundPlaneController?,
             visible: Bool
@@ -524,6 +708,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             material.lightingModel = .constant
             material.diffuse.contents = color
             material.isDoubleSided = true
+            material.writesToDepthBuffer = false
+            material.readsFromDepthBuffer = false
 
             geometry.materials = [material]
             return SCNNode(geometry: geometry)
@@ -556,6 +742,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             material.lightingModel = .constant
             material.diffuse.contents = color
             material.isDoubleSided = true
+            material.writesToDepthBuffer = false
+            material.readsFromDepthBuffer = false
 
             geometry.materials = [material]
             return SCNNode(geometry: geometry)
@@ -577,5 +765,11 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 child.removeFromParentNode()
             }
         }
+    }
+}
+
+private extension SCNVector3 {
+    init(_ value: SIMD3<Float>) {
+        self.init(value.x, value.y, value.z)
     }
 }
