@@ -133,17 +133,17 @@ struct ContentView: View {
                     .lineLimit(1)
             }
 
-            RotoMotionVideoCard(
+            RotoSceneVideoViewport(
                 image: uiCurrentImage,
                 frameIndex: uiCurrentFrameIndex,
-                videoTimeSeconds: currentUIVideoTimeSeconds,
                 rawFrame: currentRawFrame,
                 normalizedFrame: currentNormalizedFrame,
                 smoothedFrame: nil,
-                showRawVisionPoints: roto.showRawVisionPoints,
-                showNormalizedMeshyPoints: roto.showNormalizedMeshyPoints,
-                showSmoothedMeshyPoints: false,
-                showSmoothingDeltaVectors: false
+                groundPlane: roto.groundPlane,
+                showRawVision: roto.showRawVisionPoints,
+                showNormalizedMeshy: roto.showNormalizedMeshyPoints,
+                showSmoothedMeshy: false,
+                showGroundPlane: roto.groundPlane.visible
             )
             .frame(minWidth: 620, minHeight: 520)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
