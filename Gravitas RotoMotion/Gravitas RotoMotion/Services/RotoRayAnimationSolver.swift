@@ -14,6 +14,7 @@ enum RotoRayAnimationSolver {
     ) -> RotoRayAnimationSolveResult {
         var results: [RotoRayAnimationSolveResult.Frame] = []
         var previousPositions: [String: SIMD3<Float>]?
+        var previousBodyBasis: RotoBodyBasis?
         let cameraOrigin = SIMD3<Float>(0, 0, 10)
         let calibration = scaledArmature(
             targetHeightMeters: targetHeightMeters,
@@ -30,10 +31,12 @@ enum RotoRayAnimationSolver {
                 videoPlaneZ: 0,
                 mode: mode,
                 previousFramePositions: previousPositions,
+                previousBodyBasis: previousBodyBasis,
                 settings: settings
             )
 
             previousPositions = solved.jointPositions
+            previousBodyBasis = solved.bodyBasis
 
             results.append(
                 RotoRayAnimationSolveResult.Frame(
@@ -43,7 +46,8 @@ enum RotoRayAnimationSolver {
                     localRotationsWXYZ: solved.localRotationsWXYZ,
                     projectionErrors: solved.projectionErrors,
                     solvedJoints: solved.solvedJoints,
-                    missingJoints: solved.missingJoints
+                    missingJoints: solved.missingJoints,
+                    bodyBasis: solved.bodyBasis
                 )
             )
         }

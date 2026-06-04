@@ -1,6 +1,18 @@
 import Foundation
 
 enum RetargetedAnimatedUSDZExporter {
+    struct ExportResult {
+        let outputUSDZ: URL
+        let workDirectory: URL
+        let raySolveReferenceJSON: URL
+        let exportInputJSON: URL
+        let readbackJSON: URL
+        let auditTextReport: URL
+        let auditJSONReport: URL
+        let auditIssueCount: Int
+        let auditHighSeverityCount: Int
+    }
+
     static func exportAnimatedTargetUSDZ(
         targetUSDZ: URL,
         solve: RotoRayAnimationSolveResult,
@@ -9,17 +21,25 @@ enum RetargetedAnimatedUSDZExporter {
         rootTranslationScale: Double,
         pythonExecutablePath: String,
         outputDirectory: URL
-    ) throws -> URL {
+    ) throws -> ExportResult {
         let safeClipID = sanitizeFileName(clipID)
-        let workDir = outputDirectory
-            .appendingPathComponent("\(safeClipID)_target_usdz_work", isDirectory: true)
-        let solvedJSON = workDir.appendingPathComponent("\(safeClipID)_solved_animation.json")
-        let scriptURL = workDir.appendingPathComponent("rotomotion_usdz_retarget.py")
         let outputUSDZ = outputDirectory
             .appendingPathComponent("\(safeClipID)_animated_target.usdz")
+        let workDir = outputDirectory
+            .appendingPathComponent("\(safeClipID)_animated_usdz_work", isDirectory: true)
+        let raySolveReferenceJSON = workDir.appendingPathComponent("ray_solve_reference.json")
+        let exportInputJSON = workDir.appendingPathComponent("animated_usdz_export_input.json")
+        let readbackJSON = workDir.appendingPathComponent("animated_usdz_readback.json")
+        let auditTextReport = workDir.appendingPathComponent("export_audit_report.txt")
+        let auditJSONReport = workDir.appendingPathComponent("export_audit_report.json")
+        let scriptURL = workDir.appendingPathComponent("rotomotion_usdz_retarget.py")
 
         if FileManager.default.fileExists(atPath: workDir.path) {
             try FileManager.default.removeItem(at: workDir)
+        }
+
+        if FileManager.default.fileExists(atPath: outputUSDZ.path) {
+            try FileManager.default.removeItem(at: outputUSDZ)
         }
 
         try FileManager.default.createDirectory(
@@ -27,10 +47,15 @@ enum RetargetedAnimatedUSDZExporter {
             withIntermediateDirectories: true
         )
 
+        try RaySolveReferenceJSONExporter.write(
+            solve: solve,
+            to: raySolveReferenceJSON
+        )
+
         try SolvedAnimationJSONExporter.write(
             solve: solve,
             includeHipsTranslation: includeHipsTranslation,
-            to: solvedJSON
+            to: exportInputJSON
         )
 
         try RotoMotionUSDZRetargetPythonScript.contents.write(
@@ -46,13 +71,17 @@ enum RetargetedAnimatedUSDZExporter {
                 "--target-usdz",
                 targetUSDZ.path,
                 "--solved-json",
-                solvedJSON.path,
+                exportInputJSON.path,
+                "--ray-solve-reference",
+                raySolveReferenceJSON.path,
                 "--clip-id",
                 clipID,
                 "--work-dir",
                 workDir.path,
                 "--output-usdz",
                 outputUSDZ.path,
+                "--readback-json",
+                readbackJSON.path,
                 "--root-translation-scale",
                 String(format: "%.8f", rootTranslationScale)
             ] + (includeHipsTranslation ? ["--include-hips-translation"] : [])
@@ -87,7 +116,80 @@ enum RetargetedAnimatedUSDZExporter {
             )
         }
 
-        return outputUSDZ
+        let outputAttributes = try FileManager.default.attributesOfItem(
+            atPath: outputUSDZ.path
+        )
+
+        let outputSize = (outputAttributes[.size] as? NSNumber)?.int64Value ?? 0
+
+        guard outputSize > 0 else {
+            throw NSError(
+                domain: "GravitasRotoMotion",
+                code: 8203,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "Animated target USDZ export created an empty file: \(outputUSDZ.path)"
+                ]
+            )
+        }
+
+        let audit: RotoMotionExportKeyAuditor.Output
+
+        do {
+            audit = try RotoMotionExportKeyAuditor.writeAudit(
+                solve: solve,
+                exportInputURL: exportInputJSON,
+                readbackURL: readbackJSON,
+                textReportURL: auditTextReport,
+                jsonReportURL: auditJSONReport
+            )
+        } catch {
+            let message = """
+            RotoMotion Export Key Audit
+
+            Audit failed, but the animated USDZ was created:
+            \(outputUSDZ.path)
+
+            Error:
+            \(error.localizedDescription)
+            """
+
+            try? message.write(
+                to: auditTextReport,
+                atomically: true,
+                encoding: .utf8
+            )
+
+            let json: [String: Any] = [
+                "schema": "com.gravitas.rotomotion.export_audit.v0",
+                "auditFailed": true,
+                "outputUSDZ": outputUSDZ.path,
+                "error": error.localizedDescription
+            ]
+
+            if let data = try? JSONSerialization.data(
+                withJSONObject: json,
+                options: [.prettyPrinted, .sortedKeys]
+            ) {
+                try? data.write(to: auditJSONReport, options: .atomic)
+            }
+
+            audit = .init(
+                issueCount: 1,
+                highSeverityCount: 1
+            )
+        }
+
+        return ExportResult(
+            outputUSDZ: outputUSDZ,
+            workDirectory: workDir,
+            raySolveReferenceJSON: raySolveReferenceJSON,
+            exportInputJSON: exportInputJSON,
+            readbackJSON: readbackJSON,
+            auditTextReport: auditTextReport,
+            auditJSONReport: auditJSONReport,
+            auditIssueCount: audit.issueCount,
+            auditHighSeverityCount: audit.highSeverityCount
+        )
     }
 
     private static func run(
@@ -132,4 +234,5 @@ enum RetargetedAnimatedUSDZExporter {
 
         return sanitized.isEmpty ? "rotomotion_retarget" : sanitized
     }
+
 }

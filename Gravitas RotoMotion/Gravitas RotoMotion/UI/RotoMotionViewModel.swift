@@ -103,12 +103,14 @@ final class RotoMotionViewModel: ObservableObject {
 
     @Published var referenceSolveUSDZURL: URL?
     @Published var targetCharacterUSDZURL: URL?
-    @Published var retargetClipID = "rotomotion_ray_solve_01"
+    @Published var retargetClipID = "rotomotion_inside_out_01"
     @Published var includeHipsTranslationInUSDZ = true
     @Published var scaleRootMotionToTargetHeight = true
     @Published var referenceRigProfile: USDZSkeletonProfile?
     @Published var targetRigProfile: USDZSkeletonProfile?
     @Published var usdzRetargetStatus = "No animated target USDZ exported."
+    @Published var lastAnimatedUSDZExportURL: URL?
+    @Published var lastAnimatedUSDZExportFolderURL: URL?
 
     @Published var showVisionRays = true
     @Published var showRaySolvedRig = true
@@ -537,6 +539,8 @@ final class RotoMotionViewModel: ObservableObject {
         rayAnimationSolveStatus = "Ray animation solve not run."
         raySolvedUSDZExportStatus = "No ray solve USDZ exported."
         usdzRetargetStatus = "No animated target USDZ exported."
+        lastAnimatedUSDZExportURL = nil
+        lastAnimatedUSDZExportFolderURL = nil
         decodedFrames = []
         currentVideoFrameImage = nil
         currentFrameIndex = 0
@@ -860,6 +864,8 @@ final class RotoMotionViewModel: ObservableObject {
             rayAnimationSolveStatus = "Ray animation solve not run."
             raySolvedUSDZExportStatus = "No ray solve USDZ exported."
             usdzRetargetStatus = "No animated target USDZ exported."
+            lastAnimatedUSDZExportURL = nil
+            lastAnimatedUSDZExportFolderURL = nil
             maxFrameIndex = max(maxFrameIndex, max(0, capture.frames.count - 1))
             if currentFrameIndex > maxFrameIndex {
                 setCurrentFrameIndex(maxFrameIndex)
@@ -933,6 +939,8 @@ final class RotoMotionViewModel: ObservableObject {
         rayAnimationSolveStatus = "Ray animation solve not run."
         raySolvedUSDZExportStatus = "No ray solve USDZ exported."
         usdzRetargetStatus = "No animated target USDZ exported."
+        lastAnimatedUSDZExportURL = nil
+        lastAnimatedUSDZExportFolderURL = nil
         maxFrameIndex = max(maxFrameIndex, max(0, (normalizedCapture?.frames.count ?? 0) - 1))
         let frameCount = normalizedCapture?.frames.count ?? 0
         let firstJointCount = normalizedCapture?.frames.first?.joints.count ?? 0
@@ -1002,6 +1010,8 @@ final class RotoMotionViewModel: ObservableObject {
         rayAnimationSolveStatus = "Ray animation solve not run."
         raySolvedUSDZExportStatus = "No ray solve USDZ exported."
         usdzRetargetStatus = "No animated target USDZ exported."
+        lastAnimatedUSDZExportURL = nil
+        lastAnimatedUSDZExportFolderURL = nil
         let frameCount = smoothedCapture?.frames.count ?? 0
         let firstJointCount = smoothedCapture?.frames.first?.joints.count ?? 0
         let firstDeltaMagnitude: Double = {
@@ -1295,6 +1305,8 @@ final class RotoMotionViewModel: ObservableObject {
         referenceRigProfile = nil
         rayAnimationSolveResult = nil
         rayAnimationSolveStatus = "Ray animation solve cleared because reference USDZ changed."
+        lastAnimatedUSDZExportURL = nil
+        lastAnimatedUSDZExportFolderURL = nil
         usdzRetargetStatus = "Selected reference USDZ: \(url.lastPathComponent)"
         status = usdzRetargetStatus
         diagnostics.log("Selected reference solve USDZ: \(url.path)")
@@ -1312,6 +1324,8 @@ final class RotoMotionViewModel: ObservableObject {
 
         targetCharacterUSDZURL = url
         targetRigProfile = nil
+        lastAnimatedUSDZExportURL = nil
+        lastAnimatedUSDZExportFolderURL = nil
         usdzRetargetStatus = "Selected target USDZ: \(url.lastPathComponent)"
         status = usdzRetargetStatus
         diagnostics.log("Selected target character USDZ: \(url.path)")
@@ -1325,6 +1339,25 @@ final class RotoMotionViewModel: ObservableObject {
 
         if toolStatus.ready {
             usdzRetargetStatus = "OpenUSD tools ready: \(toolStatus.pythonExecutablePath ?? "python unknown")"
+        } else {
+            usdzRetargetStatus = """
+            OpenUSD tools missing.
+            Python OK: \(toolStatus.pythonOK)
+            usdzip OK: \(toolStatus.usdzipOK)
+            \(toolStatus.pythonMessage)
+            """
+        }
+
+        status = usdzRetargetStatus
+        diagnostics.log(usdzRetargetStatus)
+    }
+
+    func checkOpenUSDToolsForExport() {
+        let toolStatus = OpenUSDToolChecker.check()
+        openUSDToolStatus = toolStatus
+
+        if toolStatus.ready {
+            usdzRetargetStatus = "OpenUSD tools ready. usdzip: \(toolStatus.usdzipPath ?? "unknown")"
         } else {
             usdzRetargetStatus = """
             OpenUSD tools missing.
@@ -1414,13 +1447,30 @@ final class RotoMotionViewModel: ObservableObject {
             diagnostics.log(usdzRetargetStatus)
         } catch {
             targetRigProfile = nil
-            usdzRetargetStatus = "Target USDZ inspect failed: \(error.localizedDescription)"
+
+            if error.localizedDescription.contains("No UsdSkel.Skeleton") {
+                usdzRetargetStatus = """
+                Target USDZ has no UsdSkel skeleton.
+                Export will preserve the target model and add the animated session armature.
+                """
+            } else {
+                usdzRetargetStatus = "Target USDZ inspect failed: \(error.localizedDescription)"
+            }
+
             status = usdzRetargetStatus
             diagnostics.log(usdzRetargetStatus)
         }
     }
 
     func exportAnimatedTargetUSDZFromRaySolve() {
+        diagnostics.log("""
+        Export Animated Target USDZ requested:
+          targetUSDZ: \(targetCharacterUSDZURL?.path ?? "nil")
+          clipID: \(retargetClipID)
+          raySolveExists: \(rayAnimationSolveResult != nil)
+          solvedFrames: \(rayAnimationSolveResult?.frames.count ?? 0)
+        """)
+
         guard let targetCharacterUSDZURL else {
             usdzRetargetStatus = "Choose target character USDZ first."
             status = usdzRetargetStatus
@@ -1429,13 +1479,32 @@ final class RotoMotionViewModel: ObservableObject {
         }
 
         guard let solve = rayAnimationSolveResult else {
-            usdzRetargetStatus = "Run full ray animation solve first."
+            usdzRetargetStatus = "Run full inside-out ray animation solve before exporting."
             status = usdzRetargetStatus
             diagnostics.log(usdzRetargetStatus)
             return
         }
 
-        guard let pythonExecutablePath = checkedOpenUSDPythonForRetarget(requireUSDZip: true) else {
+        guard !solve.frames.isEmpty else {
+            usdzRetargetStatus = "Ray solve has 0 frames. Cannot export."
+            status = usdzRetargetStatus
+            diagnostics.log(usdzRetargetStatus)
+            return
+        }
+
+        let toolStatus = OpenUSDToolChecker.check()
+        openUSDToolStatus = toolStatus
+
+        guard toolStatus.ready,
+              let pythonExecutablePath = toolStatus.pythonExecutablePath else {
+            usdzRetargetStatus = """
+            Cannot export animated USDZ: OpenUSD tools missing.
+            Python OK: \(toolStatus.pythonOK)
+            usdzip OK: \(toolStatus.usdzipOK)
+            \(toolStatus.pythonMessage)
+            """
+            status = usdzRetargetStatus
+            diagnostics.log(usdzRetargetStatus)
             return
         }
 
@@ -1451,9 +1520,14 @@ final class RotoMotionViewModel: ObservableObject {
         }
 
         let didAccessTarget = targetCharacterUSDZURL.startAccessingSecurityScopedResource()
+        let didAccessOutput = outputDir.startAccessingSecurityScopedResource()
         defer {
             if didAccessTarget {
                 targetCharacterUSDZURL.stopAccessingSecurityScopedResource()
+            }
+
+            if didAccessOutput {
+                outputDir.stopAccessingSecurityScopedResource()
             }
         }
 
@@ -1462,9 +1536,8 @@ final class RotoMotionViewModel: ObservableObject {
         let rootTranslationScale = scaleRootMotionToTargetHeight
             ? targetHeight / sourceHeight
             : 1.0
-
         do {
-            let output = try RetargetedAnimatedUSDZExporter.exportAnimatedTargetUSDZ(
+            let exportResult = try RetargetedAnimatedUSDZExporter.exportAnimatedTargetUSDZ(
                 targetUSDZ: targetCharacterUSDZURL,
                 solve: solve,
                 clipID: retargetClipID,
@@ -1474,23 +1547,68 @@ final class RotoMotionViewModel: ObservableObject {
                 outputDirectory: outputDir
             )
 
-            usdzRetargetStatus = "Exported animated target USDZ: \(output.path)"
+            lastAnimatedUSDZExportURL = exportResult.outputUSDZ
+            lastAnimatedUSDZExportFolderURL = exportResult.outputUSDZ.deletingLastPathComponent()
+
+            let exportedAttributes = try? FileManager.default.attributesOfItem(
+                atPath: exportResult.outputUSDZ.path
+            )
+            let exportedSizeBytes = (exportedAttributes?[.size] as? NSNumber)?.int64Value ?? 0
+
+            usdzRetargetStatus = """
+            Exported animated target USDZ file:
+            \(exportResult.outputUSDZ.path)
+            Size: \(exportedSizeBytes) bytes
+
+            Audit:
+            \(exportResult.auditHighSeverityCount) high / \(exportResult.auditIssueCount) total issues
+            \(exportResult.auditTextReport.path)
+            """
             status = usdzRetargetStatus
             diagnostics.log("""
             Animated target USDZ export complete:
-              output: \(output.path)
+              output: \(exportResult.outputUSDZ.path)
+              workDir: \(exportResult.workDirectory.path)
+              raySolveReference: \(exportResult.raySolveReferenceJSON.path)
+              exportInput: \(exportResult.exportInputJSON.path)
+              readback: \(exportResult.readbackJSON.path)
+              auditText: \(exportResult.auditTextReport.path)
+              auditJSON: \(exportResult.auditJSONReport.path)
+              auditIssues: \(exportResult.auditHighSeverityCount) high / \(exportResult.auditIssueCount) total
               target: \(targetCharacterUSDZURL.lastPathComponent)
               frames: \(solve.frames.count)
               includeHipsTranslation: \(includeHipsTranslationInUSDZ)
               rootTranslationScale: \(String(format: "%.4f", rootTranslationScale))
               python: \(pythonExecutablePath)
             """)
-            NSWorkspace.shared.open(output.deletingLastPathComponent())
+            NSWorkspace.shared.activateFileViewerSelecting([exportResult.outputUSDZ])
         } catch {
-            usdzRetargetStatus = "Animated target USDZ export failed: \(error.localizedDescription)"
+            lastAnimatedUSDZExportURL = nil
+            lastAnimatedUSDZExportFolderURL = nil
+
+            usdzRetargetStatus = """
+            Animated target USDZ export failed:
+            \(error.localizedDescription)
+            """
             status = usdzRetargetStatus
             diagnostics.log("Animated target USDZ export failed: \(error)")
         }
+    }
+
+    func revealLastAnimatedUSDZExport() {
+        if let lastAnimatedUSDZExportURL {
+            NSWorkspace.shared.activateFileViewerSelecting([lastAnimatedUSDZExportURL])
+            return
+        }
+
+        if let lastAnimatedUSDZExportFolderURL {
+            NSWorkspace.shared.open(lastAnimatedUSDZExportFolderURL)
+            return
+        }
+
+        usdzRetargetStatus = "No animated USDZ export to reveal."
+        status = usdzRetargetStatus
+        diagnostics.log(usdzRetargetStatus)
     }
 
     func chooseSourceCharacterUSDZ() {
@@ -1698,6 +1816,9 @@ final class RotoMotionViewModel: ObservableObject {
                 outputDirectory: outputDir
             )
 
+            lastAnimatedUSDZExportURL = output
+            lastAnimatedUSDZExportFolderURL = output.deletingLastPathComponent()
+
             raySolvedUSDZExportStatus = "Exported ray solve USDZ: \(output.path)"
             status = raySolvedUSDZExportStatus
             diagnostics.log("""
@@ -1706,8 +1827,11 @@ final class RotoMotionViewModel: ObservableObject {
               frames: \(result.frames.count)
               joints: \(result.frames.first?.jointPositions.count ?? 0)
             """)
-            NSWorkspace.shared.open(output.deletingLastPathComponent())
+            NSWorkspace.shared.activateFileViewerSelecting([output])
         } catch {
+            lastAnimatedUSDZExportURL = nil
+            lastAnimatedUSDZExportFolderURL = nil
+
             raySolvedUSDZExportStatus = "Ray solve USDZ export failed: \(error.localizedDescription)"
             status = raySolvedUSDZExportStatus
             diagnostics.log("Ray solve USDZ export failed: \(error)")

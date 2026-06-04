@@ -9,4 +9,5 @@ struct RotoRayIKSolveResult: Equatable {
     let projectionErrors: [String: Float]
     let solvedJoints: Set<String>
     let missingJoints: Set<String>
+    let bodyBasis: RotoBodyBasis
 }

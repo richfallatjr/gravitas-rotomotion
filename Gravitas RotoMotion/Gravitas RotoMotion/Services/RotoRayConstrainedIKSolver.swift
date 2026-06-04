@@ -11,10 +11,16 @@ enum RotoRayConstrainedIKSolver {
     struct Settings: Equatable {
         var maxIterations = 16
         var epsilon: Float = 0.0005
-        var midRayPull: Float = 0.35
+        var midRayPull: Float = 0.25
         var polePull: Float = 0.45
-        var previousFramePull: Float = 0.18
+        var previousFramePull: Float = 0.35
         var confidenceMinimum: Float = 0.01
+        var maxJointStepMeters: Float = 0.20
+        var stabilizeBodyFacing = true
+        var facingFlipDotThreshold: Float = 0.15
+        var torsoPreviousFramePull: Float = 0.55
+        var limbPreviousFramePull: Float = 0.30
+        var preferPreviousRayIntersection = true
 
         static let `default` = Settings()
     }
@@ -27,6 +33,7 @@ enum RotoRayConstrainedIKSolver {
         videoPlaneZ: Float = 0,
         mode: Mode,
         previousFramePositions: [String: SIMD3<Float>]?,
+        previousBodyBasis: RotoBodyBasis?,
         settings: Settings = .default
     ) -> RotoRayIKSolveResult {
         let rays = RotoCameraRayBuilder.buildRays(
@@ -52,7 +59,7 @@ enum RotoRayConstrainedIKSolver {
         )
 
         solveSingleRayChain(
-            ["Hips", "Spine02", "Spine01", "Spine", "neck", "Head", "head_end", "headfront"],
+            ["Hips", "Spine02", "Spine01", "Spine"],
             rays: rays,
             jointByName: jointByName,
             previousFramePositions: previousFramePositions,
@@ -60,40 +67,62 @@ enum RotoRayConstrainedIKSolver {
             solved: &solved,
             missing: &missing,
             errors: &errors,
-            settings: settings
+            settings: settings,
+            previousPull: settings.torsoPreviousFramePull
+        )
+
+        solveBridgeJoint(
+            jointName: "LeftShoulder",
+            parentName: "Spine",
+            rays: rays,
+            jointByName: jointByName,
+            previousFramePositions: previousFramePositions,
+            jointPositions: &jointPositions,
+            solved: &solved,
+            missing: &missing,
+            settings: settings,
+            previousPull: settings.torsoPreviousFramePull
+        )
+
+        solveBridgeJoint(
+            jointName: "RightShoulder",
+            parentName: "Spine",
+            rays: rays,
+            jointByName: jointByName,
+            previousFramePositions: previousFramePositions,
+            jointPositions: &jointPositions,
+            solved: &solved,
+            missing: &missing,
+            settings: settings,
+            previousPull: settings.torsoPreviousFramePull
+        )
+
+        let bodyBasis = RotoBodyBasisSolver.makeBasis(
+            jointPositions: jointPositions,
+            previousBasis: settings.stabilizeBodyFacing ? previousBodyBasis : nil,
+            flipDotThreshold: settings.facingFlipDotThreshold
+        )
+
+        solveSingleRayChain(
+            ["Spine", "neck", "Head", "head_end", "headfront"],
+            rays: rays,
+            jointByName: jointByName,
+            previousFramePositions: previousFramePositions,
+            jointPositions: &jointPositions,
+            solved: &solved,
+            missing: &missing,
+            errors: &errors,
+            settings: settings,
+            previousPull: settings.torsoPreviousFramePull
         )
 
         if mode == .fullBody {
-            solveBridgeJoint(
-                jointName: "LeftShoulder",
-                parentName: "Spine",
-                rays: rays,
-                jointByName: jointByName,
-                previousFramePositions: previousFramePositions,
-                jointPositions: &jointPositions,
-                solved: &solved,
-                missing: &missing,
-                settings: settings
-            )
-
-            solveBridgeJoint(
-                jointName: "RightShoulder",
-                parentName: "Spine",
-                rays: rays,
-                jointByName: jointByName,
-                previousFramePositions: previousFramePositions,
-                jointPositions: &jointPositions,
-                solved: &solved,
-                missing: &missing,
-                settings: settings
-            )
-
             solveIterativeTwoBoneLimb(
                 rootName: "LeftShoulder",
                 midName: "LeftArm",
                 endName: "LeftForeArm",
                 targetName: "LeftHand",
-                pole: SIMD3<Float>(0, 0, 1),
+                pole: bodyBasis.forward,
                 rays: rays,
                 jointByName: jointByName,
                 previousFramePositions: previousFramePositions,
@@ -109,7 +138,7 @@ enum RotoRayConstrainedIKSolver {
                 midName: "RightArm",
                 endName: "RightForeArm",
                 targetName: "RightHand",
-                pole: SIMD3<Float>(0, 0, 1),
+                pole: bodyBasis.forward,
                 rays: rays,
                 jointByName: jointByName,
                 previousFramePositions: previousFramePositions,
@@ -129,7 +158,8 @@ enum RotoRayConstrainedIKSolver {
                 jointPositions: &jointPositions,
                 solved: &solved,
                 missing: &missing,
-                settings: settings
+                settings: settings,
+                previousPull: settings.torsoPreviousFramePull
             )
 
             solveBridgeJoint(
@@ -141,7 +171,8 @@ enum RotoRayConstrainedIKSolver {
                 jointPositions: &jointPositions,
                 solved: &solved,
                 missing: &missing,
-                settings: settings
+                settings: settings,
+                previousPull: settings.torsoPreviousFramePull
             )
 
             solveIterativeTwoBoneLimb(
@@ -149,7 +180,7 @@ enum RotoRayConstrainedIKSolver {
                 midName: "LeftLeg",
                 endName: "LeftFoot",
                 targetName: "LeftToeBase",
-                pole: SIMD3<Float>(0, 0, 1),
+                pole: bodyBasis.forward,
                 rays: rays,
                 jointByName: jointByName,
                 previousFramePositions: previousFramePositions,
@@ -165,7 +196,7 @@ enum RotoRayConstrainedIKSolver {
                 midName: "RightLeg",
                 endName: "RightFoot",
                 targetName: "RightToeBase",
-                pole: SIMD3<Float>(0, 0, 1),
+                pole: bodyBasis.forward,
                 rays: rays,
                 jointByName: jointByName,
                 previousFramePositions: previousFramePositions,
@@ -189,7 +220,8 @@ enum RotoRayConstrainedIKSolver {
             localRotationsWXYZ: rotations,
             projectionErrors: errors,
             solvedJoints: solved,
-            missingJoints: missing
+            missingJoints: missing,
+            bodyBasis: bodyBasis
         )
     }
 
@@ -205,7 +237,7 @@ enum RotoRayConstrainedIKSolver {
             let p = rayPlaneZIntersection(ray: ray, z: videoPlaneZ)
 
             if let previous = previousFramePositions?["Hips"] {
-                jointPositions["Hips"] = mix(previous, p, 0.75)
+                jointPositions["Hips"] = mix(previous, p, 0.25)
             } else {
                 jointPositions["Hips"] = p
             }
@@ -229,7 +261,8 @@ enum RotoRayConstrainedIKSolver {
         solved: inout Set<String>,
         missing: inout Set<String>,
         errors: inout [String: Float],
-        settings: Settings
+        settings: Settings,
+        previousPull: Float
     ) {
         guard chain.count >= 2 else { return }
 
@@ -251,12 +284,13 @@ enum RotoRayConstrainedIKSolver {
                     ray: ray,
                     parent: parentPosition,
                     distance: length,
-                    fallbackDirection: fallbackDirection(for: jointName)
+                    fallbackDirection: fallbackDirection(for: jointName),
+                    previous: settings.preferPreviousRayIntersection ? previousFramePositions?[jointName] : nil
                 )
 
                 if let previous = previousFramePositions?[jointName] {
                     p = preserveBoneLength(
-                        candidate: mix(previous, p, 1.0 - settings.previousFramePull),
+                        candidate: mix(previous, p, 1.0 - previousPull),
                         parent: parentPosition,
                         length: length,
                         fallback: p - parentPosition
@@ -292,7 +326,8 @@ enum RotoRayConstrainedIKSolver {
         jointPositions: inout [String: SIMD3<Float>],
         solved: inout Set<String>,
         missing: inout Set<String>,
-        settings: Settings
+        settings: Settings,
+        previousPull: Float
     ) {
         guard let parent = jointPositions[parentName],
               let joint = jointByName[jointName] else {
@@ -308,7 +343,8 @@ enum RotoRayConstrainedIKSolver {
                 ray: ray,
                 parent: parent,
                 distance: length,
-                fallbackDirection: fallbackDirection(for: jointName)
+                fallbackDirection: fallbackDirection(for: jointName),
+                previous: settings.preferPreviousRayIntersection ? previousFramePositions?[jointName] : nil
             )
             solved.insert(jointName)
         } else if let previous = previousFramePositions?[jointName] {
@@ -319,12 +355,23 @@ enum RotoRayConstrainedIKSolver {
             missing.insert(jointName)
         }
 
-        jointPositions[jointName] = preserveBoneLength(
+        var constrained = preserveBoneLength(
             candidate: candidate,
             parent: parent,
             length: length,
             fallback: fallbackDirection(for: jointName)
         )
+
+        if let previous = previousFramePositions?[jointName] {
+            constrained = preserveBoneLength(
+                candidate: mix(previous, constrained, 1.0 - previousPull),
+                parent: parent,
+                length: length,
+                fallback: constrained - parent
+            )
+        }
+
+        jointPositions[jointName] = constrained
     }
 
     private static func solveIterativeTwoBoneLimb(
@@ -355,15 +402,25 @@ enum RotoRayConstrainedIKSolver {
         let lowerLength = max(Float(endJoint.boneLengthToParent), 0.0001)
         let midRay = rays[midName]
 
-        var end = closestReachablePointOnRay(
-            ray: endRay,
-            root: root,
-            minDistance: abs(upperLength - lowerLength) + 0.0001,
-            maxDistance: upperLength + lowerLength - 0.0001
-        )
+        var end: SIMD3<Float>
 
         if let previousEnd = previousFramePositions?[endName] {
-            end = mix(previousEnd, end, 1.0 - settings.previousFramePull)
+            end = closestReachablePointOnRay(
+                ray: endRay,
+                root: root,
+                minDistance: abs(upperLength - lowerLength) + 0.0001,
+                maxDistance: upperLength + lowerLength - 0.0001,
+                previous: settings.preferPreviousRayIntersection ? previousEnd : nil
+            )
+            end = mix(previousEnd, end, 1.0 - settings.limbPreviousFramePull)
+        } else {
+            end = closestReachablePointOnRay(
+                ray: endRay,
+                root: root,
+                minDistance: abs(upperLength - lowerLength) + 0.0001,
+                maxDistance: upperLength + lowerLength - 0.0001,
+                previous: nil
+            )
         }
 
         var mid = solveMidFromRootEndPole(
@@ -376,7 +433,7 @@ enum RotoRayConstrainedIKSolver {
 
         if let previousMid = previousFramePositions?[midName] {
             mid = preserveBoneLength(
-                candidate: mix(previousMid, mid, 1.0 - settings.previousFramePull),
+                candidate: mix(previousMid, mid, 1.0 - settings.limbPreviousFramePull),
                 parent: root,
                 length: upperLength,
                 fallback: mid - root
@@ -403,7 +460,8 @@ enum RotoRayConstrainedIKSolver {
                 ray: endRay,
                 parent: mid,
                 distance: lowerLength,
-                fallbackDirection: end - mid
+                fallbackDirection: end - mid,
+                previous: settings.preferPreviousRayIntersection ? previousFramePositions?[endName] : nil
             )
 
             let poleMid = solveMidFromRootEndPole(
@@ -483,9 +541,12 @@ enum RotoRayConstrainedIKSolver {
         ray: RotoCameraRay,
         root: SIMD3<Float>,
         minDistance: Float,
-        maxDistance: Float
+        maxDistance: Float,
+        previous: SIMD3<Float>?
     ) -> SIMD3<Float> {
-        let closest = closestPointOnRay(to: root, ray: ray)
+        let closest = previous.map {
+            closestPointOnRay(to: $0, ray: ray)
+        } ?? closestPointOnRay(to: root, ray: ray)
         let raw = closest - root
         let dist = simd_length(raw)
 
@@ -504,7 +565,8 @@ enum RotoRayConstrainedIKSolver {
         ray: RotoCameraRay,
         parent: SIMD3<Float>,
         distance: Float,
-        fallbackDirection: SIMD3<Float>
+        fallbackDirection: SIMD3<Float>,
+        previous: SIMD3<Float>?
     ) -> SIMD3<Float> {
         let direction = ray.direction
         let oc = ray.origin - parent
@@ -521,8 +583,20 @@ enum RotoRayConstrainedIKSolver {
                 .filter { $0.isFinite && $0 >= 0 }
                 .map { ray.origin + direction * $0 }
 
+            if let previous,
+               let best = candidates.min(by: {
+                   simd_length_squared($0 - previous) < simd_length_squared($1 - previous)
+               }) {
+                return best
+            }
+
+            let fallbackTarget = parent + normalizeSafe(
+                fallbackDirection,
+                fallback: SIMD3<Float>(0, 1, 0)
+            ) * distance
+
             if let best = candidates.min(by: {
-                simd_length_squared($0 - parent) < simd_length_squared($1 - parent)
+                simd_length_squared($0 - fallbackTarget) < simd_length_squared($1 - fallbackTarget)
             }) {
                 return best
             }

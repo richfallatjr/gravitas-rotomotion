@@ -270,16 +270,6 @@ struct ContentView: View {
     private var usdzRetargetExportPanel: some View {
         GroupBox("USDZ Retarget Export") {
             VStack(alignment: .leading, spacing: 8) {
-                Button("Choose Reference / Solve USDZ") {
-                    roto.chooseReferenceSolveUSDZ()
-                    uiStatus = roto.status
-                    pipelineRenderToken += 1
-                }
-
-                Text(roto.referenceSolveUSDZURL?.lastPathComponent ?? "No reference USDZ")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
                 Button("Choose Target Character USDZ") {
                     roto.chooseTargetCharacterUSDZ()
                     uiStatus = roto.status
@@ -305,7 +295,7 @@ struct ContentView: View {
 
                 Text(openUSDRetargetToolsText)
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(roto.openUSDToolStatus?.ready == true ? Color.green : Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 Button("Export Animated Target USDZ") {
@@ -314,6 +304,13 @@ struct ContentView: View {
                     pipelineRenderToken += 1
                 }
                 .disabled(roto.targetCharacterUSDZURL == nil || roto.rayAnimationSolveResult == nil)
+
+                Button("Reveal Last Export") {
+                    roto.revealLastAnimatedUSDZExport()
+                    uiStatus = roto.status
+                    pipelineRenderToken += 1
+                }
+                .disabled(roto.lastAnimatedUSDZExportURL == nil)
 
                 Text(usdzRetargetReadinessText)
                     .font(.caption2)
@@ -324,6 +321,13 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                if roto.rayAnimationSolveResult == nil {
+                    Text("Run Solve Full Animation before exporting.")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -344,10 +348,6 @@ struct ContentView: View {
     private var usdzRetargetReadinessText: String {
         var needs: [String] = []
 
-        if roto.referenceSolveUSDZURL == nil {
-            needs.append("reference USDZ")
-        }
-
         if roto.targetCharacterUSDZURL == nil {
             needs.append("target USDZ")
         }
@@ -363,12 +363,12 @@ struct ContentView: View {
         let frames = roto.rayAnimationSolveResult?.frames.count ?? 0
         let referenceHeight = roto.referenceRigProfile?.estimatedHeightMeters
             .map { String(format: "%.3f m", $0) }
-            ?? "unknown reference height"
+            ?? "default/reference not selected"
         let targetHeight = roto.targetRigProfile?.estimatedHeightMeters
             .map { String(format: "%.3f m", $0) }
-            ?? "unknown target height"
+            ?? "target height unknown"
 
-        return "Exports target character animation: \(frames) frames, reference \(referenceHeight), target \(targetHeight)."
+        return "Exports animated target USDZ: \(frames) frames, reference \(referenceHeight), target \(targetHeight)."
     }
 
     private var rayRigSolvePanel: some View {
@@ -381,6 +381,16 @@ struct ContentView: View {
                         Text(mode.displayName).tag(mode)
                     }
                 }
+
+                Button("Choose Reference / Solve USDZ") {
+                    roto.chooseReferenceSolveUSDZ()
+                    uiStatus = roto.status
+                    pipelineRenderToken += 1
+                }
+
+                Text(roto.referenceSolveUSDZURL?.lastPathComponent ?? "No reference USDZ")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 HStack {
                     Text("Target Height")
@@ -420,6 +430,8 @@ struct ContentView: View {
                     roto.rayAnimationSolveStatus = "Ray animation solve cleared."
                     roto.raySolvedUSDZExportStatus = "No ray solve USDZ exported."
                     roto.usdzRetargetStatus = "No animated target USDZ exported."
+                    roto.lastAnimatedUSDZExportURL = nil
+                    roto.lastAnimatedUSDZExportFolderURL = nil
                     roto.diagnostics.log(roto.rayAnimationSolveStatus)
                     pipelineRenderToken += 1
                 }
@@ -624,6 +636,9 @@ struct ContentView: View {
         roto.raySolveStatus = "Ray solve not run."
         roto.rayAnimationSolveStatus = "Ray animation solve not run."
         roto.raySolvedUSDZExportStatus = "No ray solve USDZ exported."
+        roto.usdzRetargetStatus = "No animated target USDZ exported."
+        roto.lastAnimatedUSDZExportURL = nil
+        roto.lastAnimatedUSDZExportFolderURL = nil
         roto.videoPlaybackStatus = "Decoding frames..."
         roto.status = "Loaded video: \(url.lastPathComponent)"
         roto.diagnostics.log("""

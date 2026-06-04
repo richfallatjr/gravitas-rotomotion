@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 
 from pxr import Usd, UsdGeom, UsdSkel, Gf
@@ -19,6 +20,59 @@ ALIASES = {
     "headfront": ["headfront", "HeadFront", "Head_Front"],
 }
 
+CANONICAL_JOINTS = [
+    "Hips",
+    "LeftUpLeg",
+    "LeftLeg",
+    "LeftFoot",
+    "LeftToeBase",
+    "RightUpLeg",
+    "RightLeg",
+    "RightFoot",
+    "RightToeBase",
+    "Spine02",
+    "Spine01",
+    "Spine",
+    "LeftShoulder",
+    "LeftArm",
+    "LeftForeArm",
+    "LeftHand",
+    "RightShoulder",
+    "RightArm",
+    "RightForeArm",
+    "RightHand",
+    "neck",
+    "Head",
+    "head_end",
+    "headfront",
+]
+
+BONES = [
+    ("Hips", "Spine02"),
+    ("Spine02", "Spine01"),
+    ("Spine01", "Spine"),
+    ("Spine", "neck"),
+    ("neck", "Head"),
+    ("Head", "head_end"),
+    ("Head", "headfront"),
+    ("Spine", "LeftShoulder"),
+    ("LeftShoulder", "LeftArm"),
+    ("LeftArm", "LeftForeArm"),
+    ("LeftForeArm", "LeftHand"),
+    ("Spine", "RightShoulder"),
+    ("RightShoulder", "RightArm"),
+    ("RightArm", "RightForeArm"),
+    ("RightForeArm", "RightHand"),
+    ("Hips", "LeftUpLeg"),
+    ("LeftUpLeg", "LeftLeg"),
+    ("LeftLeg", "LeftFoot"),
+    ("LeftFoot", "LeftToeBase"),
+    ("Hips", "RightUpLeg"),
+    ("RightUpLeg", "RightLeg"),
+    ("RightLeg", "RightFoot"),
+    ("RightFoot", "RightToeBase"),
+]
+
 
 def log(message):
     print(f"[rotomotion_usdz_retarget] {message}")
@@ -28,9 +82,11 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--target-usdz", required=True)
     parser.add_argument("--solved-json", required=True)
+    parser.add_argument("--ray-solve-reference")
     parser.add_argument("--clip-id", required=True)
     parser.add_argument("--work-dir", required=True)
     parser.add_argument("--output-usdz", required=True)
+    parser.add_argument("--readback-json")
     parser.add_argument("--include-hips-translation", action="store_true")
     parser.add_argument("--root-translation-scale", type=float, default=1.0)
     return parser.parse_args()
@@ -123,7 +179,22 @@ def load_solved_json(path):
 
             quat = None
 
-            if len(key) == 9:
+            if len(key) == 9 and isinstance(key[8], str):
+                # Quaternion-safe format:
+                # [frame, tx, ty, tz, qw, qx, qy, qz, curve]
+                quat = [
+                    float(key[4]),
+                    float(key[5]),
+                    float(key[6]),
+                    float(key[7]),
+                ]
+                rx = 0.0
+                ry = 0.0
+                rz = 0.0
+                curve = str(key[8])
+            elif len(key) == 9:
+                # Legacy bridge format:
+                # [frame, tx, ty, tz, rx, ry, rz, curve, [qw, qx, qy, qz]]
                 raw_quat = key[8]
 
                 if not isinstance(raw_quat, list) or len(raw_quat) != 4:
@@ -135,16 +206,27 @@ def load_solved_json(path):
                     float(raw_quat[2]),
                     float(raw_quat[3]),
                 ]
+                rx = float(key[4])
+                ry = float(key[5])
+                rz = float(key[6])
+                curve = str(key[7])
+            else:
+                # Legacy Euler format:
+                # [frame, tx, ty, tz, rx, ry, rz, curve]
+                rx = float(key[4])
+                ry = float(key[5])
+                rz = float(key[6])
+                curve = str(key[7])
 
             cleaned_keys.append([
                 int(key[0]),
                 float(key[1]),
                 float(key[2]),
                 float(key[3]),
-                float(key[4]),
-                float(key[5]),
-                float(key[6]),
-                str(key[7]),
+                rx,
+                ry,
+                rz,
+                curve,
                 quat,
             ])
 
@@ -186,6 +268,31 @@ def quatf_from_wxyz(values):
     return Gf.Quatf(
         float(values[0]),
         Gf.Vec3f(float(values[1]), float(values[2]), float(values[3])),
+    )
+
+
+def quat_dot(a, b):
+    ai = a.GetImaginary()
+    bi = b.GetImaginary()
+
+    return (
+        float(a.GetReal()) * float(b.GetReal()) +
+        float(ai[0]) * float(bi[0]) +
+        float(ai[1]) * float(bi[1]) +
+        float(ai[2]) * float(bi[2])
+    )
+
+
+def negate_quatf(value):
+    imaginary = value.GetImaginary()
+
+    return Gf.Quatf(
+        -float(value.GetReal()),
+        Gf.Vec3f(
+            -float(imaginary[0]),
+            -float(imaginary[1]),
+            -float(imaginary[2]),
+        ),
     )
 
 
@@ -300,6 +407,7 @@ def create_animation(
     translations_attr = anim.CreateTranslationsAttr()
     rotations_attr = anim.CreateRotationsAttr()
     scales_attr = anim.CreateScalesAttr()
+    previous_rotations = None
 
     for frame in times:
         translations = list(base_translations)
@@ -325,9 +433,18 @@ def create_animation(
                 delta_rotation = euler_degrees_to_quatf(rx, ry, rz)
                 rotations[target_index] = base_rotations[target_index] * delta_rotation
 
+        if previous_rotations is not None:
+            rotations = [
+                negate_quatf(rotation)
+                if quat_dot(previous_rotations[index], rotation) < 0
+                else rotation
+                for index, rotation in enumerate(rotations)
+            ]
+
         translations_attr.Set(translations, Usd.TimeCode(frame))
         rotations_attr.Set(rotations, Usd.TimeCode(frame))
         scales_attr.Set(scales, Usd.TimeCode(frame))
+        previous_rotations = list(rotations)
 
     skeleton.GetPrim().CreateRelationship("skel:animationSource").SetTargets([
         anim.GetPrim().GetPath()
@@ -348,34 +465,19 @@ def save_stage_as_usdc(stage, out_path):
     log(f"Exported animated root layer: {out_path}")
 
 
-def copy_non_usd_assets(source_root_layer_path, output_root_layer_path):
-    source_dir = os.path.dirname(source_root_layer_path)
-    output_dir = os.path.dirname(output_root_layer_path)
-    copied_names = []
+def collect_non_usd_assets(root_layer_path):
+    root_dir = os.path.dirname(root_layer_path)
+    asset_names = []
 
-    for name in os.listdir(source_dir):
+    for name in os.listdir(root_dir):
         lower = name.lower()
 
         if lower.endswith((".usd", ".usda", ".usdc")):
             continue
 
-        src = os.path.join(source_dir, name)
-        dst = os.path.join(output_dir, name)
+        asset_names.append(name)
 
-        if os.path.exists(dst):
-            if os.path.isdir(dst):
-                shutil.rmtree(dst)
-            else:
-                os.remove(dst)
-
-        if os.path.isdir(src):
-            shutil.copytree(src, dst)
-        else:
-            shutil.copy2(src, dst)
-
-        copied_names.append(name)
-
-    return copied_names
+    return sorted(asset_names)
 
 
 def package_usdz(root_usd_path, output_usdz, asset_names):
@@ -405,37 +507,421 @@ def package_usdz(root_usd_path, output_usdz, asset_names):
         )
 
 
+def load_ray_solve_reference(path, stage):
+    if not path:
+        raise RuntimeError("Target USDZ has no UsdSkel.Skeleton and no ray_solve_reference.json was provided.")
+
+    with open(path, "r") as handle:
+        data = json.load(handle)
+
+    frames = data.get("frames")
+
+    if not isinstance(frames, list) or not frames:
+        raise RuntimeError("ray_solve_reference.json has no frames.")
+
+    scene_units_per_meter = max(float(data.get("sceneUnitsPerMeter", 1.0)), 0.0001)
+    meters_per_unit = float(UsdGeom.GetStageMetersPerUnit(stage) or 1.0)
+    position_scale = 1.0 / scene_units_per_meter / max(meters_per_unit, 0.0001)
+
+    positions = {joint: [] for joint in CANONICAL_JOINTS}
+    rotations = {joint: [] for joint in CANONICAL_JOINTS}
+    frame_times = []
+
+    for frame in frames:
+        frame_index = int(frame.get("frame", 0))
+        time_seconds = float(frame.get("timeSeconds", 0.0))
+        frame_times.append((frame_index, time_seconds))
+        joints = frame.get("joints", {})
+
+        for joint_name in CANONICAL_JOINTS:
+            joint = joints.get(joint_name)
+
+            if not isinstance(joint, dict):
+                continue
+
+            world_position = joint.get("worldPosition")
+
+            if isinstance(world_position, list) and len(world_position) == 3:
+                positions[joint_name].append([
+                    frame_index,
+                    float(world_position[0]) * position_scale,
+                    float(world_position[1]) * position_scale,
+                    float(world_position[2]) * position_scale,
+                ])
+
+            rotation = joint.get("localRotationWXYZ")
+
+            if isinstance(rotation, list) and len(rotation) == 4:
+                rotations[joint_name].append([
+                    frame_index,
+                    float(rotation[0]),
+                    float(rotation[1]),
+                    float(rotation[2]),
+                    float(rotation[3]),
+                ])
+
+    if len(frame_times) > 1:
+        first = frame_times[0]
+        last = frame_times[-1]
+        duration = max(last[1] - first[1], 0.0001)
+        fps = float(len(frame_times) - 1) / duration
+    else:
+        fps = 24.0
+
+    return {
+        "schema": data.get("schema", "com.gravitas.rotomotion.ray_solve_reference.v0"),
+        "frameCount": int(data.get("frameCount", len(frame_times))),
+        "fps": fps,
+        "positions": positions,
+        "rotations": rotations,
+        "frameTimes": frame_times,
+        "sceneUnitsPerMeter": scene_units_per_meter,
+        "metersPerUnit": meters_per_unit,
+    }
+
+
+def create_session_armature_fallback(stage, reference_path, clip_id):
+    reference = load_ray_solve_reference(reference_path, stage)
+    token = safe_prim_token(clip_id)
+    root_path = f"/RotoMotionSessionArmature_{token}"
+
+    if stage.GetPrimAtPath(root_path):
+        stage.RemovePrim(root_path)
+
+    root = UsdGeom.Xform.Define(stage, root_path)
+    root.GetPrim().SetDocumentation(
+        "RotoMotion fallback: target USDZ had no UsdSkel.Skeleton, so this stage preserves the target and adds the animated session armature."
+    )
+
+    UsdGeom.Xform.Define(stage, f"{root_path}/Joints")
+    UsdGeom.Xform.Define(stage, f"{root_path}/Bones")
+
+    joint_radius = 0.025
+    bone_width = 0.012
+
+    for joint_name in CANONICAL_JOINTS:
+        samples = reference["positions"].get(joint_name, [])
+
+        if not samples:
+            continue
+
+        joint_path = f"{root_path}/Joints/Joint_{safe_prim_token(joint_name)}"
+        joint_xform = UsdGeom.Xform.Define(stage, joint_path)
+        translate_op = joint_xform.AddTranslateOp()
+
+        for sample in samples:
+            frame, x, y, z = sample
+            translate_op.Set(
+                Gf.Vec3d(float(x), float(y), float(z)),
+                Usd.TimeCode(frame),
+            )
+
+        sphere = UsdGeom.Sphere.Define(stage, f"{joint_path}/Geo")
+        sphere.CreateRadiusAttr(joint_radius)
+        sphere.CreateDisplayColorAttr([Gf.Vec3f(0.0, 1.0, 0.15)])
+
+    for parent_name, child_name in BONES:
+        parent_samples = {
+            int(sample[0]): sample
+            for sample in reference["positions"].get(parent_name, [])
+        }
+        child_samples = {
+            int(sample[0]): sample
+            for sample in reference["positions"].get(child_name, [])
+        }
+        shared_frames = sorted(set(parent_samples.keys()).intersection(child_samples.keys()))
+
+        if not shared_frames:
+            continue
+
+        curve_path = f"{root_path}/Bones/Bone_{safe_prim_token(parent_name)}_{safe_prim_token(child_name)}"
+        curve = UsdGeom.BasisCurves.Define(stage, curve_path)
+        curve.CreateTypeAttr(UsdGeom.Tokens.linear)
+        curve.CreateCurveVertexCountsAttr([2])
+        curve.CreateWidthsAttr([bone_width, bone_width])
+        points_attr = curve.CreatePointsAttr()
+        curve.CreateDisplayColorAttr([Gf.Vec3f(0.0, 0.85, 0.1)])
+
+        for frame in shared_frames:
+            parent = parent_samples[frame]
+            child = child_samples[frame]
+            points_attr.Set(
+                [
+                    Gf.Vec3f(float(parent[1]), float(parent[2]), float(parent[3])),
+                    Gf.Vec3f(float(child[1]), float(child[2]), float(child[3])),
+                ],
+                Usd.TimeCode(frame),
+            )
+
+    frames = [frame for frame, _ in reference["frameTimes"]]
+    stage.SetStartTimeCode(min(frames))
+    stage.SetEndTimeCode(max(frames))
+    stage.SetFramesPerSecond(reference["fps"])
+    stage.SetTimeCodesPerSecond(reference["fps"])
+
+    log(f"Target has no UsdSkel.Skeleton; created session armature fallback: {root_path}")
+    return root_path, reference
+
+
+def write_session_armature_readback_json(output_json, source_usdz, armature_path, reference):
+    if not output_json:
+        return
+
+    rotations = {}
+    translations = {}
+
+    for joint_name in CANONICAL_JOINTS:
+        joint_rotations = reference["rotations"].get(joint_name, [])
+
+        if joint_rotations:
+            rotations[joint_name] = joint_rotations
+
+        joint_positions = reference["positions"].get(joint_name, [])
+
+        if joint_positions:
+            translations[joint_name] = joint_positions
+
+    payload = {
+        "schema": "com.gravitas.rotomotion.animated_usdz_readback.v0",
+        "sourceUSDZ": source_usdz,
+        "fallbackSessionArmature": True,
+        "fallbackReason": "Target USDZ had no UsdSkel.Skeleton. Export preserved target contents and added animated session armature geometry.",
+        "stageFPS": float(reference["fps"]),
+        "stageStartTimeCode": min(frame for frame, _ in reference["frameTimes"]),
+        "stageEndTimeCode": max(frame for frame, _ in reference["frameTimes"]),
+        "skeletonPath": armature_path,
+        "skelAnimationSourceTargets": [armature_path],
+        "animationPath": armature_path,
+        "skeletonJoints": CANONICAL_JOINTS,
+        "animationJoints": CANONICAL_JOINTS,
+        "rotationSampleCount": int(reference["frameCount"]),
+        "translationSampleCount": int(reference["frameCount"]),
+        "scaleSampleCount": 0,
+        "rotations": rotations,
+        "translations": translations,
+        "scales": {},
+    }
+
+    with open(output_json, "w") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+
+    log(f"Wrote fallback readback JSON: {output_json}")
+
+
+def quat_to_array(quat):
+    imaginary = quat.GetImaginary()
+    return [
+        float(quat.GetReal()),
+        float(imaginary[0]),
+        float(imaginary[1]),
+        float(imaginary[2]),
+    ]
+
+
+def vec3_to_array(value):
+    return [
+        float(value[0]),
+        float(value[1]),
+        float(value[2]),
+    ]
+
+
+def find_bound_animation(stage, skeleton):
+    relationship = skeleton.GetPrim().GetRelationship("skel:animationSource")
+    targets = relationship.GetTargets() if relationship else []
+
+    if not targets:
+        raise RuntimeError("Skeleton has no skel:animationSource target after export.")
+
+    animation_prim = stage.GetPrimAtPath(targets[0])
+
+    if not animation_prim or not animation_prim.IsValid():
+        raise RuntimeError(f"skel:animationSource target does not exist: {targets[0]}")
+
+    if not animation_prim.IsA(UsdSkel.Animation):
+        raise RuntimeError(f"skel:animationSource target is not a UsdSkelAnimation: {targets[0]}")
+
+    return UsdSkel.Animation(animation_prim), [str(target) for target in targets]
+
+
+def write_readback_json_from_usdz(source_usdz, output_json):
+    if not output_json:
+        return
+
+    readback_dir = tempfile.mkdtemp(prefix="rotomotion_usdz_readback_")
+
+    try:
+        root_layer_path = unzip_usdz(source_usdz, readback_dir)
+        stage = Usd.Stage.Open(root_layer_path)
+
+        if stage is None:
+            raise RuntimeError(f"Could not open exported USDZ for readback: {source_usdz}")
+
+        skeleton = find_skeleton(stage)
+        animation, animation_targets = find_bound_animation(stage, skeleton)
+
+        skeleton_joints = [str(joint) for joint in (skeleton.GetJointsAttr().Get() or [])]
+        animation_joints = [str(joint) for joint in (animation.GetJointsAttr().Get() or [])]
+
+        rotations_attr = animation.GetRotationsAttr()
+        translations_attr = animation.GetTranslationsAttr()
+        scales_attr = animation.GetScalesAttr()
+
+        rotation_times = rotations_attr.GetTimeSamples()
+        translation_times = translations_attr.GetTimeSamples()
+        scale_times = scales_attr.GetTimeSamples()
+
+        rotations = {}
+        translations = {}
+        scales = {}
+
+        for time in rotation_times:
+            values = rotations_attr.Get(time) or []
+
+            for index, joint_path in enumerate(animation_joints):
+                if index >= len(values):
+                    continue
+
+                joint_name = leaf_name(joint_path)
+                rotations.setdefault(joint_name, []).append([
+                    int(time),
+                    *quat_to_array(values[index]),
+                ])
+
+        for time in translation_times:
+            values = translations_attr.Get(time) or []
+
+            for index, joint_path in enumerate(animation_joints):
+                if index >= len(values):
+                    continue
+
+                joint_name = leaf_name(joint_path)
+                translations.setdefault(joint_name, []).append([
+                    int(time),
+                    *vec3_to_array(values[index]),
+                ])
+
+        for time in scale_times:
+            values = scales_attr.Get(time) or []
+
+            for index, joint_path in enumerate(animation_joints):
+                if index >= len(values):
+                    continue
+
+                joint_name = leaf_name(joint_path)
+                scales.setdefault(joint_name, []).append([
+                    int(time),
+                    *vec3_to_array(values[index]),
+                ])
+
+        payload = {
+            "schema": "com.gravitas.rotomotion.animated_usdz_readback.v0",
+            "sourceUSDZ": source_usdz,
+            "rootLayer": root_layer_path,
+            "stageFPS": float(stage.GetFramesPerSecond()),
+            "stageStartTimeCode": float(stage.GetStartTimeCode()),
+            "stageEndTimeCode": float(stage.GetEndTimeCode()),
+            "skeletonPath": str(skeleton.GetPrim().GetPath()),
+            "skelAnimationSourceTargets": animation_targets,
+            "animationPath": str(animation.GetPrim().GetPath()),
+            "skeletonJoints": skeleton_joints,
+            "animationJoints": animation_joints,
+            "rotationSampleCount": len(rotation_times),
+            "translationSampleCount": len(translation_times),
+            "scaleSampleCount": len(scale_times),
+            "rotations": rotations,
+            "translations": translations,
+            "scales": scales,
+        }
+
+        with open(output_json, "w") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+
+        log(f"Wrote readback JSON: {output_json}")
+    finally:
+        shutil.rmtree(readback_dir, ignore_errors=True)
+
+
+def write_readback_error_json(output_json, source_usdz, error):
+    if not output_json:
+        return
+
+    payload = {
+        "schema": "com.gravitas.rotomotion.animated_usdz_readback.v0",
+        "sourceUSDZ": source_usdz,
+        "readbackFailed": True,
+        "error": str(error),
+    }
+
+    with open(output_json, "w") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+
+    log(f"Warning: readback failed; wrote error JSON: {output_json}")
+
+
 def main():
     args = parse_args()
     unpack_dir = os.path.join(args.work_dir, "target_unpacked")
-    out_usdc = os.path.join(args.work_dir, f"{safe_prim_token(args.clip_id)}_animated_target.usdc")
+    out_usdc = os.path.join(unpack_dir, f"{safe_prim_token(args.clip_id)}_animated_target.usdc")
 
     log(f"target_usdz = {args.target_usdz}")
     log(f"solved_json = {args.solved_json}")
     log(f"output_usdz = {args.output_usdz}")
 
-    root_layer_path = unzip_usdz(args.target_usdz, unpack_dir)
-    stage = Usd.Stage.Open(root_layer_path)
+    try:
+        root_layer_path = unzip_usdz(args.target_usdz, unpack_dir)
+        stage = Usd.Stage.Open(root_layer_path)
 
-    if stage is None:
-        raise RuntimeError(f"Could not open USD stage: {root_layer_path}")
+        if stage is None:
+            raise RuntimeError(f"Could not open USD stage: {root_layer_path}")
 
-    skeleton = find_skeleton(stage)
-    keyframes, fps = load_solved_json(args.solved_json)
+        try:
+            skeleton = find_skeleton(stage)
+        except RuntimeError as skeleton_error:
+            if "No UsdSkel.Skeleton" not in str(skeleton_error):
+                raise
 
-    create_animation(
-        stage=stage,
-        skeleton=skeleton,
-        keyframes=keyframes,
-        clip_id=args.clip_id,
-        include_hips_translation=args.include_hips_translation,
-        root_translation_scale=args.root_translation_scale,
-        fps=fps,
-    )
+            armature_path, reference = create_session_armature_fallback(
+                stage=stage,
+                reference_path=args.ray_solve_reference,
+                clip_id=args.clip_id,
+            )
 
-    save_stage_as_usdc(stage, out_usdc)
-    asset_names = copy_non_usd_assets(root_layer_path, out_usdc)
-    package_usdz(out_usdc, args.output_usdz, asset_names)
+            save_stage_as_usdc(stage, out_usdc)
+            asset_names = collect_non_usd_assets(root_layer_path)
+            package_usdz(out_usdc, args.output_usdz, asset_names)
+            write_session_armature_readback_json(
+                args.readback_json,
+                args.output_usdz,
+                armature_path,
+                reference,
+            )
+            log("DONE")
+            return
+
+        keyframes, fps = load_solved_json(args.solved_json)
+
+        create_animation(
+            stage=stage,
+            skeleton=skeleton,
+            keyframes=keyframes,
+            clip_id=args.clip_id,
+            include_hips_translation=args.include_hips_translation,
+            root_translation_scale=args.root_translation_scale,
+            fps=fps,
+        )
+
+        save_stage_as_usdc(stage, out_usdc)
+        asset_names = collect_non_usd_assets(root_layer_path)
+        package_usdz(out_usdc, args.output_usdz, asset_names)
+
+        try:
+            write_readback_json_from_usdz(args.output_usdz, args.readback_json)
+        except Exception as readback_error:
+            write_readback_error_json(args.readback_json, args.output_usdz, readback_error)
+    finally:
+        shutil.rmtree(unpack_dir, ignore_errors=True)
+
     log("DONE")
 
 

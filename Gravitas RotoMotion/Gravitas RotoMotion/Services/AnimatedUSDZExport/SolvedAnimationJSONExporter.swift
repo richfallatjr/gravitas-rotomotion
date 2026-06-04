@@ -4,6 +4,17 @@ import simd
 enum SolvedAnimationJSONExporter {
     static func write(
         solve: RotoRayAnimationSolveResult,
+        to url: URL
+    ) throws {
+        try write(
+            solve: solve,
+            includeHipsTranslation: true,
+            to: url
+        )
+    }
+
+    static func write(
+        solve: RotoRayAnimationSolveResult,
         includeHipsTranslation: Bool,
         to url: URL
     ) throws {
@@ -13,9 +24,18 @@ enum SolvedAnimationJSONExporter {
 
         for jointName in CanonicalRig.jointNames {
             var keys: [[Any]] = []
+            var previousRotation: SIMD4<Float>?
 
             for frame in solve.frames {
-                let rotation = frame.localRotationsWXYZ[jointName] ?? SIMD4<Float>(1, 0, 0, 0)
+                var rotation = frame.localRotationsWXYZ[jointName] ?? SIMD4<Float>(1, 0, 0, 0)
+
+                if let previousRotation,
+                   dot(previousRotation, rotation) < 0 {
+                    rotation *= -1
+                }
+
+                previousRotation = rotation
+
                 let translationMeters: SIMD3<Float>
 
                 if includeHipsTranslation,
@@ -26,21 +46,18 @@ enum SolvedAnimationJSONExporter {
                     translationMeters = SIMD3<Float>(0, 0, 0)
                 }
 
+                // Explicit quaternion-safe format:
+                // [frame, tx, ty, tz, qw, qx, qy, qz, curve]
                 keys.append([
                     frame.frameIndex,
                     Double(translationMeters.x),
                     Double(translationMeters.y),
                     Double(translationMeters.z),
-                    0.0,
-                    0.0,
-                    0.0,
-                    "linear",
-                    [
-                        Double(rotation.x),
-                        Double(rotation.y),
-                        Double(rotation.z),
-                        Double(rotation.w)
-                    ]
+                    Double(rotation.x),
+                    Double(rotation.y),
+                    Double(rotation.z),
+                    Double(rotation.w),
+                    "linear"
                 ])
             }
 
@@ -59,6 +76,8 @@ enum SolvedAnimationJSONExporter {
             "frameCount": solve.frameCount,
             "fps": inferredFPS(solve.frames),
             "includeHipsTranslation": includeHipsTranslation,
+            "keyFormat": "[frame, tx, ty, tz, qw, qx, qy, qz, curve]",
+            "quaternionOrder": "wxyz",
             "joints": joints
         ]
 
@@ -81,5 +100,12 @@ enum SolvedAnimationJSONExporter {
 
         let duration = max(last.timeSeconds - first.timeSeconds, 0.0001)
         return Double(frames.count - 1) / duration
+    }
+
+    private static func dot(
+        _ a: SIMD4<Float>,
+        _ b: SIMD4<Float>
+    ) -> Float {
+        a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w
     }
 }
