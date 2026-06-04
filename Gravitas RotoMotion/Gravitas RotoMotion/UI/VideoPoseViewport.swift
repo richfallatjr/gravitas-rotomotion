@@ -5,8 +5,16 @@ import SwiftUI
 struct VideoPoseViewport: View {
     let player: AVPlayer?
     let videoURL: URL?
-    let currentFrame: RawVisionPoseCapture.PoseFrame?
+    let rawFrame: RawVisionPoseCapture.PoseFrame?
+    let normalizedFrame: NormalizedMeshyPoseCapture.Frame?
+    let smoothedFrame: SmoothedMeshyPoseCapture.Frame?
+    let fitFrame: RigFitResult.FrameFit?
     let videoSize: CGSize
+    let showRaw: Bool
+    let showSmoothed: Bool
+    let showSmoothingDelta: Bool
+    let showFittedRig: Bool
+    let projectionSettings: RigProjectionSettings
     let onTimeChange: (Double) -> Void
 
     @State private var timeObserver: Any?
@@ -36,11 +44,24 @@ struct VideoPoseViewport: View {
                 }
 
                 PoseOverlayView(
-                    frame: currentFrame,
-                    videoSize: videoSize
+                    rawFrame: rawFrame,
+                    normalizedFrame: normalizedFrame,
+                    smoothedFrame: smoothedFrame,
+                    showRaw: showRaw,
+                    showSmoothed: showSmoothed,
+                    showSmoothingDelta: showSmoothingDelta
                 )
                 .frame(width: rect.width, height: rect.height)
                 .position(x: rect.midX, y: rect.midY)
+
+                if showFittedRig {
+                    RigOverlayView(
+                        frame: fitFrame,
+                        projectionSettings: projectionSettings
+                    )
+                    .frame(width: rect.width, height: rect.height)
+                    .position(x: rect.midX, y: rect.midY)
+                }
             }
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay {

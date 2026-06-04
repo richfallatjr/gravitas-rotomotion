@@ -5,9 +5,22 @@ enum USDAPoseDonorWriter {
         capture: RawVisionPoseCapture,
         to url: URL
     ) throws {
-        let fps = capture.extraction.sampleFPS > 0 ? capture.extraction.sampleFPS : 24.0
+        let normalized = PoseNormalizer.normalize(rawCapture: capture)
+        try writeUSDA(
+            normalized: normalized,
+            sampleFPS: capture.extraction.sampleFPS,
+            to: url
+        )
+    }
+
+    static func writeUSDA(
+        normalized: NormalizedMeshyPoseCapture,
+        sampleFPS: Double,
+        to url: URL
+    ) throws {
+        let fps = sampleFPS > 0 ? sampleFPS : 24.0
         let startFrame = 1
-        let endFrame = max(capture.frames.count, 1)
+        let endFrame = max(normalized.frames.count, 1)
 
         var text = ""
 
@@ -36,9 +49,9 @@ enum USDAPoseDonorWriter {
         text += "        def SkelAnimation \"Anim\"\n"
         text += "        {\n"
         text += "            uniform token[] joints = \(stringArray(CanonicalRig.jointPaths))\n"
-        text += writeTranslationSamples(capture: capture)
-        text += writeRotationSamples(capture: capture)
-        text += writeScaleSamples(capture: capture)
+        text += writeTranslationSamples(normalized: normalized)
+        text += writeRotationSamples(frameCount: normalized.frames.count)
+        text += writeScaleSamples(frameCount: normalized.frames.count)
         text += "        }\n"
         text += "    }\n"
         text += "}\n"
@@ -47,17 +60,17 @@ enum USDAPoseDonorWriter {
     }
 
     private static func writeTranslationSamples(
-        capture: RawVisionPoseCapture
+        normalized: NormalizedMeshyPoseCapture
     ) -> String {
         var text = ""
         text += "            float3[] translations.timeSamples = {\n"
 
-        let frameCount = max(capture.frames.count, 1)
+        let frameCount = max(normalized.frames.count, 1)
         for index in 0..<frameCount {
-            let frame = capture.frames.indices.contains(index) ? capture.frames[index] : nil
+            let frame = normalized.frames.indices.contains(index) ? normalized.frames[index] : nil
             let timeCode = index + 1
             let values = CanonicalRig.jointNames.map { jointName -> String in
-                let joint = frame?.canonicalJoints[jointName]
+                let joint = frame?.joints[jointName]
                 let x = ((joint?.x ?? 0.5) - 0.5) * 2.0
                 let z = ((joint?.y ?? 0.5) - 0.5) * 2.0
                 let y = joint?.z ?? 0.0
@@ -79,12 +92,12 @@ enum USDAPoseDonorWriter {
     }
 
     private static func writeRotationSamples(
-        capture: RawVisionPoseCapture
+        frameCount rawFrameCount: Int
     ) -> String {
         var text = ""
         text += "            quatf[] rotations.timeSamples = {\n"
 
-        let frameCount = max(capture.frames.count, 1)
+        let frameCount = max(rawFrameCount, 1)
         let identityRotations = Array(
             repeating: "(1, 0, 0, 0)",
             count: CanonicalRig.jointNames.count
@@ -106,12 +119,12 @@ enum USDAPoseDonorWriter {
     }
 
     private static func writeScaleSamples(
-        capture: RawVisionPoseCapture
+        frameCount rawFrameCount: Int
     ) -> String {
         var text = ""
         text += "            half3[] scales.timeSamples = {\n"
 
-        let frameCount = max(capture.frames.count, 1)
+        let frameCount = max(rawFrameCount, 1)
         let scales = Array(
             repeating: "(1, 1, 1)",
             count: CanonicalRig.jointNames.count

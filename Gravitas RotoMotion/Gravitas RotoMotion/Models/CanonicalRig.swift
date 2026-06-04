@@ -4,6 +4,7 @@ enum CanonicalRig {
     static let rigID = "GravitasMeshyBiped24"
     static let rigVersion = "001"
     static let upAxis = "Z"
+    static let sourceQuaternionOrder = "wxyz"
 
     static let jointNames: [String] = [
         "Hips",
@@ -85,6 +86,29 @@ enum CanonicalRig {
         "head_end": "Head",
         "headfront": "Head"
     ]
+
+    static let requiredLandmarks: [String] = [
+        "Hips",
+        "Head",
+        "neck",
+        "LeftHand",
+        "RightHand",
+        "LeftFoot",
+        "RightFoot",
+        "LeftToeBase",
+        "RightToeBase"
+    ]
+
+    static var childrenByJoint: [String: [String]] {
+        var result: [String: [String]] = [:]
+
+        for (joint, parent) in parentByJoint {
+            guard let parent else { continue }
+            result[parent, default: []].append(joint)
+        }
+
+        return result
+    }
 
     static let bonePairs: [(String, String)] = [
         ("Hips", "LeftUpLeg"),

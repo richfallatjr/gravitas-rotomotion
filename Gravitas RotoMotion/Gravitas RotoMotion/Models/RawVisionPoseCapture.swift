@@ -1,4 +1,3 @@
-import CoreGraphics
 import Foundation
 
 struct RawVisionPoseCapture: Codable {
@@ -9,7 +8,6 @@ struct RawVisionPoseCapture: Codable {
     let sourceVideo: SourceVideo
     let extraction: ExtractionMetadata
     let frames: [PoseFrame]
-    let canonicalRig: CanonicalRigSnapshot
 
     struct SourceVideo: Codable {
         let fileName: String
@@ -37,30 +35,11 @@ struct RawVisionPoseCapture: Codable {
         let timecode: String
         let detected: Bool
         let joints: [String: JointObservation]
-        let canonicalJoints: [String: CanonicalJointObservation]
     }
 
     struct JointObservation: Codable {
         let x: Double
         let y: Double
         let confidence: Double
-    }
-
-    struct CanonicalJointObservation: Codable {
-        let x: Double
-        let y: Double
-        let z: Double
-        let confidence: Double
-        let sourceVisionJoint: String?
-        let generated: Bool
-        let note: String?
-    }
-
-    struct CanonicalRigSnapshot: Codable {
-        let rigID: String
-        let rigVersion: String
-        let jointCount: Int
-        let upAxis: String
-        let jointNames: [String]
     }
 }

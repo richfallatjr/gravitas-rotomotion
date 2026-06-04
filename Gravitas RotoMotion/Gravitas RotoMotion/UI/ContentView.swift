@@ -1,46 +1,8 @@
-import AVFoundation
-import AVKit
+import Combine
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var exporter = RotoMotionExporter()
-
-    @State private var videoURL: URL?
-    @State private var outputDirectoryURL: URL?
-    @State private var project: RotoMotionProject?
-    @State private var player: AVPlayer?
-
-    @State private var sampleFPS: Double = 24
-    @State private var maxFrames: Int = 0
-    @State private var normalizeCoordinates = true
-    @State private var exportUSDZ = true
-
-    @State private var currentFrameIndex = 0
-    @State private var currentTimeSeconds = 0.0
-    @State private var logLines: [String] = ["Ready."]
-
-    private var currentFrame: RawVisionPoseCapture.PoseFrame? {
-        guard
-            let frames = exporter.capture?.frames,
-            frames.indices.contains(currentFrameIndex)
-        else {
-            return nil
-        }
-
-        return frames[currentFrameIndex]
-    }
-
-    private var videoSize: CGSize {
-        if let project {
-            return project.metadata.naturalSize
-        }
-
-        if let source = exporter.capture?.sourceVideo {
-            return CGSize(width: source.naturalWidth, height: source.naturalHeight)
-        }
-
-        return CGSize(width: 16, height: 9)
-    }
+    @StateObject private var roto = RotoMotionViewModel()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -51,22 +13,37 @@ struct ContentView: View {
             HStack(spacing: 0) {
                 VStack(spacing: 12) {
                     VideoPoseViewport(
-                        player: player,
-                        videoURL: videoURL,
-                        currentFrame: currentFrame,
-                        videoSize: videoSize,
-                        onTimeChange: handlePlaybackTimeChange
+                        player: roto.player,
+                        videoURL: roto.videoURL,
+                        rawFrame: roto.currentRawFrame,
+                        normalizedFrame: roto.currentNormalizedFrame,
+                        smoothedFrame: roto.currentSmoothedFrame,
+                        fitFrame: roto.currentFitFrame,
+                        videoSize: roto.videoSize,
+                        showRaw: roto.showRaw,
+                        showSmoothed: roto.showSmoothed,
+                        showSmoothingDelta: roto.showSmoothingDelta,
+                        showFittedRig: roto.showFittedRig,
+                        projectionSettings: roto.projectionSettings,
+                        onTimeChange: roto.handlePlaybackTimeChange
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                    timeline
+                    RotoMotionTimelineView(
+                        frameCount: roto.frameCount,
+                        currentFrame: roto.currentRawFrame,
+                        currentTimelineText: roto.currentTimelineText,
+                        currentFrameIndex: $roto.currentFrameIndex
+                    ) { index in
+                        roto.setCurrentFrameIndex(index, seekPlayer: true)
+                    }
                 }
                 .padding(16)
 
                 Divider()
 
                 sidebar
-                    .frame(width: 340)
+                    .frame(width: 380)
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
@@ -79,25 +56,19 @@ struct ContentView: View {
 
             Spacer()
 
-            Button(action: openVideo) {
+            Button(action: roto.openVideo) {
                 Label("Open Video", systemImage: "folder")
             }
             .keyboardShortcut("o")
 
-            Button(action: runExtraction) {
+            Button {
+                Task {
+                    await roto.runVisionExtraction()
+                }
+            } label: {
                 Label("Run Vision Extraction", systemImage: "figure.walk")
             }
-            .disabled(videoURL == nil || exporter.isExtracting)
-
-            Button(action: saveRawJSON) {
-                Label("Save Raw JSON", systemImage: "doc.text")
-            }
-            .disabled(exporter.capture == nil || exporter.isExtracting)
-
-            Button(action: exportOutputs) {
-                Label(exportUSDZ ? "Export USDA + USDZ" : "Export USDA", systemImage: "square.and.arrow.up")
-            }
-            .disabled(exporter.capture == nil || exporter.isExtracting)
+            .disabled(roto.videoURL == nil || roto.isWorking)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -106,149 +77,229 @@ struct ContentView: View {
     private var sidebar: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Section("Video") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        metricRow("File", videoURL?.lastPathComponent ?? "None")
-                        metricRow("Duration", durationText)
-                        metricRow("Nominal FPS", fpsText)
-                        metricRow("Size", sizeText)
-                    }
-                }
-
-                Section("Extraction") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("Sample FPS")
-                            Spacer()
-                            TextField("Sample FPS", value: $sampleFPS, format: .number.precision(.fractionLength(0...2)))
-                                .multilineTextAlignment(.trailing)
-                                .frame(width: 82)
-                        }
-
-                        Stepper(
-                            maxFrames == 0 ? "Max Frames: No cap" : "Max Frames: \(maxFrames)",
-                            value: $maxFrames,
-                            in: 0...100_000,
-                            step: 24
-                        )
-
-                        Toggle("Normalize Coordinates", isOn: $normalizeCoordinates)
-                            .disabled(true)
-
-                        Toggle("Export USDZ", isOn: $exportUSDZ)
-                    }
-                }
-
-                Section("Capture") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        metricRow("Frames", "\(exporter.capture?.frames.count ?? 0)")
-                        metricRow("Detected", detectedFrameText)
-                        metricRow("Rig", CanonicalRig.rigID)
-                        metricRow("Joints", "\(CanonicalRig.jointNames.count)")
-                    }
-                }
-
-                Section("Output") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Button(action: chooseOutputDirectory) {
-                            Label("Choose Output Directory", systemImage: "folder.badge.gearshape")
-                        }
-
-                        Text(outputDirectoryURL?.path ?? "Defaults to selected video folder.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(3)
-                            .textSelection(.enabled)
-                    }
-                }
-
-                Section("Status") {
-                    ExtractionProgressView(
-                        isExtracting: exporter.isExtracting,
-                        progressText: exporter.progressText,
-                        logLines: logLines
-                    )
-                }
+                videoSection
+                extractionSection
+                normalizationSection
+                smoothingSection
+                rigSection
+                fitSection
+                exportSection
+                statusSection
             }
             .padding(16)
         }
     }
 
-    private var timeline: some View {
-        let frameCount = exporter.capture?.frames.count ?? 0
-        let maxFrameIndex = max(frameCount - 1, 0)
-        let sliderUpperBound = max(Double(maxFrameIndex), 1.0)
-        let hasFrames = frameCount > 0
+    private var videoSection: some View {
+        Section("Video") {
+            VStack(alignment: .leading, spacing: 8) {
+                metricRow("File", roto.videoURL?.lastPathComponent ?? "None")
+                metricRow("Duration", roto.durationText)
+                metricRow("Nominal FPS", roto.fpsText)
+                metricRow("Size", roto.sizeText)
+            }
+        }
+    }
 
-        return VStack(spacing: 8) {
-            HStack {
-                Text(currentTimelineText)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+    private var extractionSection: some View {
+        Section("Extraction") {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Sample FPS")
+                    Spacer()
+                    TextField(
+                        "Sample FPS",
+                        value: $roto.sampleFPS,
+                        format: .number.precision(.fractionLength(0...2))
+                    )
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 82)
+                }
 
-                Spacer()
+                Stepper(
+                    roto.maxFrames == 0 ? "Max Frames: No cap" : "Max Frames: \(roto.maxFrames)",
+                    value: $roto.maxFrames,
+                    in: 0...100_000,
+                    step: 24
+                )
 
-                if let currentFrame {
-                    Text("Frame \(currentFrame.frameIndex) / \(maxFrameIndex)")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                Toggle("Raw Vision points", isOn: $roto.showRaw)
+
+                Button(action: roto.saveRawJSON) {
+                    Label("Save Raw JSON", systemImage: "doc.text")
+                }
+                .disabled(roto.rawCapture == nil || roto.isWorking)
+
+                HStack {
+                    metricRow("Frames", "\(roto.rawCapture?.frames.count ?? 0)")
+                    metricRow("Detected", roto.detectedFrameText)
                 }
             }
+        }
+    }
 
-            Slider(
-                value: Binding(
-                    get: {
-                        Double(min(max(currentFrameIndex, 0), maxFrameIndex))
-                    },
-                    set: { newValue in
-                        setCurrentFrameIndex(Int(newValue.rounded()), seekPlayer: true)
+    private var normalizationSection: some View {
+        Section("Normalization") {
+            VStack(alignment: .leading, spacing: 10) {
+                Button(action: roto.normalize) {
+                    Label("Normalize Meshy24", systemImage: "point.3.connected.trianglepath.dotted")
+                }
+                .disabled(roto.rawCapture == nil || roto.isWorking)
+
+                Button(action: roto.saveNormalizedJSON) {
+                    Label("Save Normalized JSON", systemImage: "doc.text")
+                }
+                .disabled(roto.normalizedCapture == nil || roto.isWorking)
+
+                metricRow("Rig", CanonicalRig.rigID)
+                metricRow("Joints", "\(CanonicalRig.jointNames.count)")
+            }
+        }
+    }
+
+    private var smoothingSection: some View {
+        Section("Smoothing") {
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Enable smoothing", isOn: $roto.smoothingSettings.globalEnabled)
+
+                HStack {
+                    Text("Strength")
+                    Slider(value: $roto.smoothingSettings.strength, in: 0...0.98)
+                    Text(String(format: "%.2f", roto.smoothingSettings.strength))
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(width: 42, alignment: .trailing)
+                }
+
+                Toggle("Interpolate missing points", isOn: $roto.smoothingSettings.missingInterpolationEnabled)
+                Toggle("Confidence weighted", isOn: $roto.smoothingSettings.confidenceWeighted)
+                Toggle("Smoothed overlay", isOn: $roto.showSmoothed)
+                Toggle("Smoothing delta vectors", isOn: $roto.showSmoothingDelta)
+
+                HStack {
+                    Button(action: roto.smooth) {
+                        Label("Run Smoothing", systemImage: "waveform.path.ecg")
                     }
-                ),
-                in: 0...sliderUpperBound,
-                step: 1
+                    .disabled(roto.normalizedCapture == nil || roto.isWorking)
+
+                    Button(action: roto.saveSmoothedJSON) {
+                        Label("Save", systemImage: "doc.text")
+                    }
+                    .disabled(roto.smoothedCapture == nil || roto.isWorking)
+                }
+            }
+        }
+    }
+
+    private var rigSection: some View {
+        Section("Rig") {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Button(action: roto.importRigProfile) {
+                        Label("Import Rig Profile", systemImage: "square.and.arrow.down")
+                    }
+
+                    Button(action: roto.loadDefaultRigProfile) {
+                        Label("Default", systemImage: "person.crop.rectangle")
+                    }
+                }
+
+                Button(action: roto.saveRigProfileJSON) {
+                    Label("Save Rig Profile", systemImage: "doc.text")
+                }
+                .disabled(roto.rigProfile == nil || roto.isWorking)
+
+                metricRow("Loaded", roto.rigProfile?.rigID ?? "None")
+                metricRow("Version", roto.rigProfile?.rigVersion ?? "--")
+                metricRow("Validation", rigValidationText)
+            }
+        }
+    }
+
+    private var fitSection: some View {
+        Section("Fit") {
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Use smoothed targets", isOn: $roto.fitSettings.useSmoothedTargets)
+                Picker("Fit Mode", selection: $roto.fitSettings.fitMode) {
+                    ForEach(RigFitMode.allCases, id: \.self) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                HStack {
+                    Text("Target")
+                    Slider(value: $roto.fitSettings.targetWeight, in: 0...1)
+                    Text(String(format: "%.2f", roto.fitSettings.targetWeight))
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(width: 42, alignment: .trailing)
+                }
+
+                HStack {
+                    Text("Previous")
+                    Slider(value: $roto.fitSettings.previousFrameWeight, in: 0...0.95)
+                    Text(String(format: "%.2f", roto.fitSettings.previousFrameWeight))
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(width: 42, alignment: .trailing)
+                }
+
+                Toggle("Fitted rig overlay", isOn: $roto.showFittedRig)
+
+                HStack {
+                    Button(action: roto.runFit) {
+                        Label("Run Fit", systemImage: "figure.arms.open")
+                    }
+                    .disabled(roto.normalizedCapture == nil || roto.rigProfile == nil || roto.isWorking)
+
+                    Button(action: roto.saveFitJSON) {
+                        Label("Save", systemImage: "doc.text")
+                    }
+                    .disabled(roto.fitResult == nil || roto.isWorking)
+                }
+
+                metricRow("Fit Score", roto.currentFitScoreText)
+                metricRow("Avg Error", roto.averageFitErrorText)
+            }
+        }
+    }
+
+    private var exportSection: some View {
+        Section("Export") {
+            VStack(alignment: .leading, spacing: 10) {
+                Button(action: roto.chooseOutputDirectory) {
+                    Label("Choose Output Directory", systemImage: "folder.badge.gearshape")
+                }
+
+                Text(roto.outputDirectoryURL?.path ?? "Defaults to selected video folder.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .textSelection(.enabled)
+
+                Button(action: roto.exportJockAnim) {
+                    Label("Export JockAnim", systemImage: "square.and.arrow.up")
+                }
+                .disabled(roto.fitResult == nil || roto.isWorking)
+            }
+        }
+    }
+
+    private var statusSection: some View {
+        Section("Status") {
+            ExtractionProgressView(
+                isExtracting: roto.isWorking,
+                progressText: roto.status,
+                logLines: roto.logLines
             )
-            .disabled(!hasFrames)
         }
     }
 
-    private var durationText: String {
-        guard let duration = project?.metadata.durationSeconds, duration.isFinite else {
+    private var rigValidationText: String {
+        guard let rigProfile = roto.rigProfile else {
             return "--"
         }
 
-        return "\(TimecodeFormatter.timecode(seconds: duration))"
-    }
-
-    private var fpsText: String {
-        guard let fps = project?.metadata.nominalFrameRate, fps > 0 else {
-            return "--"
-        }
-
-        return String(format: "%.2f", fps)
-    }
-
-    private var sizeText: String {
-        guard let project else {
-            return "--"
-        }
-
-        return "\(Int(project.metadata.naturalSize.width.rounded())) x \(Int(project.metadata.naturalSize.height.rounded()))"
-    }
-
-    private var detectedFrameText: String {
-        guard let frames = exporter.capture?.frames else {
-            return "0"
-        }
-
-        return "\(frames.filter(\.detected).count)"
-    }
-
-    private var currentTimelineText: String {
-        if let currentFrame {
-            return "\(currentFrame.timecode)  |  \(String(format: "%.3f", currentFrame.timeSeconds))s"
-        }
-
-        return "\(TimecodeFormatter.timecode(seconds: currentTimeSeconds))  |  \(String(format: "%.3f", currentTimeSeconds))s"
+        let validation = rigProfile.validate()
+        return validation.valid ? "Valid" : "Missing \(validation.missingRequiredJoints.count)"
     }
 
     private func metricRow(_ label: String, _ value: String) -> some View {
@@ -262,171 +313,6 @@ struct ContentView: View {
                 .textSelection(.enabled)
         }
         .font(.callout)
-    }
-
-    private func openVideo() {
-        guard let url = FilePanelHelpers.openVideoURL() else { return }
-
-        videoURL = url
-        outputDirectoryURL = url.deletingLastPathComponent()
-        exporter.capture = nil
-        currentFrameIndex = 0
-        currentTimeSeconds = 0
-
-        let player = AVPlayer(url: url)
-        self.player = player
-        player.play()
-
-        log("Opened \(url.lastPathComponent)")
-
-        Task {
-            do {
-                project = try await RotoMotionProject.load(videoURL: url)
-                log("Loaded video metadata.")
-            } catch {
-                log("Video metadata failed: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    private func runExtraction() {
-        guard let videoURL else {
-            log("No video selected.")
-            return
-        }
-
-        Task {
-            do {
-                let capture = try await exporter.runExtraction(
-                    videoURL: videoURL,
-                    sampleFPS: max(sampleFPS, 1.0),
-                    maxFrames: maxFrames
-                )
-
-                setCurrentFrameIndex(0, seekPlayer: true)
-                log("Vision extraction complete: \(capture.frames.count) frames.")
-            } catch {
-                log("Vision extraction failed: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    private func saveRawJSON() {
-        guard let capture = exporter.capture else {
-            log(RotoMotionError.noCaptureAvailable.localizedDescription)
-            return
-        }
-
-        guard let jsonURL = FilePanelHelpers.saveRawJSONURL(defaultDirectory: outputDirectoryURL) else {
-            log(RotoMotionError.noOutputDirectory.localizedDescription)
-            return
-        }
-
-        outputDirectoryURL = jsonURL.deletingLastPathComponent()
-
-        do {
-            try JSONCoding.writePretty(capture, to: jsonURL)
-            log("Wrote \(jsonURL.lastPathComponent)")
-        } catch {
-            log("Raw JSON save failed: \(error.localizedDescription)")
-        }
-    }
-
-    private func exportOutputs() {
-        guard let capture = exporter.capture else {
-            log(RotoMotionError.noCaptureAvailable.localizedDescription)
-            return
-        }
-
-        guard let outputDir = resolvedOutputDirectory() else {
-            log(RotoMotionError.noOutputDirectory.localizedDescription)
-            return
-        }
-
-        let jsonURL = outputDir.appendingPathComponent("capture_raw_vision.json")
-        let usdaURL = outputDir.appendingPathComponent("capture_pose_donor.usda")
-        let usdzURL = outputDir.appendingPathComponent("capture_pose_donor.usdz")
-
-        do {
-            try JSONCoding.writePretty(capture, to: jsonURL)
-            log("Wrote \(jsonURL.lastPathComponent)")
-
-            try USDAPoseDonorWriter.writeUSDA(capture: capture, to: usdaURL)
-            log("Wrote \(usdaURL.lastPathComponent)")
-
-            if exportUSDZ {
-                do {
-                    try USDZPackager.packageUSDAAsUSDZ(usdaURL: usdaURL, usdzURL: usdzURL)
-                    log("Wrote \(usdzURL.lastPathComponent)")
-                } catch {
-                    log("USDZ packaging failed; USDA remains available: \(error.localizedDescription)")
-                }
-            }
-        } catch {
-            log("Export failed: \(error.localizedDescription)")
-        }
-    }
-
-    private func chooseOutputDirectory() {
-        guard let url = FilePanelHelpers.chooseOutputDirectory() else { return }
-
-        outputDirectoryURL = url
-        log("Output directory set to \(url.path)")
-    }
-
-    private func resolvedOutputDirectory() -> URL? {
-        if let outputDirectoryURL {
-            return outputDirectoryURL
-        }
-
-        let selected = FilePanelHelpers.chooseOutputDirectory()
-        outputDirectoryURL = selected
-        return selected
-    }
-
-    private func handlePlaybackTimeChange(_ seconds: Double) {
-        currentTimeSeconds = seconds
-
-        guard let frames = exporter.capture?.frames, !frames.isEmpty else {
-            return
-        }
-
-        let nearestIndex = frames.indices.min { lhs, rhs in
-            abs(frames[lhs].timeSeconds - seconds) < abs(frames[rhs].timeSeconds - seconds)
-        }
-
-        if let nearestIndex, nearestIndex != currentFrameIndex {
-            setCurrentFrameIndex(nearestIndex, seekPlayer: false)
-        }
-    }
-
-    private func setCurrentFrameIndex(_ index: Int, seekPlayer: Bool) {
-        let frameCount = exporter.capture?.frames.count ?? 0
-        guard frameCount > 0 else {
-            currentFrameIndex = 0
-            return
-        }
-
-        let clamped = min(max(index, 0), frameCount - 1)
-        currentFrameIndex = clamped
-
-        guard seekPlayer, let frame = exporter.capture?.frames[clamped] else {
-            return
-        }
-
-        player?.seek(
-            to: CMTime(seconds: frame.timeSeconds, preferredTimescale: 600),
-            toleranceBefore: .zero,
-            toleranceAfter: .zero
-        )
-    }
-
-    private func log(_ message: String) {
-        logLines.append(message)
-
-        if logLines.count > 80 {
-            logLines.removeFirst(logLines.count - 80)
-        }
     }
 }
 

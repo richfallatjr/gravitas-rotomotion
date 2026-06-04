@@ -68,9 +68,6 @@ final class RotoMotionExporter: ObservableObject {
                 maxFrames: maxFrames
             ) { sample in
                 let rawJoints = try extractor.extractPose(from: sample.pixelBuffer)
-                let canonicalJoints = CanonicalPoseBuilder.buildCanonicalJoints(
-                    rawVisionJoints: rawJoints
-                )
 
                 frames.append(
                     RawVisionPoseCapture.PoseFrame(
@@ -79,8 +76,7 @@ final class RotoMotionExporter: ObservableObject {
                         timeSeconds: sample.timeSeconds,
                         timecode: TimecodeFormatter.timecode(seconds: sample.timeSeconds),
                         detected: !rawJoints.isEmpty,
-                        joints: rawJoints,
-                        canonicalJoints: canonicalJoints
+                        joints: rawJoints
                     )
                 )
 
@@ -104,16 +100,9 @@ final class RotoMotionExporter: ObservableObject {
                     sampleFPS: sampleFPS,
                     normalizedCoordinates: true,
                     createdAtISO8601: ISO8601DateFormatter().string(from: Date()),
-                    notes: "Phase 1 raw Vision extraction. No semantic interpretation."
+                    notes: "Raw Vision evidence only. No smoothing, rig fitting, or semantic interpretation."
                 ),
-                frames: frames,
-                canonicalRig: .init(
-                    rigID: CanonicalRig.rigID,
-                    rigVersion: CanonicalRig.rigVersion,
-                    jointCount: CanonicalRig.jointNames.count,
-                    upAxis: CanonicalRig.upAxis,
-                    jointNames: CanonicalRig.jointNames
-                )
+                frames: frames
             )
         }.value
     }
