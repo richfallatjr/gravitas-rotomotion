@@ -15,26 +15,38 @@ struct RigFitSettings: Codable, Equatable {
     var fitMode: RigFitMode
     var targetWeight: Double
     var previousFrameWeight: Double
+    var useGroundConstraint: Bool
+    var footContactToleranceMeters: Double
 
     static let `default` = RigFitSettings(
         useSmoothedTargets: true,
         fitMode: .fullBody,
         targetWeight: 1.0,
-        previousFrameWeight: 0.15
+        previousFrameWeight: 0.15,
+        useGroundConstraint: true,
+        footContactToleranceMeters: 0.04
     )
 }
 
 enum ConstrainedRigFitter {
     private static let minimumTargetConfidence = 0.05
+    private static let groundContactJoints = [
+        "LeftFoot",
+        "LeftToeBase",
+        "RightFoot",
+        "RightToeBase"
+    ]
 
     static func fit(
         normalized: NormalizedMeshyPoseCapture,
         smoothed: SmoothedMeshyPoseCapture?,
         rigProfile: RigProfile,
-        settings: RigFitSettings
+        settings: RigFitSettings,
+        groundPlane: GroundPlaneController?
     ) -> RigFitResult {
         var previousFramePositions: [String: SIMD3<Float>] = [:]
         var frameFits: [RigFitResult.FrameFit] = []
+        let solveGroundPlane = groundPlaneForSolve(controller: groundPlane)
 
         for frame in normalized.frames {
             let targets = targetsForFrame(
@@ -48,7 +60,8 @@ enum ConstrainedRigFitter {
                 targets: targets,
                 rigProfile: rigProfile,
                 previousPositions: previousFramePositions,
-                settings: settings
+                settings: settings,
+                groundPlane: solveGroundPlane
             )
 
             previousFramePositions = fit.positions
@@ -69,7 +82,9 @@ enum ConstrainedRigFitter {
                     },
                     fitErrors: fit.errors,
                     fitScore: fit.score,
-                    ignoredTargets: fit.ignoredTargets
+                    ignoredTargets: fit.ignoredTargets,
+                    groundPlaneApplied: fit.groundPlaneApplied,
+                    groundContactJoints: fit.groundContactJoints
                 )
             )
         }
@@ -115,6 +130,8 @@ enum ConstrainedRigFitter {
         let errors: [String: Double]
         let score: Double
         let ignoredTargets: [String]
+        let groundPlaneApplied: Bool
+        let groundContactJoints: [String]
     }
 
     private static func fitFrame(
@@ -122,7 +139,8 @@ enum ConstrainedRigFitter {
         targets: [String: CGPoint],
         rigProfile: RigProfile,
         previousPositions: [String: SIMD3<Float>],
-        settings: RigFitSettings
+        settings: RigFitSettings,
+        groundPlane: GroundPlane?
     ) -> FrameFitInternal {
         var positions: [String: SIMD3<Float>] = [:]
         var rotations: [String: simd_quatf] = [:]
@@ -137,7 +155,9 @@ enum ConstrainedRigFitter {
                 rotations: [:],
                 errors: [:],
                 score: 0,
-                ignoredTargets: CanonicalRig.jointNames
+                ignoredTargets: CanonicalRig.jointNames,
+                groundPlaneApplied: false,
+                groundContactJoints: []
             )
         }
 
@@ -200,6 +220,24 @@ enum ConstrainedRigFitter {
             }
         }
 
+        let didApplyGround = settings.useGroundConstraint && groundPlane != nil
+
+        if settings.useGroundConstraint,
+           let groundPlane {
+            applyGroundConstraint(
+                positions: &positions,
+                groundPlane: groundPlane,
+                rigProfile: rigProfile,
+                toleranceMeters: Float(settings.footContactToleranceMeters)
+            )
+            rotations = rotationsForPositions(positions)
+            errors = fitErrors(
+                positions: positions,
+                targets: targets,
+                activeJoints: active
+            )
+        }
+
         let score: Double
         if errors.isEmpty {
             score = 0
@@ -213,8 +251,197 @@ enum ConstrainedRigFitter {
             rotations: rotations,
             errors: errors,
             score: score,
-            ignoredTargets: Array(Set(ignored)).sorted()
+            ignoredTargets: Array(Set(ignored)).sorted(),
+            groundPlaneApplied: didApplyGround,
+            groundContactJoints: didApplyGround ? groundContactJoints : []
         )
+    }
+
+    private struct GroundPlane {
+        let point: SIMD3<Float>
+        let normal: SIMD3<Float>
+
+        func projectPointAbovePlane(
+            _ pointToProject: SIMD3<Float>,
+            toleranceMeters: Float
+        ) -> SIMD3<Float> {
+            let signedDistance = distance(pointToProject)
+
+            if signedDistance >= -toleranceMeters {
+                return pointToProject
+            }
+
+            return pointToProject - normal * signedDistance
+        }
+
+        func distance(_ p: SIMD3<Float>) -> Float {
+            simd_dot(p - point, normal)
+        }
+    }
+
+    private static func groundPlaneForSolve(
+        controller: GroundPlaneController?
+    ) -> GroundPlane? {
+        guard let controller, controller.constraintEnabled else { return nil }
+
+        let pitch = Float(controller.tumbleXRadians)
+        let roll = Float(controller.rollZRadians)
+        var normal = SIMD3<Float>(0, 1, 0)
+        normal = rotateAroundX(normal, radians: pitch)
+        normal = rotateAroundZ(normal, radians: roll)
+
+        return GroundPlane(
+            point: SIMD3<Float>(
+                0,
+                Float(controller.groundHeight),
+                0
+            ),
+            normal: safeNormalize(normal, fallback: SIMD3<Float>(0, 1, 0))
+        )
+    }
+
+    private static func rotateAroundX(
+        _ value: SIMD3<Float>,
+        radians: Float
+    ) -> SIMD3<Float> {
+        let c = cos(radians)
+        let s = sin(radians)
+
+        return SIMD3<Float>(
+            value.x,
+            value.y * c - value.z * s,
+            value.y * s + value.z * c
+        )
+    }
+
+    private static func rotateAroundZ(
+        _ value: SIMD3<Float>,
+        radians: Float
+    ) -> SIMD3<Float> {
+        let c = cos(radians)
+        let s = sin(radians)
+
+        return SIMD3<Float>(
+            value.x * c - value.y * s,
+            value.x * s + value.y * c,
+            value.z
+        )
+    }
+
+    private static func applyGroundConstraint(
+        positions: inout [String: SIMD3<Float>],
+        groundPlane: GroundPlane,
+        rigProfile: RigProfile,
+        toleranceMeters: Float
+    ) {
+        for jointName in groundContactJoints {
+            guard let position = positions[jointName] else { continue }
+            positions[jointName] = groundPlane.projectPointAbovePlane(
+                position,
+                toleranceMeters: toleranceMeters
+            )
+        }
+
+        reprojectLimbLength(
+            positions: &positions,
+            parent: "LeftLeg",
+            child: "LeftFoot",
+            rigProfile: rigProfile
+        )
+        reprojectLimbLength(
+            positions: &positions,
+            parent: "LeftFoot",
+            child: "LeftToeBase",
+            rigProfile: rigProfile
+        )
+        reprojectLimbLength(
+            positions: &positions,
+            parent: "RightLeg",
+            child: "RightFoot",
+            rigProfile: rigProfile
+        )
+        reprojectLimbLength(
+            positions: &positions,
+            parent: "RightFoot",
+            child: "RightToeBase",
+            rigProfile: rigProfile
+        )
+
+        for jointName in groundContactJoints {
+            guard let position = positions[jointName] else { continue }
+            positions[jointName] = groundPlane.projectPointAbovePlane(
+                position,
+                toleranceMeters: 0
+            )
+        }
+    }
+
+    private static func reprojectLimbLength(
+        positions: inout [String: SIMD3<Float>],
+        parent: String,
+        child: String,
+        rigProfile: RigProfile
+    ) {
+        guard let parentPosition = positions[parent],
+              let childPosition = positions[child],
+              let rigJoint = rigProfile.jointByName[child] else {
+            return
+        }
+
+        let length = max(Float(rigJoint.boneLengthToParent), 0.0001)
+        let direction = childPosition - parentPosition
+
+        guard simd_length_squared(direction) > 0.000001 else { return }
+
+        positions[child] = parentPosition + simd_normalize(direction) * length
+    }
+
+    private static func rotationsForPositions(
+        _ positions: [String: SIMD3<Float>]
+    ) -> [String: simd_quatf] {
+        var rotations: [String: simd_quatf] = [
+            "Hips": simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
+        ]
+
+        for jointName in CanonicalRig.jointNames where jointName != "Hips" {
+            guard let parentName = flattenedParent(for: jointName),
+                  let parentPosition = positions[parentName],
+                  let childPosition = positions[jointName] else {
+                continue
+            }
+
+            rotations[jointName] = rotationFromParentToChild(
+                parent: parentPosition,
+                child: childPosition
+            )
+        }
+
+        return rotations
+    }
+
+    private static func fitErrors(
+        positions: [String: SIMD3<Float>],
+        targets: [String: CGPoint],
+        activeJoints: Set<String>
+    ) -> [String: Double] {
+        var errors: [String: Double] = [:]
+
+        for jointName in activeJoints {
+            guard let target2D = targets[jointName],
+                  let solved = positions[jointName] else {
+                continue
+            }
+
+            let solved2D = CGPoint(
+                x: CGFloat(Double(solved.x) + 0.5),
+                y: CGFloat(Double(solved.z) + 0.5)
+            )
+            let dx = Double(solved2D.x - target2D.x)
+            let dy = Double(solved2D.y - target2D.y)
+            errors[jointName] = sqrt(dx * dx + dy * dy)
+        }
+
+        return errors
     }
 
     private static func solvedDirection(

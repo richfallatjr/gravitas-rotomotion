@@ -28,6 +28,7 @@ struct PoseOverlayView: View {
             }
         }
         .allowsHitTesting(false)
+        .background(Color.clear)
         .accessibilityHidden(true)
     }
 
@@ -42,7 +43,7 @@ struct PoseOverlayView: View {
             drawCircle(
                 point: point,
                 radius: 3.25,
-                color: .yellow.opacity(opacity),
+                color: .orange.opacity(opacity),
                 context: &context
             )
         }
@@ -67,7 +68,7 @@ struct PoseOverlayView: View {
             drawLine(
                 from: point(x: jointA.x, y: jointA.y, size: size),
                 to: point(x: jointB.x, y: jointB.y, size: size),
-                color: Color.orange.opacity(opacity),
+                color: Color.yellow.opacity(opacity),
                 lineWidth: generated ? 1.1 : 1.7,
                 context: &context
             )
@@ -84,7 +85,7 @@ struct PoseOverlayView: View {
                 drawCircle(
                     point: p,
                     radius: joint.generated ? 2.75 : 4.0,
-                    color: Color.orange.opacity(joint.generated ? 0.45 : 0.9),
+                    color: Color.yellow.opacity(joint.generated ? 0.45 : 0.9),
                     context: &context
                 )
             }

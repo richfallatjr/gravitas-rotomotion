@@ -5,7 +5,9 @@ struct GravitasRotoMotionApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .frame(minWidth: 1120, minHeight: 720)
+                .onAppear {
+                    print("[RotoMotion App] ACTIVE ROOT VIEW = ContentView")
+                }
         }
         .windowStyle(.titleBar)
     }

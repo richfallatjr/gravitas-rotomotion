@@ -1,444 +1,580 @@
-import Combine
+import AppKit
+import AVFoundation
 import SwiftUI
 
 struct ContentView: View {
     @StateObject private var roto = RotoMotionViewModel()
 
+    @State private var uiVideoURL: URL?
+    @State private var uiDecodedFrames: [RotoVideoFrameCache.CachedFrame] = []
+    @State private var uiCurrentImage: NSImage?
+    @State private var uiCurrentFrameIndex = 0
+    @State private var uiRenderToken = 0
+    @State private var uiStatus = "Open a video to begin."
+    @State private var uiIsPlaying = false
+    @State private var uiLoop = true
+    @State private var playbackTimer: Timer?
+    @State private var uiAudioPlayer: AVPlayer?
+    @State private var uiAudioEndObserver: NSObjectProtocol?
+    @State private var uiSecurityScopedURL: URL?
+    @State private var uiSecurityScopedAccessActive = false
+    @State private var pipelineRenderToken = 0
+
     var body: some View {
         VStack(spacing: 0) {
-            header
+            toolbar
 
             Divider()
 
-            HStack(spacing: 0) {
-                VStack(spacing: 12) {
-                    VideoPoseViewport(
-                        player: roto.player,
-                        videoURL: roto.videoURL,
-                        rawFrame: roto.currentRawFrame,
-                        normalizedFrame: roto.currentNormalizedFrame,
-                        smoothedFrame: roto.currentSmoothedFrame,
-                        fitFrame: roto.currentFitFrame,
-                        videoSize: roto.videoSize,
-                        showRawVisionPoints: roto.showRawVisionPoints,
-                        showNormalizedMeshyPoints: roto.showNormalizedMeshyPoints,
-                        showSmoothedMeshyPoints: roto.showSmoothedMeshyPoints,
-                        showSmoothingDeltaVectors: roto.showSmoothingDeltaVectors,
-                        showFittedRig: roto.showFittedRig,
-                        projectionSettings: roto.projectionSettings,
-                        onTimeChange: roto.handlePlaybackTimeChange
-                    )
+            HStack(spacing: 12) {
+                videoPanel
+                    .frame(minWidth: 680)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                    RotoMotionTimelineView(
-                        frameCount: roto.frameCount,
-                        currentFrame: roto.currentRawFrame,
-                        currentTimelineText: roto.currentTimelineText,
-                        currentFrameIndex: $roto.currentFrameIndex
-                    ) { index in
-                        roto.setCurrentFrameIndex(index, seekPlayer: true)
-                    }
-                }
-                .padding(16)
-
-                Divider()
-
-                rigScenePanel
-                    .frame(width: 420)
-
-                Divider()
-
-                sidebar
-                    .frame(width: 380)
+                controlPanel
+                    .frame(width: 360)
+                    .frame(maxHeight: .infinity)
             }
+            .padding(12)
+
+            Divider()
+
+            statusBar
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .frame(minWidth: 1120, minHeight: 820)
+        .onAppear {
+            print("[RotoMotion UI] Main ContentView appeared")
+        }
+        .onDisappear {
+            releaseUIVideoAccess()
+        }
     }
 
-    private var header: some View {
-        HStack(spacing: 10) {
-            Text("Gravitas RotoMotion")
-                .font(.headline)
-
-            Spacer()
-
-            Button(action: roto.openVideo) {
-                Label("Open Video", systemImage: "folder")
+    private var toolbar: some View {
+        HStack(spacing: 12) {
+            Button("Open Video") {
+                openVideoDirectlyInContentView()
             }
-            .keyboardShortcut("o")
+            .buttonStyle(.borderedProminent)
 
-            Button {
+            Button(uiIsPlaying ? "Pause" : "Play") {
+                toggleUIDirectPlayback()
+            }
+            .disabled(uiDecodedFrames.isEmpty)
+
+            Button("Restart") {
+                setUIDirectFrame(0)
+                playUIDirect()
+            }
+            .disabled(uiDecodedFrames.isEmpty)
+
+            Toggle("Loop", isOn: $uiLoop)
+
+            Divider()
+                .frame(height: 22)
+
+            Button("Run Vision") {
                 Task {
                     await roto.runVisionExtraction()
+                    pipelineRenderToken += 1
+                    uiStatus = roto.status
                 }
-            } label: {
-                Label("Run Vision Extraction", systemImage: "figure.walk")
             }
-            .disabled(roto.videoURL == nil || roto.isWorking)
+            .disabled(runVisionDisabledReason != nil)
+
+            Button("Normalize Meshy24") {
+                roto.normalize()
+                pipelineRenderToken += 1
+                uiStatus = roto.status
+            }
+            .disabled(normalizeDisabledReason != nil)
+
+            Button("Save Raw Vision") {
+                roto.saveRawJSON()
+                uiStatus = roto.status
+            }
+            .disabled(roto.rawCapture == nil)
+
+            Button("Save Normalized") {
+                roto.saveNormalizedJSON()
+                uiStatus = roto.status
+            }
+            .disabled(roto.normalizedCapture == nil)
+
+            Spacer()
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .contentShape(Rectangle())
+        .padding(.horizontal, 12)
+        .padding(.top, 42)
+        .padding(.bottom, 10)
+        .zIndex(10)
     }
 
-    private var sidebar: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                videoSection
-                extractionSection
-                normalizationSection
-                smoothingSection
-                rigSection
-                fitSection
-                exportSection
-                statusSection
-            }
-            .padding(16)
-        }
-    }
-
-    private var videoSection: some View {
-        Section("Video") {
-            VStack(alignment: .leading, spacing: 8) {
-                metricRow("File", roto.videoURL?.lastPathComponent ?? "None")
-                metricRow("Duration", roto.durationText)
-                metricRow("Nominal FPS", roto.fpsText)
-                metricRow("Size", roto.sizeText)
-            }
-        }
-    }
-
-    private var extractionSection: some View {
-        Section("Extraction") {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Text("Sample FPS")
-                    Spacer()
-                    TextField(
-                        "Sample FPS",
-                        value: $roto.sampleFPS,
-                        format: .number.precision(.fractionLength(0...2))
-                    )
-                    .multilineTextAlignment(.trailing)
-                    .frame(width: 82)
-                }
-
-                Stepper(
-                    roto.maxFrames == 0 ? "Max Frames: No cap" : "Max Frames: \(roto.maxFrames)",
-                    value: $roto.maxFrames,
-                    in: 0...100_000,
-                    step: 24
-                )
-
-                Toggle("Show Raw Vision Points", isOn: $roto.showRawVisionPoints)
-
-                Button(action: roto.saveRawJSON) {
-                    Label("Save Raw JSON", systemImage: "doc.text")
-                }
-                .disabled(roto.rawCapture == nil || roto.isWorking)
-
-                HStack {
-                    metricRow("Frames", "\(roto.rawCapture?.frames.count ?? 0)")
-                    metricRow("Detected", roto.detectedFrameText)
-                }
-
-                metricRow("Raw Vision", "Variable joints")
-            }
-        }
-    }
-
-    private var normalizationSection: some View {
-        Section("Normalization") {
-            VStack(alignment: .leading, spacing: 10) {
-                Button(action: roto.normalize) {
-                    Label("Normalize Meshy24", systemImage: "point.3.connected.trianglepath.dotted")
-                }
-                .disabled(roto.rawCapture == nil || roto.isWorking)
-
-                Button(action: roto.saveNormalizedJSON) {
-                    Label("Save Normalized JSON", systemImage: "doc.text")
-                }
-                .disabled(roto.normalizedCapture == nil || roto.isWorking)
-
-                Toggle("Show Normalized Meshy24 Points", isOn: $roto.showNormalizedMeshyPoints)
-
-                metricRow("Rig", CanonicalRig.rigID)
-                metricRow("Meshy24", "\(CanonicalRig.jointNames.count) canonical joints")
-            }
-        }
-    }
-
-    private var smoothingSection: some View {
-        Section("Smoothing") {
-            VStack(alignment: .leading, spacing: 10) {
-                Toggle("Use Smoothing", isOn: $roto.smoothingPreviewEnabled)
-                    .onChange(of: roto.smoothingPreviewEnabled) {
-                        roto.recomputeSmoothingIfAvailable()
-                    }
-
-                HStack {
-                    Text("Strength")
-                    Slider(value: $roto.smoothingStrength, in: 0...1)
-                        .onChange(of: roto.smoothingStrength) {
-                            roto.recomputeSmoothingIfAvailable()
-                        }
-                    Text(String(format: "%.2f", roto.smoothingStrength))
-                        .font(.system(.caption, design: .monospaced))
-                        .frame(width: 42, alignment: .trailing)
-                }
-
-                Stepper(
-                    "Window Radius: \(roto.smoothingWindowRadius)",
-                    value: $roto.smoothingWindowRadius,
-                    in: 1...12
-                )
-                .onChange(of: roto.smoothingWindowRadius) {
-                    roto.recomputeSmoothingIfAvailable()
-                }
-
-                Toggle("Interpolate missing points", isOn: $roto.smoothingSettings.missingInterpolationEnabled)
-                    .onChange(of: roto.smoothingSettings.missingInterpolationEnabled) {
-                        roto.recomputeSmoothingIfAvailable()
-                    }
-                Toggle("Confidence weighted", isOn: $roto.smoothingSettings.confidenceWeighted)
-                    .onChange(of: roto.smoothingSettings.confidenceWeighted) {
-                        roto.recomputeSmoothingIfAvailable()
-                    }
-                Toggle("Show Smoothed Meshy24 Points", isOn: $roto.showSmoothedMeshyPoints)
-                Toggle("Show Smoothing Delta Vectors", isOn: $roto.showSmoothingDeltaVectors)
-
-                HStack {
-                    Button(action: roto.smooth) {
-                        Label("Run Smoothing", systemImage: "waveform.path.ecg")
-                    }
-                    .disabled(roto.normalizedCapture == nil || roto.isWorking)
-
-                    Button(action: roto.saveSmoothedJSON) {
-                        Label("Save", systemImage: "doc.text")
-                    }
-                    .disabled(roto.smoothedCapture == nil || roto.isWorking)
-                }
-
-                Button("Toggle Raw / Smoothed") {
-                    roto.showRawVisionPoints.toggle()
-                    roto.showSmoothedMeshyPoints.toggle()
-                }
-            }
-        }
-    }
-
-    private var rigSection: some View {
-        Section("Rig / Model") {
-            VStack(alignment: .leading, spacing: 10) {
-                Button(action: roto.importUSDZRig) {
-                    Label("Load USDZ / USD Rig", systemImage: "cube.transparent")
-                }
-
-                Toggle("Show Imported Rig Model", isOn: $roto.showImportedRigModel)
-                Toggle("Show Imported Rig Skeleton", isOn: $roto.showImportedRigSkeleton)
-
-                Text(roto.rigImportStatus)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(4)
-                    .textSelection(.enabled)
-
-                metricRow("Imported matched", "\(roto.importedRigScene?.skeletonJointNames.count ?? 0)")
-                metricRow("Missing required", importedMissingRequiredText)
-                metricRow("Model opacity", "\(Int(roto.rigOpacity * 100))%")
-
-                Divider()
-
-                Text("Measured Profile")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-
-                HStack {
-                    Button(action: roto.importRigProfile) {
-                        Label("Import JSON Profile", systemImage: "square.and.arrow.down")
-                    }
-
-                    Button(action: roto.loadDefaultRigProfile) {
-                        Label("Default", systemImage: "person.crop.rectangle")
-                    }
-                }
-
-                Button(action: roto.saveRigProfileJSON) {
-                    Label("Save Rig Profile", systemImage: "doc.text")
-                }
-                .disabled(roto.rigProfile == nil || roto.isWorking)
-
-                metricRow("Loaded", roto.rigProfile?.rigID ?? "None")
-                metricRow("Version", roto.rigProfile?.rigVersion ?? "--")
-                metricRow("Validation", rigValidationText)
-            }
-        }
-    }
-
-    private var fitSection: some View {
-        Section("Fit") {
-            VStack(alignment: .leading, spacing: 10) {
-                Toggle("Use smoothed targets", isOn: $roto.fitSettings.useSmoothedTargets)
-                Picker("Fit Mode", selection: $roto.fitSettings.fitMode) {
-                    ForEach(RigFitMode.allCases, id: \.self) { mode in
-                        Text(mode.rawValue).tag(mode)
-                    }
-                }
-                .pickerStyle(.menu)
-
-                HStack {
-                    Text("Target")
-                    Slider(value: $roto.fitSettings.targetWeight, in: 0...1)
-                    Text(String(format: "%.2f", roto.fitSettings.targetWeight))
-                        .font(.system(.caption, design: .monospaced))
-                        .frame(width: 42, alignment: .trailing)
-                }
-
-                HStack {
-                    Text("Previous")
-                    Slider(value: $roto.fitSettings.previousFrameWeight, in: 0...0.95)
-                    Text(String(format: "%.2f", roto.fitSettings.previousFrameWeight))
-                        .font(.system(.caption, design: .monospaced))
-                        .frame(width: 42, alignment: .trailing)
-                }
-
-                Toggle("Fitted rig overlay", isOn: $roto.showFittedRig)
-
-                HStack {
-                    Button(action: roto.runFit) {
-                        Label("Run Fit", systemImage: "figure.arms.open")
-                    }
-                    .disabled(roto.normalizedCapture == nil || roto.rigProfile == nil || roto.isWorking)
-
-                    Button(action: roto.saveFitJSON) {
-                        Label("Save", systemImage: "doc.text")
-                    }
-                    .disabled(roto.fitResult == nil || roto.isWorking)
-                }
-
-                metricRow("Fit Score", roto.currentFitScoreText)
-                metricRow("Avg Error", roto.averageFitErrorText)
-            }
-        }
-    }
-
-    private var exportSection: some View {
-        Section("Export") {
-            VStack(alignment: .leading, spacing: 10) {
-                Button(action: roto.chooseOutputDirectory) {
-                    Label("Choose Output Directory", systemImage: "folder.badge.gearshape")
-                }
-
-                Text(roto.outputDirectoryURL?.path ?? "Defaults to selected video folder.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-                    .textSelection(.enabled)
-
-                Button(action: roto.exportJockAnim) {
-                    Label("Export JockAnim", systemImage: "square.and.arrow.up")
-                }
-                .disabled(roto.fitResult == nil || roto.isWorking)
-            }
-        }
-    }
-
-    private var statusSection: some View {
-        Section("Status") {
-            ExtractionProgressView(
-                isExtracting: roto.isWorking,
-                progressText: roto.status,
-                logLines: roto.logLines
-            )
-        }
-    }
-
-    private var rigScenePanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
+    private var videoPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Imported Rig / Model")
+                Text("RotoMotion Video")
                     .font(.headline)
 
                 Spacer()
 
-                Text("\(Int(roto.rigOpacity * 100))%")
-                    .font(.system(.caption, design: .monospaced))
+                Text("Frame \(uiCurrentFrameIndex) / \(max(uiDecodedFrames.count - 1, 0))")
+                    .font(.caption)
+                    .monospacedDigit()
+
+                Text(uiStatus)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
 
-            RigSceneKitView(
-                importedRigScene: roto.importedRigScene,
-                opacity: CGFloat(roto.rigOpacity),
-                showModel: roto.showImportedRigModel,
-                showSkeleton: roto.showImportedRigSkeleton
+            RotoMotionVideoCard(
+                image: uiCurrentImage,
+                frameIndex: uiCurrentFrameIndex,
+                rawFrame: currentRawFrame,
+                normalizedFrame: currentNormalizedFrame,
+                smoothedFrame: nil,
+                showRawVisionPoints: roto.showRawVisionPoints,
+                showNormalizedMeshyPoints: roto.showNormalizedMeshyPoints,
+                showSmoothedMeshyPoints: false,
+                showSmoothingDeltaVectors: false
             )
+            .aspectRatio(uiVideoAspectRatio, contentMode: .fit)
+            .frame(minWidth: 620, minHeight: 520)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color.black.opacity(0.82))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .overlay {
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(.quaternary, lineWidth: 1)
-            }
+            .background(Color.black)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
 
-            Slider(value: $roto.rigOpacity, in: 0.05...1.0) {
-                Text("Rig Opacity")
-            }
-            .onChange(of: roto.rigOpacity) {
-                roto.updateImportedRigOpacity()
-            }
+            timelineControls
+        }
+    }
 
-            HStack {
-                Button(action: roto.importUSDZRig) {
-                    Label("Load USDZ / USD", systemImage: "cube.transparent")
+    private var timelineControls: some View {
+        HStack {
+            Button("◀︎") {
+                setUIDirectFrame(uiCurrentFrameIndex - 1)
+            }
+            .disabled(uiDecodedFrames.isEmpty)
+
+            Slider(
+                value: Binding(
+                    get: {
+                        Double(uiCurrentFrameIndex)
+                    },
+                    set: { value in
+                        setUIDirectFrame(Int(value.rounded()))
+                    }
+                ),
+                in: 0...Double(max(uiDecodedFrames.count - 1, 1)),
+                step: 1
+            )
+            .disabled(uiDecodedFrames.isEmpty)
+
+            Button("▶︎") {
+                setUIDirectFrame(uiCurrentFrameIndex + 1)
+            }
+            .disabled(uiDecodedFrames.isEmpty)
+        }
+    }
+
+    private var controlPanel: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                GroupBox("Video") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("File: \(uiVideoURL?.lastPathComponent ?? "none")")
+                        Text("Decoded frames: \(uiDecodedFrames.count)")
+                        Text("Current image: \(uiCurrentImage == nil ? "nil" : "yes")")
+                    }
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                Toggle("Model", isOn: $roto.showImportedRigModel)
-                Toggle("Skeleton", isOn: $roto.showImportedRigSkeleton)
+                GroupBox("Vision Pipeline") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Raw Vision: \(roto.rawCapture?.frames.count ?? 0) frames")
+                        Text("Normalized Meshy24: \(roto.normalizedCapture?.frames.count ?? 0) frames")
+
+                        HStack {
+                            Button("Save Raw") {
+                                roto.saveRawJSON()
+                                uiStatus = roto.status
+                            }
+                            .disabled(roto.rawCapture == nil)
+
+                            Button("Save Normalized") {
+                                roto.saveNormalizedJSON()
+                                uiStatus = roto.status
+                            }
+                            .disabled(roto.normalizedCapture == nil)
+                        }
+
+                        if let reason = runVisionDisabledReason {
+                            Text("Run Vision disabled: \(reason)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        if let reason = normalizeDisabledReason {
+                            Text("Normalize disabled: \(reason)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                GroupBox("Overlays") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Raw Vision Points", isOn: $roto.showRawVisionPoints)
+                        Toggle("Normalized Meshy24 Skeleton", isOn: $roto.showNormalizedMeshyPoints)
+                    }
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                diagnosticsPanel
             }
+            .padding(10)
+        }
+    }
 
-            Text(roto.rigImportStatus)
+    private var diagnosticsPanel: some View {
+        GroupBox("Diagnostics") {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(roto.status)
+                    .font(.caption)
+                    .lineLimit(2)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(roto.diagnostics.lines.suffix(18).enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.caption2)
+                                .monospaced()
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+                .frame(height: 140)
+
+                Button("Clear Log") {
+                    roto.diagnostics.clear()
+                    pipelineRenderToken += 1
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var statusBar: some View {
+        HStack {
+            Text(statusText)
                 .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(3)
-                .textSelection(.enabled)
-        }
-        .padding(16)
-    }
-
-    private var rigValidationText: String {
-        guard let rigProfile = roto.rigProfile else {
-            return "--"
-        }
-
-        let validation = rigProfile.validate()
-        return validation.valid ? "Valid" : "Missing \(validation.missingRequiredJoints.count)"
-    }
-
-    private var importedMissingRequiredText: String {
-        guard let validation = roto.importedRigScene?.validation else {
-            return "--"
-        }
-
-        if validation.missingRequiredJoints.isEmpty {
-            return "None"
-        }
-
-        return validation.missingRequiredJoints.joined(separator: ", ")
-    }
-
-    private func metricRow(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(label)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text(value)
-                .multilineTextAlignment(.trailing)
                 .lineLimit(2)
-                .textSelection(.enabled)
-        }
-        .font(.callout)
-    }
-}
 
-#Preview {
-    ContentView()
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(NSColor.controlBackgroundColor))
+    }
+
+    private var statusText: String {
+        roto.status.isEmpty ? uiStatus : roto.status
+    }
+
+    private var uiVideoAspectRatio: CGFloat {
+        guard let image = uiCurrentImage, image.size.height > 0 else {
+            return 9.0 / 16.0
+        }
+
+        return image.size.width / image.size.height
+    }
+
+    private var runVisionDisabledReason: String? {
+        if uiVideoURL == nil {
+            return "No video selected."
+        }
+
+        if roto.isWorking {
+            return "Pipeline operation is running."
+        }
+
+        return nil
+    }
+
+    private var normalizeDisabledReason: String? {
+        guard let rawCapture = roto.rawCapture else {
+            return "No raw Vision capture."
+        }
+
+        if rawCapture.frames.isEmpty {
+            return "Raw Vision capture has zero frames."
+        }
+
+        if roto.isWorking {
+            return "Pipeline operation is running."
+        }
+
+        return nil
+    }
+
+    private var currentRawFrame: RawVisionPoseCapture.PoseFrame? {
+        guard let frames = roto.rawCapture?.frames else {
+            return nil
+        }
+
+        return frames.first { $0.frameIndex == uiCurrentFrameIndex }
+            ?? (frames.indices.contains(uiCurrentFrameIndex) ? frames[uiCurrentFrameIndex] : nil)
+    }
+
+    private var currentNormalizedFrame: NormalizedMeshyPoseCapture.Frame? {
+        guard let frames = roto.normalizedCapture?.frames else {
+            return nil
+        }
+
+        return frames.first { $0.frameIndex == uiCurrentFrameIndex }
+            ?? (frames.indices.contains(uiCurrentFrameIndex) ? frames[uiCurrentFrameIndex] : nil)
+    }
+
+    private func openVideoDirectlyInContentView() {
+        print("[RotoMotion UI] Open Video requested.")
+
+        guard let url = FilePanelHelpers.openVideoURL() else {
+            uiStatus = "Open video canceled."
+            roto.status = uiStatus
+            roto.diagnostics.log("Open Video canceled by user.")
+            return
+        }
+
+        releaseUIVideoAccess()
+
+        let didAccess = url.startAccessingSecurityScopedResource()
+        uiSecurityScopedURL = url
+        uiSecurityScopedAccessActive = didAccess
+        uiVideoURL = url
+
+        uiStatus = "Decoding \(url.lastPathComponent)..."
+        uiDecodedFrames = []
+        uiCurrentImage = nil
+        uiCurrentFrameIndex = 0
+        uiRenderToken += 1
+        pipelineRenderToken += 1
+
+        roto.videoURL = url
+        roto.lastLoadedVideoURL = url
+        roto.outputDirectoryURL = RotoMotionProjectStore.defaultOutputDirectory(for: url)
+        roto.decodedFrames = []
+        roto.currentVideoFrameImage = nil
+        roto.currentFrameIndex = 0
+        roto.currentTimeSeconds = 0
+        roto.maxFrameIndex = 0
+        roto.rawCapture = nil
+        roto.normalizedCapture = nil
+        roto.smoothedCapture = nil
+        roto.fitResult = nil
+        roto.videoPlaybackStatus = "Decoding frames..."
+        roto.status = "Loaded video: \(url.lastPathComponent)"
+        roto.diagnostics.log("""
+        Open Video selected:
+          path: \(url.path)
+          securityScoped: \(didAccess)
+        """)
+
+        installUIAudioPlayer(for: url)
+
+        Task {
+            let cache = RotoVideoFrameCache()
+
+            await cache.loadFrames(
+                from: url,
+                sampleFPS: 24.0,
+                maxFrames: 0
+            )
+
+            await MainActor.run {
+                let frames = cache.frames
+                uiDecodedFrames = frames
+                uiCurrentFrameIndex = 0
+                uiCurrentImage = frames.first?.image
+                uiRenderToken += 1
+                pipelineRenderToken += 1
+                uiStatus = frames.isEmpty ? cache.status : "Video frames ready: \(frames.count)"
+
+                roto.decodedFrames = frames
+                roto.maxFrameIndex = max(0, frames.count - 1)
+                roto.currentFrameIndex = 0
+                roto.currentTimeSeconds = frames.first?.timeSeconds ?? 0
+                roto.currentVideoFrameImage = frames.first?.image
+                roto.imageRenderToken += 1
+                roto.videoPlaybackStatus = uiStatus
+                roto.status = "Video ready: \(frames.count) frames"
+                roto.diagnostics.log("""
+                Frame decode assigned to active UI:
+                  decodedFrames: \(frames.count)
+                  currentImage: \(uiCurrentImage != nil)
+                  imageSize: \(String(describing: uiCurrentImage?.size))
+                  Run Vision enabled: \(runVisionDisabledReason == nil)
+                """)
+
+                print(
+                    """
+                    [RotoMotion UI] Decode assigned to active video card
+                      frames: \(frames.count)
+                      image exists: \(uiCurrentImage != nil)
+                      image size: \(String(describing: uiCurrentImage?.size))
+                    """
+                )
+            }
+        }
+    }
+
+    private func installUIAudioPlayer(for url: URL) {
+        if let uiAudioEndObserver {
+            NotificationCenter.default.removeObserver(uiAudioEndObserver)
+            self.uiAudioEndObserver = nil
+        }
+
+        let item = AVPlayerItem(url: url)
+        let player = AVPlayer(playerItem: item)
+        player.actionAtItemEnd = .pause
+        uiAudioPlayer = player
+
+        uiAudioEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                if uiLoop {
+                    setUIDirectFrame(0)
+                    uiAudioPlayer?.play()
+                } else {
+                    pauseUIDirect()
+                    uiStatus = "Ended"
+                    roto.videoPlaybackStatus = uiStatus
+                }
+            }
+        }
+    }
+
+    private func setUIDirectFrame(_ index: Int) {
+        guard !uiDecodedFrames.isEmpty else {
+            uiCurrentFrameIndex = 0
+            uiCurrentImage = nil
+            uiRenderToken += 1
+            roto.currentFrameIndex = 0
+            roto.currentVideoFrameImage = nil
+            roto.imageRenderToken += 1
+            return
+        }
+
+        let clamped = max(0, min(uiDecodedFrames.count - 1, index))
+        let frame = uiDecodedFrames[clamped]
+
+        uiCurrentFrameIndex = clamped
+        uiCurrentImage = frame.image
+        uiRenderToken += 1
+
+        roto.currentFrameIndex = clamped
+        roto.currentTimeSeconds = frame.timeSeconds
+        roto.currentVideoFrameImage = frame.image
+        roto.imageRenderToken += 1
+
+        uiAudioPlayer?.seek(
+            to: CMTime(seconds: frame.timeSeconds, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+    }
+
+    private func toggleUIDirectPlayback() {
+        if uiIsPlaying {
+            pauseUIDirect()
+        } else {
+            playUIDirect()
+        }
+    }
+
+    private func playUIDirect() {
+        guard !uiDecodedFrames.isEmpty else { return }
+
+        playbackTimer?.invalidate()
+        uiIsPlaying = true
+        uiStatus = "Playing"
+        roto.videoPlaybackStatus = uiStatus
+
+        let frame = uiDecodedFrames[min(uiCurrentFrameIndex, uiDecodedFrames.count - 1)]
+        uiAudioPlayer?.seek(
+            to: CMTime(seconds: frame.timeSeconds, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+        uiAudioPlayer?.play()
+
+        playbackTimer = Timer.scheduledTimer(
+            withTimeInterval: 1.0 / 24.0,
+            repeats: true
+        ) { _ in
+            Task { @MainActor in
+                advanceUIDirectPlayback()
+            }
+        }
+    }
+
+    private func pauseUIDirect() {
+        playbackTimer?.invalidate()
+        playbackTimer = nil
+        uiIsPlaying = false
+        uiAudioPlayer?.pause()
+        uiStatus = "Paused"
+        roto.videoPlaybackStatus = uiStatus
+    }
+
+    private func advanceUIDirectPlayback() {
+        guard !uiDecodedFrames.isEmpty else {
+            pauseUIDirect()
+            return
+        }
+
+        let next = uiCurrentFrameIndex + 1
+
+        if next < uiDecodedFrames.count {
+            setUIDirectFrame(next)
+        } else if uiLoop {
+            setUIDirectFrame(0)
+            uiAudioPlayer?.play()
+        } else {
+            pauseUIDirect()
+            uiStatus = "Ended"
+            roto.videoPlaybackStatus = uiStatus
+        }
+    }
+
+    private func releaseUIVideoAccess() {
+        playbackTimer?.invalidate()
+        playbackTimer = nil
+        uiIsPlaying = false
+
+        if let uiAudioEndObserver {
+            NotificationCenter.default.removeObserver(uiAudioEndObserver)
+            self.uiAudioEndObserver = nil
+        }
+
+        uiAudioPlayer?.pause()
+        uiAudioPlayer = nil
+
+        if uiSecurityScopedAccessActive,
+           let uiSecurityScopedURL {
+            uiSecurityScopedURL.stopAccessingSecurityScopedResource()
+        }
+
+        uiSecurityScopedURL = nil
+        uiSecurityScopedAccessActive = false
+    }
 }

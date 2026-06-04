@@ -11,17 +11,32 @@ enum USDZRigSceneLoader {
         from url: URL,
         defaultOpacity: CGFloat = 0.5
     ) throws -> ImportedRigScene {
-        let scene: SCNScene
+        print("[RotoMotion RigLoader] Loading \(url.path)")
 
-        do {
-            scene = try SCNScene(url: url, options: nil)
-        } catch {
-            let asset = MDLAsset(url: url)
-            scene = SCNScene(mdlAsset: asset)
+        let scene = try loadBestScene(from: url)
+        let root = scene.rootNode
+        let geometryCount = countGeometryNodes(root)
+
+        guard geometryCount > 0 else {
+            let allNames = collectNodeNames(root)
+
+            throw NSError(
+                domain: "GravitasRotoMotion",
+                code: 4203,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        """
+                        USDZ loaded but contains no displayable SceneKit geometry.
+                        Node count: \(allNames.count)
+                        Node names: \(allNames.prefix(12).joined(separator: ", "))
+                        This file may be skeleton-only, unsupported USDZ content, or SceneKit cannot read the geometry.
+                        """
+                ]
+            )
         }
 
-        let root = scene.rootNode
         applyTransparency(rootNode: root, opacity: defaultOpacity)
+        normalizeSceneForPreview(root)
 
         let allNames = collectNodeNames(root)
         let jointNames = inferJointNames(from: root)
@@ -35,14 +50,110 @@ enum USDZRigSceneLoader {
             jointNames: jointNames
         )
 
+        print(
+            """
+            [RotoMotion RigLoader] Scene loaded
+              nodes: \(allNames.count)
+              geometries: \(geometryCount)
+              matchedCanonicalJoints: \(jointNames.count)
+              missingRequired: \(validation.missingRequiredJoints.joined(separator: ", "))
+            """
+        )
+
         return ImportedRigScene(
             sourceURL: url,
             scene: scene,
             rootNode: root,
             skeletonJointNames: jointNames,
+            geometryNodeCount: geometryCount,
             validation: validation,
             measuredRigProfile: measuredProfile
         )
+    }
+
+    private static func loadBestScene(from url: URL) throws -> SCNScene {
+        var errors: [String] = []
+
+        do {
+            let scene = try SCNScene(
+                url: url,
+                options: [
+                    SCNSceneSource.LoadingOption.convertToYUp: false,
+                    SCNSceneSource.LoadingOption.convertUnitsToMeters: false
+                ]
+            )
+
+            let geometryCount = countGeometryNodes(scene.rootNode)
+
+            if geometryCount > 0 {
+                print("[RotoMotion RigLoader] Loaded with SCNScene(url:), geometries=\(geometryCount)")
+                return scene
+            }
+
+            errors.append("SCNScene(url:) loaded zero geometries.")
+        } catch {
+            errors.append("SCNScene(url:) failed: \(error.localizedDescription)")
+        }
+
+        do {
+            guard let source = SCNSceneSource(url: url, options: nil),
+                  let scene = source.scene(options: nil) else {
+                throw NSError(
+                    domain: "GravitasRotoMotion",
+                    code: 4201,
+                    userInfo: [
+                        NSLocalizedDescriptionKey: "SCNSceneSource returned nil scene."
+                    ]
+                )
+            }
+
+            let geometryCount = countGeometryNodes(scene.rootNode)
+
+            if geometryCount > 0 {
+                print("[RotoMotion RigLoader] Loaded with SCNSceneSource, geometries=\(geometryCount)")
+                return scene
+            }
+
+            errors.append("SCNSceneSource loaded zero geometries.")
+        } catch {
+            errors.append("SCNSceneSource failed: \(error.localizedDescription)")
+        }
+
+        let asset = MDLAsset(url: url)
+        let scene = SCNScene(mdlAsset: asset)
+
+        let geometryCount = countGeometryNodes(scene.rootNode)
+
+        if geometryCount > 0 {
+            print("[RotoMotion RigLoader] Loaded with ModelIO MDLAsset, geometries=\(geometryCount)")
+            return scene
+        }
+
+        errors.append("ModelIO loaded zero geometries.")
+
+        throw NSError(
+            domain: "GravitasRotoMotion",
+            code: 4202,
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    """
+                    All rig load paths failed or returned no displayable geometry.
+                    \(errors.joined(separator: "\n"))
+                    """
+            ]
+        )
+    }
+
+    private static func countGeometryNodes(_ root: SCNNode) -> Int {
+        var count = 0
+
+        enumerateIncludingRoot(root) { node in
+            if node.geometry != nil {
+                count += 1
+            }
+        }
+
+        return count
     }
 
     static func applyTransparency(
@@ -115,13 +226,31 @@ enum USDZRigSceneLoader {
         enumerateIncludingRoot(root) { node in
             guard let nodeName = node.name else { return }
 
-            let leaf = leafName(nodeName)
-            if CanonicalRig.jointNames.contains(leaf) {
-                matched.insert(leaf)
+            for candidate in nameCandidates(nodeName) {
+                if CanonicalRig.jointNames.contains(candidate) {
+                    matched.insert(candidate)
+                }
             }
         }
 
         return Array(matched).sorted()
+    }
+
+    private static func nameCandidates(_ name: String) -> [String] {
+        var candidates = [name]
+
+        if let last = name.split(separator: "/").last {
+            candidates.append(String(last))
+        }
+
+        if let last = name.split(separator: ":").last {
+            candidates.append(String(last))
+        }
+
+        candidates.append(name.replacingOccurrences(of: "mixamorig:", with: ""))
+        candidates.append(name.replacingOccurrences(of: "Armature|", with: ""))
+
+        return Array(Set(candidates))
     }
 
     private static func leafName(_ name: String) -> String {
@@ -182,9 +311,10 @@ enum USDZRigSceneLoader {
         enumerateIncludingRoot(root) { node in
             guard let nodeName = node.name else { return }
 
-            let leaf = leafName(nodeName)
-            guard jointSet.contains(leaf), nodeByJoint[leaf] == nil else { return }
-            nodeByJoint[leaf] = node
+            for candidate in nameCandidates(nodeName) where jointSet.contains(candidate) {
+                guard nodeByJoint[candidate] == nil else { continue }
+                nodeByJoint[candidate] = node
+            }
         }
 
         let joints = CanonicalRig.jointNames.compactMap { jointName -> RigProfile.Joint? in
@@ -236,6 +366,40 @@ enum USDZRigSceneLoader {
         root.enumerateChildNodes { node, _ in
             body(node)
         }
+    }
+
+    private static func normalizeSceneForPreview(_ root: SCNNode) {
+        let (minBounds, maxBounds) = root.boundingBox
+
+        let size = SCNVector3(
+            maxBounds.x - minBounds.x,
+            maxBounds.y - minBounds.y,
+            maxBounds.z - minBounds.z
+        )
+        let maxDimension = max(size.x, max(size.y, size.z))
+
+        guard maxDimension.isFinite, maxDimension > 0 else {
+            return
+        }
+
+        let targetHeight: CGFloat = 2.0
+        let scale = targetHeight / maxDimension
+
+        if scale.isFinite, scale > 0 {
+            root.scale = SCNVector3(scale, scale, scale)
+        }
+
+        let center = SCNVector3(
+            (minBounds.x + maxBounds.x) * 0.5,
+            (minBounds.y + maxBounds.y) * 0.5,
+            (minBounds.z + maxBounds.z) * 0.5
+        )
+
+        root.position = SCNVector3(
+            -center.x * root.scale.x,
+            -center.y * root.scale.y,
+            -center.z * root.scale.z
+        )
     }
 
     private static func makeJointMarker(name: String) -> SCNNode {

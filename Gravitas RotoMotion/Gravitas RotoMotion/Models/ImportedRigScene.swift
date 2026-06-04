@@ -6,6 +6,7 @@ struct ImportedRigScene {
     let scene: SCNScene
     let rootNode: SCNNode
     let skeletonJointNames: [String]
+    let geometryNodeCount: Int
     let validation: RigValidationReport
     let measuredRigProfile: RigProfile?
 }

@@ -37,6 +37,7 @@ enum FilePanelHelpers {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
+        panel.resolvesAliases = true
 
         return panel.runModal() == .OK ? panel.url : nil
     }

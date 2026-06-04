@@ -17,5 +17,7 @@ struct RigFitResult: Codable {
         let fitErrors: [String: Double]
         let fitScore: Double
         let ignoredTargets: [String]
+        let groundPlaneApplied: Bool
+        let groundContactJoints: [String]
     }
 }
