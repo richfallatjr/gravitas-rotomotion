@@ -1,30 +1,42 @@
 import SwiftUI
 
 struct PoseOverlayView: View {
+    let layout: VideoFrameLayout
+
     let rawFrame: RawVisionPoseCapture.PoseFrame?
     let normalizedFrame: NormalizedMeshyPoseCapture.Frame?
     let smoothedFrame: SmoothedMeshyPoseCapture.Frame?
+
     let showRawVisionPoints: Bool
     let showNormalizedMeshyPoints: Bool
     let showSmoothedMeshyPoints: Bool
     let showSmoothingDeltaVectors: Bool
 
     var body: some View {
-        Canvas { context, size in
+        Canvas { context, _ in
+            var imageRectPath = Path()
+            imageRectPath.addRect(layout.fittedRect)
+
+            context.stroke(
+                imageRectPath,
+                with: .color(.white.opacity(0.18)),
+                lineWidth: 1
+            )
+
             if showRawVisionPoints, let rawFrame {
-                drawRawVisionPoints(frame: rawFrame, context: &context, size: size)
+                drawRawVisionPoints(frame: rawFrame, context: &context)
             }
 
             if showNormalizedMeshyPoints, let normalizedFrame {
-                drawNormalizedMeshySkeleton(frame: normalizedFrame, context: &context, size: size)
+                drawNormalizedMeshySkeleton(frame: normalizedFrame, context: &context)
             }
 
             if showSmoothingDeltaVectors, let smoothedFrame {
-                drawSmoothingDeltas(frame: smoothedFrame, context: &context, size: size)
+                drawSmoothingDeltas(frame: smoothedFrame, context: &context)
             }
 
             if showSmoothedMeshyPoints, let smoothedFrame {
-                drawSmoothedMeshySkeleton(frame: smoothedFrame, context: &context, size: size)
+                drawSmoothedMeshySkeleton(frame: smoothedFrame, context: &context)
             }
         }
         .allowsHitTesting(false)
@@ -34,11 +46,10 @@ struct PoseOverlayView: View {
 
     private func drawRawVisionPoints(
         frame: RawVisionPoseCapture.PoseFrame,
-        context: inout GraphicsContext,
-        size: CGSize
+        context: inout GraphicsContext
     ) {
         for joint in frame.joints.values {
-            let point = point(x: joint.x, y: joint.y, size: size)
+            let point = point(x: joint.x, y: joint.y)
             let opacity = max(0.25, min(joint.confidence, 1.0))
             drawCircle(
                 point: point,
@@ -51,8 +62,7 @@ struct PoseOverlayView: View {
 
     private func drawNormalizedMeshySkeleton(
         frame: NormalizedMeshyPoseCapture.Frame,
-        context: inout GraphicsContext,
-        size: CGSize
+        context: inout GraphicsContext
     ) {
         for (a, b) in CanonicalRig.bonePairs {
             guard
@@ -66,8 +76,8 @@ struct PoseOverlayView: View {
             let generated = jointA.generated || jointB.generated
             let opacity = missing ? 0.18 : (generated ? 0.35 : 0.72)
             drawLine(
-                from: point(x: jointA.x, y: jointA.y, size: size),
-                to: point(x: jointB.x, y: jointB.y, size: size),
+                from: point(x: jointA.x, y: jointA.y),
+                to: point(x: jointB.x, y: jointB.y),
                 color: Color.yellow.opacity(opacity),
                 lineWidth: generated ? 1.1 : 1.7,
                 context: &context
@@ -77,7 +87,7 @@ struct PoseOverlayView: View {
         for jointName in CanonicalRig.jointNames {
             guard let joint = frame.joints[jointName] else { continue }
 
-            let p = point(x: joint.x, y: joint.y, size: size)
+            let p = point(x: joint.x, y: joint.y)
 
             if joint.missing {
                 drawCross(point: p, radius: 4.0, color: .gray.opacity(0.65), context: &context)
@@ -94,8 +104,7 @@ struct PoseOverlayView: View {
 
     private func drawSmoothedMeshySkeleton(
         frame: SmoothedMeshyPoseCapture.Frame,
-        context: inout GraphicsContext,
-        size: CGSize
+        context: inout GraphicsContext
     ) {
         for (a, b) in CanonicalRig.bonePairs {
             guard
@@ -109,8 +118,8 @@ struct PoseOverlayView: View {
             let generated = jointA.generated || jointB.generated
             let opacity = missing ? 0.2 : (generated ? 0.55 : 0.95)
             drawLine(
-                from: point(x: jointA.smoothedX, y: jointA.smoothedY, size: size),
-                to: point(x: jointB.smoothedX, y: jointB.smoothedY, size: size),
+                from: point(x: jointA.smoothedX, y: jointA.smoothedY),
+                to: point(x: jointB.smoothedX, y: jointB.smoothedY),
                 color: Color.cyan.opacity(opacity),
                 lineWidth: generated ? 1.35 : 2.35,
                 context: &context
@@ -120,7 +129,7 @@ struct PoseOverlayView: View {
         for jointName in CanonicalRig.jointNames {
             guard let joint = frame.joints[jointName] else { continue }
 
-            let p = point(x: joint.smoothedX, y: joint.smoothedY, size: size)
+            let p = point(x: joint.smoothedX, y: joint.smoothedY)
 
             if joint.missing {
                 drawCross(point: p, radius: 4.5, color: Color.cyan.opacity(0.35), context: &context)
@@ -137,14 +146,13 @@ struct PoseOverlayView: View {
 
     private func drawSmoothingDeltas(
         frame: SmoothedMeshyPoseCapture.Frame,
-        context: inout GraphicsContext,
-        size: CGSize
+        context: inout GraphicsContext
     ) {
         let deltaColor = Color(red: 1.0, green: 0.0, blue: 1.0)
 
         for joint in frame.joints.values where joint.smoothingEnabled && !joint.missing {
-            let raw = point(x: joint.rawX, y: joint.rawY, size: size)
-            let smooth = point(x: joint.smoothedX, y: joint.smoothedY, size: size)
+            let raw = point(x: joint.rawX, y: joint.rawY)
+            let smooth = point(x: joint.smoothedX, y: joint.smoothedY)
             let deltaLength = hypot(smooth.x - raw.x, smooth.y - raw.y)
 
             guard deltaLength > 0.5 else { continue }
@@ -165,11 +173,8 @@ struct PoseOverlayView: View {
         }
     }
 
-    private func point(x: Double, y: Double, size: CGSize) -> CGPoint {
-        CGPoint(
-            x: x * size.width,
-            y: (1.0 - y) * size.height
-        )
+    private func point(x: Double, y: Double) -> CGPoint {
+        layout.pointFromNormalizedVision(x: x, y: y)
     }
 
     private func drawCircle(

@@ -13,7 +13,9 @@ struct ContentView: View {
     @State private var uiStatus = "Open a video to begin."
     @State private var uiIsPlaying = false
     @State private var uiLoop = true
-    @State private var playbackTimer: Timer?
+    @State private var playbackTask: Task<Void, Never>?
+    @State private var playbackStartHostTime: Date?
+    @State private var playbackStartVideoTime = 0.0
     @State private var uiAudioPlayer: AVPlayer?
     @State private var uiAudioEndObserver: NSObjectProtocol?
     @State private var uiSecurityScopedURL: URL?
@@ -134,6 +136,7 @@ struct ContentView: View {
             RotoMotionVideoCard(
                 image: uiCurrentImage,
                 frameIndex: uiCurrentFrameIndex,
+                videoTimeSeconds: currentUIVideoTimeSeconds,
                 rawFrame: currentRawFrame,
                 normalizedFrame: currentNormalizedFrame,
                 smoothedFrame: nil,
@@ -142,7 +145,6 @@ struct ContentView: View {
                 showSmoothedMeshyPoints: false,
                 showSmoothingDeltaVectors: false
             )
-            .aspectRatio(uiVideoAspectRatio, contentMode: .fit)
             .frame(minWidth: 620, minHeight: 520)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.black)
@@ -155,6 +157,7 @@ struct ContentView: View {
     private var timelineControls: some View {
         HStack {
             Button("◀︎") {
+                pauseUIDirect()
                 setUIDirectFrame(uiCurrentFrameIndex - 1)
             }
             .disabled(uiDecodedFrames.isEmpty)
@@ -165,6 +168,7 @@ struct ContentView: View {
                         Double(uiCurrentFrameIndex)
                     },
                     set: { value in
+                        pauseUIDirect()
                         setUIDirectFrame(Int(value.rounded()))
                     }
                 ),
@@ -174,6 +178,7 @@ struct ContentView: View {
             .disabled(uiDecodedFrames.isEmpty)
 
             Button("▶︎") {
+                pauseUIDirect()
                 setUIDirectFrame(uiCurrentFrameIndex + 1)
             }
             .disabled(uiDecodedFrames.isEmpty)
@@ -186,8 +191,10 @@ struct ContentView: View {
                 GroupBox("Video") {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("File: \(uiVideoURL?.lastPathComponent ?? "none")")
-                        Text("Decoded frames: \(uiDecodedFrames.count)")
-                        Text("Current image: \(uiCurrentImage == nil ? "nil" : "yes")")
+                Text("Source frames: \(uiDecodedFrames.count)")
+                Text("Current image: \(uiCurrentImage == nil ? "nil" : "yes")")
+                Text("Current time: \(String(format: "%.3f", currentUIVideoTimeSeconds))s")
+                Text("Visual FPS: \(String(format: "%.3f", RotoVideoFrameCache.estimatedFPS(frames: uiDecodedFrames)))")
                     }
                     .font(.caption)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -324,22 +331,40 @@ struct ContentView: View {
         return nil
     }
 
-    private var currentRawFrame: RawVisionPoseCapture.PoseFrame? {
-        guard let frames = roto.rawCapture?.frames else {
-            return nil
+    private var currentUIVideoTimeSeconds: Double {
+        guard uiDecodedFrames.indices.contains(uiCurrentFrameIndex) else {
+            return 0.0
         }
 
-        return frames.first { $0.frameIndex == uiCurrentFrameIndex }
-            ?? (frames.indices.contains(uiCurrentFrameIndex) ? frames[uiCurrentFrameIndex] : nil)
+        return uiDecodedFrames[uiCurrentFrameIndex].timeSeconds
+    }
+
+    private var currentRawFrame: RawVisionPoseCapture.PoseFrame? {
+        nearestRawFrame(forTime: currentUIVideoTimeSeconds)
     }
 
     private var currentNormalizedFrame: NormalizedMeshyPoseCapture.Frame? {
-        guard let frames = roto.normalizedCapture?.frames else {
+        nearestNormalizedFrame(forTime: currentUIVideoTimeSeconds)
+    }
+
+    private func nearestRawFrame(forTime time: Double) -> RawVisionPoseCapture.PoseFrame? {
+        guard let frames = roto.rawCapture?.frames, !frames.isEmpty else {
             return nil
         }
 
-        return frames.first { $0.frameIndex == uiCurrentFrameIndex }
-            ?? (frames.indices.contains(uiCurrentFrameIndex) ? frames[uiCurrentFrameIndex] : nil)
+        return frames.min {
+            abs($0.timeSeconds - time) < abs($1.timeSeconds - time)
+        }
+    }
+
+    private func nearestNormalizedFrame(forTime time: Double) -> NormalizedMeshyPoseCapture.Frame? {
+        guard let frames = roto.normalizedCapture?.frames, !frames.isEmpty else {
+            return nil
+        }
+
+        return frames.min {
+            abs($0.timeSeconds - time) < abs($1.timeSeconds - time)
+        }
     }
 
     private func openVideoDirectlyInContentView() {
@@ -364,6 +389,8 @@ struct ContentView: View {
         uiCurrentImage = nil
         uiCurrentFrameIndex = 0
         uiRenderToken += 1
+        playbackStartHostTime = nil
+        playbackStartVideoTime = 0
         pipelineRenderToken += 1
 
         roto.videoURL = url
@@ -391,10 +418,10 @@ struct ContentView: View {
         Task {
             let cache = RotoVideoFrameCache()
 
-            await cache.loadFrames(
+            await cache.loadSourceFrames(
                 from: url,
-                sampleFPS: 24.0,
-                maxFrames: 0
+                maxFrames: 0,
+                maximumImageDimension: 1280
             )
 
             await MainActor.run {
@@ -404,7 +431,8 @@ struct ContentView: View {
                 uiCurrentImage = frames.first?.image
                 uiRenderToken += 1
                 pipelineRenderToken += 1
-                uiStatus = frames.isEmpty ? cache.status : "Video frames ready: \(frames.count)"
+                let fpsEstimate = RotoVideoFrameCache.estimatedFPS(frames: frames)
+                uiStatus = frames.isEmpty ? cache.status : "Video source frames ready: \(frames.count)"
 
                 roto.decodedFrames = frames
                 roto.maxFrameIndex = max(0, frames.count - 1)
@@ -413,10 +441,13 @@ struct ContentView: View {
                 roto.currentVideoFrameImage = frames.first?.image
                 roto.imageRenderToken += 1
                 roto.videoPlaybackStatus = uiStatus
-                roto.status = "Video ready: \(frames.count) frames"
+                roto.status = "Video ready: \(frames.count) source frames"
                 roto.diagnostics.log("""
-                Frame decode assigned to active UI:
+                SOURCE frame decode assigned to active UI:
                   decodedFrames: \(frames.count)
+                  estimatedFPS: \(String(format: "%.3f", fpsEstimate))
+                  firstTime: \(frames.first?.timeSeconds ?? -1)
+                  lastTime: \(frames.last?.timeSeconds ?? -1)
                   currentImage: \(uiCurrentImage != nil)
                   imageSize: \(String(describing: uiCurrentImage?.size))
                   Run Vision enabled: \(runVisionDisabledReason == nil)
@@ -426,6 +457,7 @@ struct ContentView: View {
                     """
                     [RotoMotion UI] Decode assigned to active video card
                       frames: \(frames.count)
+                      estimatedFPS: \(String(format: "%.3f", fpsEstimate))
                       image exists: \(uiCurrentImage != nil)
                       image size: \(String(describing: uiCurrentImage?.size))
                     """
@@ -452,7 +484,9 @@ struct ContentView: View {
         ) { _ in
             Task { @MainActor in
                 if uiLoop {
-                    setUIDirectFrame(0)
+                    setUIDirectFrame(0, seekAudio: false)
+                    playbackStartHostTime = Date()
+                    playbackStartVideoTime = uiDecodedFrames.first?.timeSeconds ?? 0
                     uiAudioPlayer?.play()
                 } else {
                     pauseUIDirect()
@@ -463,11 +497,15 @@ struct ContentView: View {
         }
     }
 
-    private func setUIDirectFrame(_ index: Int) {
+    private func setUIDirectFrame(
+        _ index: Int,
+        seekAudio: Bool = true
+    ) {
         guard !uiDecodedFrames.isEmpty else {
             uiCurrentFrameIndex = 0
             uiCurrentImage = nil
             uiRenderToken += 1
+            playbackStartVideoTime = 0
             roto.currentFrameIndex = 0
             roto.currentVideoFrameImage = nil
             roto.imageRenderToken += 1
@@ -486,11 +524,19 @@ struct ContentView: View {
         roto.currentVideoFrameImage = frame.image
         roto.imageRenderToken += 1
 
-        uiAudioPlayer?.seek(
-            to: CMTime(seconds: frame.timeSeconds, preferredTimescale: 600),
-            toleranceBefore: .zero,
-            toleranceAfter: .zero
-        )
+        if seekAudio {
+            playbackStartVideoTime = frame.timeSeconds
+
+            if uiIsPlaying {
+                playbackStartHostTime = Date()
+            }
+
+            uiAudioPlayer?.seek(
+                to: CMTime(seconds: frame.timeSeconds, preferredTimescale: 600),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            )
+        }
     }
 
     private func toggleUIDirectPlayback() {
@@ -502,64 +548,150 @@ struct ContentView: View {
     }
 
     private func playUIDirect() {
-        guard !uiDecodedFrames.isEmpty else { return }
+        guard !uiDecodedFrames.isEmpty else {
+            uiStatus = "Cannot play: no decoded frames."
+            roto.videoPlaybackStatus = uiStatus
+            roto.diagnostics.log("Cannot play video: decodedFrames is empty.")
+            return
+        }
 
-        playbackTimer?.invalidate()
+        playbackTask?.cancel()
+        playbackStartHostTime = Date()
+        playbackStartVideoTime = uiDecodedFrames[min(uiCurrentFrameIndex, uiDecodedFrames.count - 1)].timeSeconds
         uiIsPlaying = true
         uiStatus = "Playing"
         roto.videoPlaybackStatus = uiStatus
 
-        let frame = uiDecodedFrames[min(uiCurrentFrameIndex, uiDecodedFrames.count - 1)]
         uiAudioPlayer?.seek(
-            to: CMTime(seconds: frame.timeSeconds, preferredTimescale: 600),
+            to: CMTime(seconds: playbackStartVideoTime, preferredTimescale: 600),
             toleranceBefore: .zero,
             toleranceAfter: .zero
         )
         uiAudioPlayer?.play()
 
-        playbackTimer = Timer.scheduledTimer(
-            withTimeInterval: 1.0 / 24.0,
-            repeats: true
-        ) { _ in
-            Task { @MainActor in
-                advanceUIDirectPlayback()
+        roto.diagnostics.log("""
+        Playback started:
+          startFrame: \(uiCurrentFrameIndex)
+          startVideoTime: \(playbackStartVideoTime)
+          frameCount: \(uiDecodedFrames.count)
+          firstTime: \(uiDecodedFrames.first?.timeSeconds ?? -1)
+          lastTime: \(uiDecodedFrames.last?.timeSeconds ?? -1)
+          loop: \(uiLoop)
+        """)
+
+        playbackTask = Task { @MainActor in
+            while !Task.isCancelled {
+                updatePlaybackFrameFromClock()
+                try? await Task.sleep(nanoseconds: 8_333_333)
             }
         }
     }
 
     private func pauseUIDirect() {
-        playbackTimer?.invalidate()
-        playbackTimer = nil
+        playbackTask?.cancel()
+        playbackTask = nil
+        playbackStartHostTime = nil
         uiIsPlaying = false
         uiAudioPlayer?.pause()
         uiStatus = "Paused"
         roto.videoPlaybackStatus = uiStatus
+        roto.diagnostics.log("Playback paused at frame \(uiCurrentFrameIndex).")
     }
 
-    private func advanceUIDirectPlayback() {
-        guard !uiDecodedFrames.isEmpty else {
-            pauseUIDirect()
+    private func updatePlaybackFrameFromClock() {
+        guard uiIsPlaying,
+              !uiDecodedFrames.isEmpty,
+              let playbackStartHostTime else {
             return
         }
 
-        let next = uiCurrentFrameIndex + 1
+        let elapsed = Date().timeIntervalSince(playbackStartHostTime)
+        let wallClockTime = playbackStartVideoTime + elapsed
+        let playerTime = uiAudioPlayer.map { CMTimeGetSeconds($0.currentTime()) }
+        var targetTime = playerTime?.isFinite == true
+            ? (playerTime ?? wallClockTime)
+            : wallClockTime
 
-        if next < uiDecodedFrames.count {
-            setUIDirectFrame(next)
-        } else if uiLoop {
-            setUIDirectFrame(0)
-            uiAudioPlayer?.play()
-        } else {
-            pauseUIDirect()
-            uiStatus = "Ended"
-            roto.videoPlaybackStatus = uiStatus
+        let firstTime = uiDecodedFrames.first?.timeSeconds ?? 0
+        let lastTime = uiDecodedFrames.last?.timeSeconds ?? 0
+        let duration = max(lastTime - firstTime, 0.001)
+
+        if targetTime > lastTime {
+            if uiLoop {
+                let relative = targetTime - firstTime
+                let looped = relative.truncatingRemainder(dividingBy: duration)
+                targetTime = firstTime + looped
+                self.playbackStartHostTime = Date()
+                self.playbackStartVideoTime = targetTime
+                uiAudioPlayer?.seek(
+                    to: CMTime(seconds: targetTime, preferredTimescale: 600),
+                    toleranceBefore: .zero,
+                    toleranceAfter: .zero
+                )
+                uiAudioPlayer?.play()
+            } else {
+                setUIDirectFrame(uiDecodedFrames.count - 1, seekAudio: false)
+                pauseUIDirect()
+                uiStatus = "Ended"
+                roto.videoPlaybackStatus = uiStatus
+                return
+            }
+        }
+
+        let frameIndex = nearestUIFrameIndex(forTime: targetTime)
+
+        if frameIndex != uiCurrentFrameIndex {
+            setUIDirectFrame(frameIndex, seekAudio: false)
         }
     }
 
-    private func releaseUIVideoAccess() {
-        playbackTimer?.invalidate()
-        playbackTimer = nil
+    private func nearestUIFrameIndex(forTime time: Double) -> Int {
+        guard !uiDecodedFrames.isEmpty else {
+            return 0
+        }
+
+        if time <= uiDecodedFrames[0].timeSeconds {
+            return 0
+        }
+
+        if time >= uiDecodedFrames[uiDecodedFrames.count - 1].timeSeconds {
+            return uiDecodedFrames.count - 1
+        }
+
+        var low = 0
+        var high = uiDecodedFrames.count - 1
+
+        while low <= high {
+            let mid = (low + high) / 2
+            let midTime = uiDecodedFrames[mid].timeSeconds
+
+            if midTime < time {
+                low = mid + 1
+            } else if midTime > time {
+                high = mid - 1
+            } else {
+                return mid
+            }
+        }
+
+        let upper = min(low, uiDecodedFrames.count - 1)
+        let lower = max(upper - 1, 0)
+        let lowerDistance = abs(uiDecodedFrames[lower].timeSeconds - time)
+        let upperDistance = abs(uiDecodedFrames[upper].timeSeconds - time)
+
+        return lowerDistance <= upperDistance ? lower : upper
+    }
+
+    private func stopUIDirectPlayback() {
+        playbackTask?.cancel()
+        playbackTask = nil
+        playbackStartHostTime = nil
         uiIsPlaying = false
+    }
+
+    private func releaseUIVideoAccess() {
+        stopUIDirectPlayback()
+        uiStatus = "Paused"
 
         if let uiAudioEndObserver {
             NotificationCenter.default.removeObserver(uiAudioEndObserver)

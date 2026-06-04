@@ -31,6 +31,7 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var maxFrameIndex = 0
 
     @Published var sampleFPS = 24.0
+    @Published var visionSampleFPS = 24.0
     @Published var maxFrames = 0
 
     @Published var showRawVisionPoints = true
@@ -70,12 +71,14 @@ final class RotoMotionViewModel: ObservableObject {
     private let exporter = RotoMotionExporter()
     private var videoSecurityScopedURL: URL?
     private var videoSecurityScopedAccessActive = false
-    private var playbackTimer: Timer?
+    private var playbackTask: Task<Void, Never>?
+    private var playbackStartHostTime: Date?
+    private var playbackStartVideoTime = 0.0
     private var audioPlayer: AVPlayer?
     private var audioEndObserver: NSObjectProtocol?
 
     deinit {
-        playbackTimer?.invalidate()
+        playbackTask?.cancel()
 
         if let audioEndObserver {
             NotificationCenter.default.removeObserver(audioEndObserver)
@@ -159,30 +162,15 @@ final class RotoMotionViewModel: ObservableObject {
     }
 
     var currentRawFrame: RawVisionPoseCapture.PoseFrame? {
-        guard let frames = rawCapture?.frames else {
-            return nil
-        }
-
-        return frames.first { $0.frameIndex == currentFrameIndex }
-            ?? (frames.indices.contains(currentFrameIndex) ? frames[currentFrameIndex] : nil)
+        nearestRawFrame(forTime: currentVideoTimeSeconds)
     }
 
     var currentNormalizedFrame: NormalizedMeshyPoseCapture.Frame? {
-        guard let frames = normalizedCapture?.frames else {
-            return nil
-        }
-
-        return frames.first { $0.frameIndex == currentFrameIndex }
-            ?? (frames.indices.contains(currentFrameIndex) ? frames[currentFrameIndex] : nil)
+        nearestNormalizedFrame(forTime: currentVideoTimeSeconds)
     }
 
     var currentSmoothedFrame: SmoothedMeshyPoseCapture.Frame? {
-        guard let frames = smoothedCapture?.frames else {
-            return nil
-        }
-
-        return frames.first { $0.frameIndex == currentFrameIndex }
-            ?? (frames.indices.contains(currentFrameIndex) ? frames[currentFrameIndex] : nil)
+        nearestSmoothedFrame(forTime: currentVideoTimeSeconds)
     }
 
     var currentFitFrame: RigFitResult.FrameFit? {
@@ -192,6 +180,53 @@ final class RotoMotionViewModel: ObservableObject {
 
         return frames.first { $0.frameIndex == currentFrameIndex }
             ?? (frames.indices.contains(currentFrameIndex) ? frames[currentFrameIndex] : nil)
+    }
+
+    var currentVideoTimeSeconds: Double {
+        guard decodedFrames.indices.contains(currentFrameIndex) else {
+            return currentTimeSeconds
+        }
+
+        return decodedFrames[currentFrameIndex].timeSeconds
+    }
+
+    private func nearestRawFrame(
+        forTime time: Double
+    ) -> RawVisionPoseCapture.PoseFrame? {
+        guard let frames = rawCapture?.frames,
+              !frames.isEmpty else {
+            return nil
+        }
+
+        return frames.min {
+            abs($0.timeSeconds - time) < abs($1.timeSeconds - time)
+        }
+    }
+
+    private func nearestNormalizedFrame(
+        forTime time: Double
+    ) -> NormalizedMeshyPoseCapture.Frame? {
+        guard let frames = normalizedCapture?.frames,
+              !frames.isEmpty else {
+            return nil
+        }
+
+        return frames.min {
+            abs($0.timeSeconds - time) < abs($1.timeSeconds - time)
+        }
+    }
+
+    private func nearestSmoothedFrame(
+        forTime time: Double
+    ) -> SmoothedMeshyPoseCapture.Frame? {
+        guard let frames = smoothedCapture?.frames,
+              !frames.isEmpty else {
+            return nil
+        }
+
+        return frames.min {
+            abs($0.timeSeconds - time) < abs($1.timeSeconds - time)
+        }
     }
 
     var videoSize: CGSize {
@@ -334,15 +369,16 @@ final class RotoMotionViewModel: ObservableObject {
 
         Task { @MainActor in
             let cache = RotoVideoFrameCache()
-            diagnostics.log("Starting frame decode for \(url.lastPathComponent).")
+            diagnostics.log("Starting SOURCE frame decode for \(url.lastPathComponent).")
 
-            await cache.loadFrames(
+            await cache.loadSourceFrames(
                 from: url,
-                sampleFPS: framePlaybackFPS,
-                maxFrames: 0
+                maxFrames: 0,
+                maximumImageDimension: 1280
             )
 
             let frames = cache.frames
+            let fpsEstimate = RotoVideoFrameCache.estimatedFPS(frames: frames)
 
             decodedFrames = frames
             maxFrameIndex = max(0, frames.count - 1)
@@ -353,11 +389,12 @@ final class RotoMotionViewModel: ObservableObject {
             videoPlaybackStatus = frames.isEmpty
                 ? cache.status
                 : "Video frames ready: \(frames.count)"
-            status = "Video ready: \(frames.count) frames"
+            status = "Video ready: \(frames.count) source frames"
 
             diagnostics.log("""
-            Frame decode completed and assigned to UI:
+            SOURCE frame decode completed and assigned to UI:
               decodedFrames: \(decodedFrames.count)
+              estimatedFPS: \(String(format: "%.3f", fpsEstimate))
               maxFrameIndex: \(maxFrameIndex)
               currentFrameIndex: \(currentFrameIndex)
               currentVideoFrameImage exists: \(currentVideoFrameImage != nil)
@@ -381,11 +418,18 @@ final class RotoMotionViewModel: ObservableObject {
     }
 
     func playVideo() {
-        guard !decodedFrames.isEmpty else { return }
+        guard !decodedFrames.isEmpty else {
+            videoPlaybackStatus = "Cannot play: no decoded frames."
+            diagnostics.log("Cannot play video: decodedFrames is empty.")
+            return
+        }
 
         stopFramePlayback()
 
         let currentTime = decodedFrames[min(currentFrameIndex, decodedFrames.count - 1)].timeSeconds
+        playbackStartHostTime = Date()
+        playbackStartVideoTime = currentTime
+
         audioPlayer?.seek(
             to: CMTime(seconds: currentTime, preferredTimescale: 600),
             toleranceBefore: .zero,
@@ -396,13 +440,21 @@ final class RotoMotionViewModel: ObservableObject {
         isFramePlaybackRunning = true
         videoPlaybackStatus = "Playing"
 
-        let interval = 1.0 / max(framePlaybackFPS, 1.0)
-        playbackTimer = Timer.scheduledTimer(
-            withTimeInterval: interval,
-            repeats: true
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.advanceFramePlayback()
+        diagnostics.log("""
+        Playback started from source timestamps:
+          startFrame: \(currentFrameIndex)
+          startVideoTime: \(playbackStartVideoTime)
+          frameCount: \(decodedFrames.count)
+          firstTime: \(decodedFrames.first?.timeSeconds ?? -1)
+          lastTime: \(decodedFrames.last?.timeSeconds ?? -1)
+          estimatedFPS: \(String(format: "%.3f", RotoVideoFrameCache.estimatedFPS(frames: decodedFrames)))
+          loop: \(isVideoLooping)
+        """)
+
+        playbackTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                self?.updatePlaybackFrameFromClock()
+                try? await Task.sleep(nanoseconds: 8_333_333)
             }
         }
     }
@@ -426,33 +478,97 @@ final class RotoMotionViewModel: ObservableObject {
         }
     }
 
-    private func advanceFramePlayback() {
-        guard !decodedFrames.isEmpty else {
-            stopFramePlayback()
+    private func updatePlaybackFrameFromClock() {
+        guard isFramePlaybackRunning,
+              !decodedFrames.isEmpty,
+              let playbackStartHostTime else {
             return
         }
 
-        let next = currentFrameIndex + 1
+        let elapsed = Date().timeIntervalSince(playbackStartHostTime)
+        let wallClockTime = playbackStartVideoTime + elapsed
+        let playerSeconds = audioPlayer.map { CMTimeGetSeconds($0.currentTime()) }
+        var targetTime = wallClockTime
 
-        if next <= maxFrameIndex {
-            currentFrameIndex = next
-            currentVideoFrameImage = decodedFrames[min(next, decodedFrames.count - 1)].image
-            currentTimeSeconds = decodedFrames[min(next, decodedFrames.count - 1)].timeSeconds
-            imageRenderToken += 1
-        } else if isVideoLooping {
-            setCurrentFrameIndex(0)
-            audioPlayer?.play()
-        } else {
-            stopFramePlayback()
-            audioPlayer?.pause()
-            videoPlaybackStatus = "Ended"
+        if let playerSeconds, playerSeconds.isFinite {
+            targetTime = playerSeconds
         }
 
+        let firstTime = decodedFrames.first?.timeSeconds ?? 0
+        let lastTime = decodedFrames.last?.timeSeconds ?? 0
+        let duration = max(lastTime - firstTime, 0.001)
+
+        if targetTime > lastTime {
+            if isVideoLooping {
+                let relative = targetTime - firstTime
+                let looped = relative.truncatingRemainder(dividingBy: duration)
+                targetTime = firstTime + looped
+                self.playbackStartHostTime = Date()
+                self.playbackStartVideoTime = targetTime
+                audioPlayer?.seek(
+                    to: CMTime(seconds: targetTime, preferredTimescale: 600),
+                    toleranceBefore: .zero,
+                    toleranceAfter: .zero
+                )
+                audioPlayer?.play()
+            } else {
+                setCurrentFrameIndex(decodedFrames.count - 1, resetPlaybackClock: false)
+                pauseVideo()
+                videoPlaybackStatus = "Ended"
+                return
+            }
+        }
+
+        let frameIndex = nearestDisplayFrameIndex(forTime: targetTime)
+
+        if frameIndex != currentFrameIndex {
+            setCurrentFrameIndex(frameIndex, resetPlaybackClock: false)
+        }
+    }
+
+    private func nearestDisplayFrameIndex(forTime time: Double) -> Int {
+        guard !decodedFrames.isEmpty else {
+            return 0
+        }
+
+        if time <= decodedFrames[0].timeSeconds {
+            return 0
+        }
+
+        let lastIndex = decodedFrames.count - 1
+
+        if time >= decodedFrames[lastIndex].timeSeconds {
+            return lastIndex
+        }
+
+        var low = 0
+        var high = lastIndex
+
+        while low <= high {
+            let mid = (low + high) / 2
+            let midTime = decodedFrames[mid].timeSeconds
+
+            if midTime < time {
+                low = mid + 1
+            } else if midTime > time {
+                high = mid - 1
+            } else {
+                return mid
+            }
+        }
+
+        let upper = min(low, lastIndex)
+        let lower = max(upper - 1, 0)
+        let lowerDistance = abs(decodedFrames[lower].timeSeconds - time)
+        let upperDistance = abs(decodedFrames[upper].timeSeconds - time)
+
+        return lowerDistance <= upperDistance ? lower : upper
     }
 
     private func stopFramePlayback() {
-        playbackTimer?.invalidate()
-        playbackTimer = nil
+        playbackTask?.cancel()
+        playbackTask = nil
+        playbackStartHostTime = nil
         isFramePlaybackRunning = false
     }
 
@@ -471,7 +587,9 @@ final class RotoMotionViewModel: ObservableObject {
                 guard let self else { return }
 
                 if self.isVideoLooping {
-                    self.setCurrentFrameIndex(0)
+                    self.setCurrentFrameIndex(0, resetPlaybackClock: false)
+                    self.playbackStartHostTime = Date()
+                    self.playbackStartVideoTime = self.decodedFrames.first?.timeSeconds ?? 0
                     self.audioPlayer?.play()
                 } else {
                     self.stopFramePlayback()
@@ -507,6 +625,7 @@ final class RotoMotionViewModel: ObservableObject {
           videoURL: \(videoURL?.path ?? "nil")
           decodedFrames: \(decodedFrames.count)
           currentImage exists: \(currentVideoFrameImage != nil)
+          visionSampleFPS: \(visionSampleFPS)
         """)
 
         guard let videoURL else {
@@ -524,7 +643,7 @@ final class RotoMotionViewModel: ObservableObject {
         do {
             let capture = try await exporter.runExtraction(
                 videoURL: videoURL,
-                sampleFPS: framePlaybackFPS,
+                sampleFPS: visionSampleFPS,
                 maxFrames: 0
             )
 
@@ -546,6 +665,7 @@ final class RotoMotionViewModel: ObservableObject {
             Vision extraction success:
               rawCapture set: \(rawCapture != nil)
               frames: \(capture.frames.count)
+              visionSampleFPS: \(visionSampleFPS)
               detectedFrames: \(detectedCount)
               first frame joints: \(capture.frames.first?.joints.count ?? 0)
               Normalize enabled: \(normalizeDisabledReason == nil)
@@ -966,12 +1086,16 @@ final class RotoMotionViewModel: ObservableObject {
         }
     }
 
-    func setCurrentFrameIndex(_ index: Int) {
+    func setCurrentFrameIndex(
+        _ index: Int,
+        resetPlaybackClock: Bool = true
+    ) {
         guard !decodedFrames.isEmpty else {
             currentFrameIndex = 0
             currentVideoFrameImage = nil
             currentTimeSeconds = 0
             imageRenderToken += 1
+            playbackStartVideoTime = 0
             diagnostics.log("setCurrentFrameIndex ignored: decodedFrames empty.")
             return
         }
@@ -982,6 +1106,14 @@ final class RotoMotionViewModel: ObservableObject {
         currentVideoFrameImage = decodedFrames[clamped].image
         currentTimeSeconds = decodedFrames[clamped].timeSeconds
         imageRenderToken += 1
+
+        if resetPlaybackClock {
+            playbackStartVideoTime = decodedFrames[clamped].timeSeconds
+
+            if isFramePlaybackRunning {
+                playbackStartHostTime = Date()
+            }
+        }
 
         diagnostics.log("""
         setCurrentFrameIndex:
@@ -994,10 +1126,14 @@ final class RotoMotionViewModel: ObservableObject {
     }
 
     func setCurrentFrameIndex(_ index: Int, seekPlayer: Bool) {
-        setCurrentFrameIndex(index)
+        setCurrentFrameIndex(index, resetPlaybackClock: seekPlayer)
     }
 
     func stepFrame(_ delta: Int) {
+        if isFramePlaybackRunning {
+            pauseVideo()
+        }
+
         setCurrentFrameIndex(currentFrameIndex + delta)
     }
 
