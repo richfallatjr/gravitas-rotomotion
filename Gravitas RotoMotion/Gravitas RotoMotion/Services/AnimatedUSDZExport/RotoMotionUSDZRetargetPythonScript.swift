@@ -73,6 +73,60 @@ BONES = [
     ("RightFoot", "RightToeBase"),
 ]
 
+REST_LOCAL_METERS = {
+    "Hips": (0.0, 0.0, 0.0),
+    "LeftUpLeg": (-0.16, -0.10, 0.0),
+    "LeftLeg": (0.0, -0.42, 0.0),
+    "LeftFoot": (0.0, -0.40, 0.0),
+    "LeftToeBase": (0.0, -0.05, 0.16),
+    "RightUpLeg": (0.16, -0.10, 0.0),
+    "RightLeg": (0.0, -0.42, 0.0),
+    "RightFoot": (0.0, -0.40, 0.0),
+    "RightToeBase": (0.0, -0.05, 0.16),
+    "Spine02": (0.0, 0.24, 0.0),
+    "Spine01": (0.0, 0.18, 0.0),
+    "Spine": (0.0, 0.18, 0.0),
+    "LeftShoulder": (-0.20, 0.10, 0.0),
+    "LeftArm": (-0.30, -0.05, 0.0),
+    "LeftForeArm": (-0.28, 0.0, 0.0),
+    "LeftHand": (-0.16, 0.0, 0.0),
+    "RightShoulder": (0.20, 0.10, 0.0),
+    "RightArm": (0.30, -0.05, 0.0),
+    "RightForeArm": (0.28, 0.0, 0.0),
+    "RightHand": (0.16, 0.0, 0.0),
+    "neck": (0.0, 0.16, 0.0),
+    "Head": (0.0, 0.16, 0.0),
+    "head_end": (0.0, 0.10, 0.0),
+    "headfront": (0.0, 0.02, 0.10),
+}
+
+PARENTS = {
+    "Hips": None,
+    "LeftUpLeg": "Hips",
+    "LeftLeg": "LeftUpLeg",
+    "LeftFoot": "LeftLeg",
+    "LeftToeBase": "LeftFoot",
+    "RightUpLeg": "Hips",
+    "RightLeg": "RightUpLeg",
+    "RightFoot": "RightLeg",
+    "RightToeBase": "RightFoot",
+    "Spine02": "Hips",
+    "Spine01": "Spine02",
+    "Spine": "Spine01",
+    "LeftShoulder": "Spine",
+    "LeftArm": "LeftShoulder",
+    "LeftForeArm": "LeftArm",
+    "LeftHand": "LeftForeArm",
+    "RightShoulder": "Spine",
+    "RightArm": "RightShoulder",
+    "RightForeArm": "RightArm",
+    "RightHand": "RightForeArm",
+    "neck": "Spine",
+    "Head": "neck",
+    "head_end": "Head",
+    "headfront": "Head",
+}
+
 
 def log(message):
     print(f"[rotomotion_usdz_retarget] {message}")
@@ -520,18 +574,40 @@ def load_ray_solve_reference(path, stage):
         raise RuntimeError("ray_solve_reference.json has no frames.")
 
     scene_units_per_meter = max(float(data.get("sceneUnitsPerMeter", 1.0)), 0.0001)
+    target_height_meters = max(float(data.get("targetHeightMeters", 1.74)), 0.0001)
     meters_per_unit = float(UsdGeom.GetStageMetersPerUnit(stage) or 1.0)
     position_scale = 1.0 / scene_units_per_meter / max(meters_per_unit, 0.0001)
 
     positions = {joint: [] for joint in CANONICAL_JOINTS}
     rotations = {joint: [] for joint in CANONICAL_JOINTS}
+    root_translation_stage_units = []
     frame_times = []
+    first_hips = None
 
     for frame in frames:
         frame_index = int(frame.get("frame", 0))
         time_seconds = float(frame.get("timeSeconds", 0.0))
         frame_times.append((frame_index, time_seconds))
         joints = frame.get("joints", {})
+        hips = joints.get("Hips", {})
+        hips_position = hips.get("worldPosition") if isinstance(hips, dict) else None
+
+        if isinstance(hips_position, list) and len(hips_position) == 3:
+            if first_hips is None:
+                first_hips = [
+                    float(hips_position[0]),
+                    float(hips_position[1]),
+                    float(hips_position[2]),
+                ]
+
+            root_translation_stage_units.append([
+                frame_index,
+                (float(hips_position[0]) - first_hips[0]) * position_scale,
+                (float(hips_position[1]) - first_hips[1]) * position_scale,
+                (float(hips_position[2]) - first_hips[2]) * position_scale,
+            ])
+        else:
+            root_translation_stage_units.append([frame_index, 0.0, 0.0, 0.0])
 
         for joint_name in CANONICAL_JOINTS:
             joint = joints.get(joint_name)
@@ -574,14 +650,186 @@ def load_ray_solve_reference(path, stage):
         "fps": fps,
         "positions": positions,
         "rotations": rotations,
+        "rootTranslationStageUnits": root_translation_stage_units,
         "frameTimes": frame_times,
+        "targetHeightMeters": target_height_meters,
         "sceneUnitsPerMeter": scene_units_per_meter,
         "metersPerUnit": meters_per_unit,
     }
 
 
+def default_rest_world_meters():
+    world = {}
+
+    for joint_name in CANONICAL_JOINTS:
+        local = REST_LOCAL_METERS[joint_name]
+        parent = PARENTS[joint_name]
+
+        if parent is None:
+            world[joint_name] = local
+            continue
+
+        parent_position = world[parent]
+        world[joint_name] = (
+            parent_position[0] + local[0],
+            parent_position[1] + local[1],
+            parent_position[2] + local[2],
+        )
+
+    return world
+
+
+def default_rest_height_meters():
+    world = default_rest_world_meters()
+    ys = [value[1] for value in world.values()]
+    return max(max(ys) - min(ys), 0.0001)
+
+
+def scaled_rest_local_stage_units(reference):
+    scale = reference["targetHeightMeters"] / default_rest_height_meters()
+    meters_per_unit = max(reference["metersPerUnit"], 0.0001)
+
+    return {
+        joint: (
+            REST_LOCAL_METERS[joint][0] * scale / meters_per_unit,
+            REST_LOCAL_METERS[joint][1] * scale / meters_per_unit,
+            REST_LOCAL_METERS[joint][2] * scale / meters_per_unit,
+        )
+        for joint in CANONICAL_JOINTS
+    }
+
+
+def quat_normalized_tuple(value):
+    if value is None or len(value) != 4:
+        return (1.0, 0.0, 0.0, 0.0)
+
+    w = float(value[0])
+    x = float(value[1])
+    y = float(value[2])
+    z = float(value[3])
+    length = max((w * w + x * x + y * y + z * z) ** 0.5, 0.0000001)
+    return (w / length, x / length, y / length, z / length)
+
+
+def rotate_vector_by_quat(vector, quat):
+    # q * v * q^-1, with q in wxyz order.
+    w, x, y, z = quat_normalized_tuple(quat)
+    vx, vy, vz = vector
+
+    tx = 2.0 * (y * vz - z * vy)
+    ty = 2.0 * (z * vx - x * vz)
+    tz = 2.0 * (x * vy - y * vx)
+
+    return (
+        vx + w * tx + (y * tz - z * ty),
+        vy + w * ty + (z * tx - x * tz),
+        vz + w * tz + (x * ty - y * tx),
+    )
+
+
+def sample_rotation(reference, joint_name, frame):
+    keys = reference["rotations"].get(joint_name, [])
+
+    if not keys:
+        return (1.0, 0.0, 0.0, 0.0)
+
+    previous = keys[0]
+
+    for key in keys:
+        if int(key[0]) == int(frame):
+            return (float(key[1]), float(key[2]), float(key[3]), float(key[4]))
+
+        if int(key[0]) <= int(frame):
+            previous = key
+        else:
+            break
+
+    return (float(previous[1]), float(previous[2]), float(previous[3]), float(previous[4]))
+
+
+def sample_root_translation(reference, frame):
+    keys = reference["rootTranslationStageUnits"]
+
+    if not keys:
+        return (0.0, 0.0, 0.0)
+
+    previous = keys[0]
+
+    for key in keys:
+        if int(key[0]) == int(frame):
+            return (float(key[1]), float(key[2]), float(key[3]))
+
+        if int(key[0]) <= int(frame):
+            previous = key
+        else:
+            break
+
+    return (float(previous[1]), float(previous[2]), float(previous[3]))
+
+
+def build_fk_armature_positions(reference):
+    rest_local = scaled_rest_local_stage_units(reference)
+    rest_world = {}
+
+    for joint_name in CANONICAL_JOINTS:
+        local = rest_local[joint_name]
+        parent = PARENTS[joint_name]
+
+        if parent is None:
+            rest_world[joint_name] = local
+        else:
+            p = rest_world[parent]
+            rest_world[joint_name] = (
+                p[0] + local[0],
+                p[1] + local[1],
+                p[2] + local[2],
+            )
+
+    min_y = min(position[1] for position in rest_world.values())
+    hip_ground_offset = -min_y
+    positions = {joint: [] for joint in CANONICAL_JOINTS}
+
+    for frame, _time_seconds in reference["frameTimes"]:
+        frame_positions = {}
+        root_delta = sample_root_translation(reference, frame)
+
+        for joint_name in CANONICAL_JOINTS:
+            parent = PARENTS[joint_name]
+
+            if parent is None:
+                frame_positions[joint_name] = (
+                    root_delta[0],
+                    hip_ground_offset + root_delta[1],
+                    root_delta[2],
+                )
+                continue
+
+            local = rest_local[joint_name]
+            rotation = sample_rotation(reference, joint_name, frame)
+            rotated_local = rotate_vector_by_quat(local, rotation)
+            parent_position = frame_positions[parent]
+
+            frame_positions[joint_name] = (
+                parent_position[0] + rotated_local[0],
+                parent_position[1] + rotated_local[1],
+                parent_position[2] + rotated_local[2],
+            )
+
+        for joint_name, position in frame_positions.items():
+            positions[joint_name].append([
+                int(frame),
+                float(position[0]),
+                float(position[1]),
+                float(position[2]),
+            ])
+
+    return positions
+
+
 def create_session_armature_fallback(stage, reference_path, clip_id):
     reference = load_ray_solve_reference(reference_path, stage)
+    fk_positions = build_fk_armature_positions(reference)
+    reference["fkPositions"] = fk_positions
     token = safe_prim_token(clip_id)
     root_path = f"/RotoMotionSessionArmature_{token}"
 
@@ -600,7 +848,7 @@ def create_session_armature_fallback(stage, reference_path, clip_id):
     bone_width = 0.012
 
     for joint_name in CANONICAL_JOINTS:
-        samples = reference["positions"].get(joint_name, [])
+        samples = fk_positions.get(joint_name, [])
 
         if not samples:
             continue
@@ -623,11 +871,11 @@ def create_session_armature_fallback(stage, reference_path, clip_id):
     for parent_name, child_name in BONES:
         parent_samples = {
             int(sample[0]): sample
-            for sample in reference["positions"].get(parent_name, [])
+            for sample in fk_positions.get(parent_name, [])
         }
         child_samples = {
             int(sample[0]): sample
-            for sample in reference["positions"].get(child_name, [])
+            for sample in fk_positions.get(child_name, [])
         }
         shared_frames = sorted(set(parent_samples.keys()).intersection(child_samples.keys()))
 
@@ -659,7 +907,10 @@ def create_session_armature_fallback(stage, reference_path, clip_id):
     stage.SetFramesPerSecond(reference["fps"])
     stage.SetTimeCodesPerSecond(reference["fps"])
 
-    log(f"Target has no UsdSkel.Skeleton; created session armature fallback: {root_path}")
+    log(
+        "Target has no UsdSkel.Skeleton; created session armature fallback "
+        f"from reference-height FK armature: {root_path}"
+    )
     return root_path, reference
 
 
@@ -676,7 +927,7 @@ def write_session_armature_readback_json(output_json, source_usdz, armature_path
         if joint_rotations:
             rotations[joint_name] = joint_rotations
 
-        joint_positions = reference["positions"].get(joint_name, [])
+        joint_positions = reference.get("fkPositions", reference["positions"]).get(joint_name, [])
 
         if joint_positions:
             translations[joint_name] = joint_positions
@@ -689,6 +940,8 @@ def write_session_armature_readback_json(output_json, source_usdz, armature_path
         "stageFPS": float(reference["fps"]),
         "stageStartTimeCode": min(frame for frame, _ in reference["frameTimes"]),
         "stageEndTimeCode": max(frame for frame, _ in reference["frameTimes"]),
+        "targetHeightMeters": float(reference["targetHeightMeters"]),
+        "metersPerUnit": float(reference["metersPerUnit"]),
         "skeletonPath": armature_path,
         "skelAnimationSourceTargets": [armature_path],
         "animationPath": armature_path,
