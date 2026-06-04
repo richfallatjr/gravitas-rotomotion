@@ -9,13 +9,15 @@ struct SmoothedMeshyPoseCapture: Codable {
     struct SmoothingSettings: Codable, Equatable {
         var globalEnabled: Bool
         var strength: Double
+        var windowRadius: Int
         var missingInterpolationEnabled: Bool
         var confidenceWeighted: Bool
         var perJointEnabled: [String: Bool]
 
         static let `default` = SmoothingSettings(
             globalEnabled: true,
-            strength: 0.65,
+            strength: 0.85,
+            windowRadius: 4,
             missingInterpolationEnabled: true,
             confidenceWeighted: true,
             perJointEnabled: Dictionary(

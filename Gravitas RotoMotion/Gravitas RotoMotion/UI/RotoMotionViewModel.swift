@@ -16,6 +16,7 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var normalizedCapture: NormalizedMeshyPoseCapture?
     @Published var smoothedCapture: SmoothedMeshyPoseCapture?
     @Published var rigProfile: RigProfile?
+    @Published var importedRigScene: ImportedRigScene?
     @Published var fitResult: RigFitResult?
 
     @Published var currentFrameIndex = 0
@@ -24,14 +25,23 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var sampleFPS = 24.0
     @Published var maxFrames = 0
 
-    @Published var showRaw = true
-    @Published var showSmoothed = true
-    @Published var showSmoothingDelta = true
+    @Published var showRawVisionPoints = true
+    @Published var showNormalizedMeshyPoints = true
+    @Published var showSmoothedMeshyPoints = true
+    @Published var showSmoothingDeltaVectors = true
+    @Published var showImportedRigModel = true
+    @Published var showImportedRigSkeleton = true
     @Published var showFittedRig = true
 
+    @Published var smoothingPreviewEnabled = true
+    @Published var smoothingStrength = 0.85
+    @Published var smoothingWindowRadius = 4
     @Published var smoothingSettings = SmoothedMeshyPoseCapture.SmoothingSettings.default
     @Published var fitSettings = RigFitSettings.default
     @Published var projectionSettings = RigProjectionSettings.default
+
+    @Published var rigOpacity = 0.5
+    @Published var rigImportStatus = "No USDZ rig loaded."
 
     @Published var status = "Open a video to begin."
     @Published var logLines: [String] = ["Ready."]
@@ -51,35 +61,39 @@ final class RotoMotionViewModel: ObservableObject {
     }
 
     var currentRawFrame: RawVisionPoseCapture.PoseFrame? {
-        guard let frames = rawCapture?.frames, frames.indices.contains(currentFrameIndex) else {
+        guard let frames = rawCapture?.frames else {
             return nil
         }
 
-        return frames[currentFrameIndex]
+        return frames.first { $0.frameIndex == currentFrameIndex }
+            ?? (frames.indices.contains(currentFrameIndex) ? frames[currentFrameIndex] : nil)
     }
 
     var currentNormalizedFrame: NormalizedMeshyPoseCapture.Frame? {
-        guard let frames = normalizedCapture?.frames, frames.indices.contains(currentFrameIndex) else {
+        guard let frames = normalizedCapture?.frames else {
             return nil
         }
 
-        return frames[currentFrameIndex]
+        return frames.first { $0.frameIndex == currentFrameIndex }
+            ?? (frames.indices.contains(currentFrameIndex) ? frames[currentFrameIndex] : nil)
     }
 
     var currentSmoothedFrame: SmoothedMeshyPoseCapture.Frame? {
-        guard let frames = smoothedCapture?.frames, frames.indices.contains(currentFrameIndex) else {
+        guard let frames = smoothedCapture?.frames else {
             return nil
         }
 
-        return frames[currentFrameIndex]
+        return frames.first { $0.frameIndex == currentFrameIndex }
+            ?? (frames.indices.contains(currentFrameIndex) ? frames[currentFrameIndex] : nil)
     }
 
     var currentFitFrame: RigFitResult.FrameFit? {
-        guard let frames = fitResult?.frames, frames.indices.contains(currentFrameIndex) else {
+        guard let frames = fitResult?.frames else {
             return nil
         }
 
-        return frames[currentFrameIndex]
+        return frames.first { $0.frameIndex == currentFrameIndex }
+            ?? (frames.indices.contains(currentFrameIndex) ? frames[currentFrameIndex] : nil)
     }
 
     var videoSize: CGSize {
@@ -223,6 +237,10 @@ final class RotoMotionViewModel: ObservableObject {
         fitResult = nil
         status = "Normalized to Meshy/Jock 24."
         log("Normalized \(rawCapture.frames.count) frames to Meshy/Jock 24.")
+
+        if smoothingPreviewEnabled {
+            smooth()
+        }
     }
 
     func smooth() {
@@ -231,13 +249,28 @@ final class RotoMotionViewModel: ObservableObject {
             return
         }
 
+        let settings = SmoothedMeshyPoseCapture.SmoothingSettings(
+            globalEnabled: smoothingPreviewEnabled,
+            strength: smoothingStrength,
+            windowRadius: smoothingWindowRadius,
+            missingInterpolationEnabled: smoothingSettings.missingInterpolationEnabled,
+            confidenceWeighted: smoothingSettings.confidenceWeighted,
+            perJointEnabled: smoothingSettings.perJointEnabled
+        )
+        smoothingSettings = settings
+
         smoothedCapture = PoseSmoother2D.smooth(
             normalized: normalizedCapture,
-            settings: smoothingSettings
+            settings: settings
         )
         fitResult = nil
         status = "Smoothing complete."
-        log("Smoothing complete: strength \(String(format: "%.2f", smoothingSettings.strength)).")
+        log("Smoothing complete: strength \(String(format: "%.2f", smoothingStrength)), radius \(smoothingWindowRadius).")
+    }
+
+    func recomputeSmoothingIfAvailable() {
+        guard normalizedCapture != nil else { return }
+        smooth()
     }
 
     func importRigProfile() {
@@ -260,6 +293,48 @@ final class RotoMotionViewModel: ObservableObject {
             status = "Default rig load failed."
             log("Default rig load failed: \(error.localizedDescription)")
         }
+    }
+
+    func importUSDZRig() {
+        guard let url = FilePanelHelpers.openRigAssetURL() else { return }
+
+        do {
+            let rig = try USDZRigSceneLoader.loadRigScene(
+                from: url,
+                defaultOpacity: CGFloat(rigOpacity)
+            )
+
+            importedRigScene = rig
+            if let measuredProfile = rig.measuredRigProfile {
+                rigProfile = measuredProfile
+            }
+
+            if rig.validation.valid {
+                rigImportStatus = "Loaded rig: \(url.lastPathComponent). Required Meshy24 joints valid."
+            } else {
+                let missing = rig.validation.missingRequiredJoints.joined(separator: ", ")
+                rigImportStatus = "Loaded rig: \(url.lastPathComponent). Missing required: \(missing). Matched joints: \(rig.skeletonJointNames.count)."
+            }
+
+            status = rigImportStatus
+            log(rigImportStatus)
+            if rig.measuredRigProfile != nil {
+                log("Derived measured rig profile from imported USD scene nodes.")
+            }
+        } catch {
+            rigImportStatus = "USDZ rig import failed: \(error.localizedDescription)"
+            status = rigImportStatus
+            log(rigImportStatus)
+        }
+    }
+
+    func updateImportedRigOpacity() {
+        guard let importedRigScene else { return }
+
+        USDZRigSceneLoader.applyTransparency(
+            rootNode: importedRigScene.rootNode,
+            opacity: CGFloat(rigOpacity)
+        )
     }
 
     func runFit() {

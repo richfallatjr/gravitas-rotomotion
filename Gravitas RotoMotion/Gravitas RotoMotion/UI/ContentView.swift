@@ -20,9 +20,10 @@ struct ContentView: View {
                         smoothedFrame: roto.currentSmoothedFrame,
                         fitFrame: roto.currentFitFrame,
                         videoSize: roto.videoSize,
-                        showRaw: roto.showRaw,
-                        showSmoothed: roto.showSmoothed,
-                        showSmoothingDelta: roto.showSmoothingDelta,
+                        showRawVisionPoints: roto.showRawVisionPoints,
+                        showNormalizedMeshyPoints: roto.showNormalizedMeshyPoints,
+                        showSmoothedMeshyPoints: roto.showSmoothedMeshyPoints,
+                        showSmoothingDeltaVectors: roto.showSmoothingDeltaVectors,
                         showFittedRig: roto.showFittedRig,
                         projectionSettings: roto.projectionSettings,
                         onTimeChange: roto.handlePlaybackTimeChange
@@ -39,6 +40,11 @@ struct ContentView: View {
                     }
                 }
                 .padding(16)
+
+                Divider()
+
+                rigScenePanel
+                    .frame(width: 420)
 
                 Divider()
 
@@ -123,7 +129,7 @@ struct ContentView: View {
                     step: 24
                 )
 
-                Toggle("Raw Vision points", isOn: $roto.showRaw)
+                Toggle("Show Raw Vision Points", isOn: $roto.showRawVisionPoints)
 
                 Button(action: roto.saveRawJSON) {
                     Label("Save Raw JSON", systemImage: "doc.text")
@@ -134,6 +140,8 @@ struct ContentView: View {
                     metricRow("Frames", "\(roto.rawCapture?.frames.count ?? 0)")
                     metricRow("Detected", roto.detectedFrameText)
                 }
+
+                metricRow("Raw Vision", "Variable joints")
             }
         }
     }
@@ -151,8 +159,10 @@ struct ContentView: View {
                 }
                 .disabled(roto.normalizedCapture == nil || roto.isWorking)
 
+                Toggle("Show Normalized Meshy24 Points", isOn: $roto.showNormalizedMeshyPoints)
+
                 metricRow("Rig", CanonicalRig.rigID)
-                metricRow("Joints", "\(CanonicalRig.jointNames.count)")
+                metricRow("Meshy24", "\(CanonicalRig.jointNames.count) canonical joints")
             }
         }
     }
@@ -160,20 +170,41 @@ struct ContentView: View {
     private var smoothingSection: some View {
         Section("Smoothing") {
             VStack(alignment: .leading, spacing: 10) {
-                Toggle("Enable smoothing", isOn: $roto.smoothingSettings.globalEnabled)
+                Toggle("Use Smoothing", isOn: $roto.smoothingPreviewEnabled)
+                    .onChange(of: roto.smoothingPreviewEnabled) {
+                        roto.recomputeSmoothingIfAvailable()
+                    }
 
                 HStack {
                     Text("Strength")
-                    Slider(value: $roto.smoothingSettings.strength, in: 0...0.98)
-                    Text(String(format: "%.2f", roto.smoothingSettings.strength))
+                    Slider(value: $roto.smoothingStrength, in: 0...1)
+                        .onChange(of: roto.smoothingStrength) {
+                            roto.recomputeSmoothingIfAvailable()
+                        }
+                    Text(String(format: "%.2f", roto.smoothingStrength))
                         .font(.system(.caption, design: .monospaced))
                         .frame(width: 42, alignment: .trailing)
                 }
 
+                Stepper(
+                    "Window Radius: \(roto.smoothingWindowRadius)",
+                    value: $roto.smoothingWindowRadius,
+                    in: 1...12
+                )
+                .onChange(of: roto.smoothingWindowRadius) {
+                    roto.recomputeSmoothingIfAvailable()
+                }
+
                 Toggle("Interpolate missing points", isOn: $roto.smoothingSettings.missingInterpolationEnabled)
+                    .onChange(of: roto.smoothingSettings.missingInterpolationEnabled) {
+                        roto.recomputeSmoothingIfAvailable()
+                    }
                 Toggle("Confidence weighted", isOn: $roto.smoothingSettings.confidenceWeighted)
-                Toggle("Smoothed overlay", isOn: $roto.showSmoothed)
-                Toggle("Smoothing delta vectors", isOn: $roto.showSmoothingDelta)
+                    .onChange(of: roto.smoothingSettings.confidenceWeighted) {
+                        roto.recomputeSmoothingIfAvailable()
+                    }
+                Toggle("Show Smoothed Meshy24 Points", isOn: $roto.showSmoothedMeshyPoints)
+                Toggle("Show Smoothing Delta Vectors", isOn: $roto.showSmoothingDeltaVectors)
 
                 HStack {
                     Button(action: roto.smooth) {
@@ -186,16 +217,44 @@ struct ContentView: View {
                     }
                     .disabled(roto.smoothedCapture == nil || roto.isWorking)
                 }
+
+                Button("Toggle Raw / Smoothed") {
+                    roto.showRawVisionPoints.toggle()
+                    roto.showSmoothedMeshyPoints.toggle()
+                }
             }
         }
     }
 
     private var rigSection: some View {
-        Section("Rig") {
+        Section("Rig / Model") {
             VStack(alignment: .leading, spacing: 10) {
+                Button(action: roto.importUSDZRig) {
+                    Label("Load USDZ / USD Rig", systemImage: "cube.transparent")
+                }
+
+                Toggle("Show Imported Rig Model", isOn: $roto.showImportedRigModel)
+                Toggle("Show Imported Rig Skeleton", isOn: $roto.showImportedRigSkeleton)
+
+                Text(roto.rigImportStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(4)
+                    .textSelection(.enabled)
+
+                metricRow("Imported matched", "\(roto.importedRigScene?.skeletonJointNames.count ?? 0)")
+                metricRow("Missing required", importedMissingRequiredText)
+                metricRow("Model opacity", "\(Int(roto.rigOpacity * 100))%")
+
+                Divider()
+
+                Text("Measured Profile")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
                 HStack {
                     Button(action: roto.importRigProfile) {
-                        Label("Import Rig Profile", systemImage: "square.and.arrow.down")
+                        Label("Import JSON Profile", systemImage: "square.and.arrow.down")
                     }
 
                     Button(action: roto.loadDefaultRigProfile) {
@@ -293,6 +352,58 @@ struct ContentView: View {
         }
     }
 
+    private var rigScenePanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Imported Rig / Model")
+                    .font(.headline)
+
+                Spacer()
+
+                Text("\(Int(roto.rigOpacity * 100))%")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+
+            RigSceneKitView(
+                importedRigScene: roto.importedRigScene,
+                opacity: CGFloat(roto.rigOpacity),
+                showModel: roto.showImportedRigModel,
+                showSkeleton: roto.showImportedRigSkeleton
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.black.opacity(0.82))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(.quaternary, lineWidth: 1)
+            }
+
+            Slider(value: $roto.rigOpacity, in: 0.05...1.0) {
+                Text("Rig Opacity")
+            }
+            .onChange(of: roto.rigOpacity) {
+                roto.updateImportedRigOpacity()
+            }
+
+            HStack {
+                Button(action: roto.importUSDZRig) {
+                    Label("Load USDZ / USD", systemImage: "cube.transparent")
+                }
+
+                Toggle("Model", isOn: $roto.showImportedRigModel)
+                Toggle("Skeleton", isOn: $roto.showImportedRigSkeleton)
+            }
+
+            Text(roto.rigImportStatus)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .textSelection(.enabled)
+        }
+        .padding(16)
+    }
+
     private var rigValidationText: String {
         guard let rigProfile = roto.rigProfile else {
             return "--"
@@ -300,6 +411,18 @@ struct ContentView: View {
 
         let validation = rigProfile.validate()
         return validation.valid ? "Valid" : "Missing \(validation.missingRequiredJoints.count)"
+    }
+
+    private var importedMissingRequiredText: String {
+        guard let validation = roto.importedRigScene?.validation else {
+            return "--"
+        }
+
+        if validation.missingRequiredJoints.isEmpty {
+            return "None"
+        }
+
+        return validation.missingRequiredJoints.joined(separator: ", ")
     }
 
     private func metricRow(_ label: String, _ value: String) -> some View {

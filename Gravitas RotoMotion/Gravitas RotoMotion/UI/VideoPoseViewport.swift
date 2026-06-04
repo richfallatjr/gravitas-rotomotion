@@ -10,9 +10,10 @@ struct VideoPoseViewport: View {
     let smoothedFrame: SmoothedMeshyPoseCapture.Frame?
     let fitFrame: RigFitResult.FrameFit?
     let videoSize: CGSize
-    let showRaw: Bool
-    let showSmoothed: Bool
-    let showSmoothingDelta: Bool
+    let showRawVisionPoints: Bool
+    let showNormalizedMeshyPoints: Bool
+    let showSmoothedMeshyPoints: Bool
+    let showSmoothingDeltaVectors: Bool
     let showFittedRig: Bool
     let projectionSettings: RigProjectionSettings
     let onTimeChange: (Double) -> Void
@@ -47,9 +48,10 @@ struct VideoPoseViewport: View {
                     rawFrame: rawFrame,
                     normalizedFrame: normalizedFrame,
                     smoothedFrame: smoothedFrame,
-                    showRaw: showRaw,
-                    showSmoothed: showSmoothed,
-                    showSmoothingDelta: showSmoothingDelta
+                    showRawVisionPoints: showRawVisionPoints,
+                    showNormalizedMeshyPoints: showNormalizedMeshyPoints,
+                    showSmoothedMeshyPoints: showSmoothedMeshyPoints,
+                    showSmoothingDeltaVectors: showSmoothingDeltaVectors
                 )
                 .frame(width: rect.width, height: rect.height)
                 .position(x: rect.midX, y: rect.midY)
