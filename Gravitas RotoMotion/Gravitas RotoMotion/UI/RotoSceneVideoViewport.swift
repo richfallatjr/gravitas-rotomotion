@@ -53,6 +53,9 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private var lastImageToken = -1
         private var lastImageObjectID: ObjectIdentifier?
         private var videoPlaneSize = CGSize(width: 9.0, height: 16.0)
+        private let cameraPadding: CGFloat = 1.02
+        private var lastViewBounds: CGRect = .zero
+        private var lastVideoPlaneSize: CGSize = .zero
 
         func makeView() -> SCNView {
             let view = SCNView()
@@ -165,6 +168,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 image: image
             )
 
+            lastVideoPlaneSize = .zero
+
             print(
                 """
                 [RotoSceneVideoViewport] Updated UV video card
@@ -188,6 +193,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 height: videoPlaneSize.height,
                 image: nil
             )
+            lastVideoPlaneSize = .zero
         }
 
         private func makeVideoPlaneGeometry(
@@ -212,23 +218,73 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         }
 
         private func updateCameraToFrameVideoCard(viewBounds: CGRect) {
+            let boundsChanged =
+                abs(viewBounds.width - lastViewBounds.width) > 0.5 ||
+                abs(viewBounds.height - lastViewBounds.height) > 0.5
+
+            let planeChanged =
+                abs(videoPlaneSize.width - lastVideoPlaneSize.width) > 0.0001 ||
+                abs(videoPlaneSize.height - lastVideoPlaneSize.height) > 0.0001
+
+            guard boundsChanged || planeChanged else {
+                return
+            }
+
+            lastViewBounds = viewBounds
+            lastVideoPlaneSize = videoPlaneSize
+
+            frameVideoCardToCamera(
+                viewBounds: viewBounds,
+                reason: boundsChanged && planeChanged
+                    ? "bounds+plane changed"
+                    : boundsChanged
+                        ? "bounds changed"
+                        : "plane changed"
+            )
+        }
+
+        private func frameVideoCardToCamera(
+            viewBounds: CGRect,
+            reason: String
+        ) {
             guard let camera = cameraNode.camera else {
                 return
             }
 
-            let viewportWidth = max(viewBounds.width, 1)
-            let viewportHeight = max(viewBounds.height, 1)
+            let viewportWidth = max(viewBounds.width, 1.0)
+            let viewportHeight = max(viewBounds.height, 1.0)
             let viewportAspect = viewportWidth / viewportHeight
 
-            let planeWidth = max(videoPlaneSize.width, 1)
-            let planeHeight = max(videoPlaneSize.height, 1)
-            let requiredVerticalScale = max(planeHeight, planeWidth / viewportAspect)
+            let planeWidth = max(videoPlaneSize.width, 0.0001)
+            let planeHeight = max(videoPlaneSize.height, 0.0001)
+
+            let requiredVerticalForHeight = planeHeight
+            let requiredVerticalForWidth = planeWidth / viewportAspect
+
+            let requiredVerticalScale = max(
+                requiredVerticalForHeight,
+                requiredVerticalForWidth
+            ) * cameraPadding
 
             camera.usesOrthographicProjection = true
             camera.orthographicScale = requiredVerticalScale
 
             cameraNode.position = SCNVector3(0, 0, 10)
             cameraNode.look(at: SCNVector3(0, 0, 0))
+
+            print(
+                """
+                [RotoSceneVideoViewport] Frame Card
+                  reason: \(reason)
+                  viewBounds: \(Int(viewportWidth))x\(Int(viewportHeight))
+                  viewportAspect: \(String(format: "%.4f", viewportAspect))
+                  planeSize: \(String(format: "%.4f", planeWidth))x\(String(format: "%.4f", planeHeight))
+                  requiredVerticalForHeight: \(String(format: "%.4f", requiredVerticalForHeight))
+                  requiredVerticalForWidth: \(String(format: "%.4f", requiredVerticalForWidth))
+                  padding: \(String(format: "%.3f", cameraPadding))
+                  orthographicScale: \(String(format: "%.4f", requiredVerticalScale))
+                """
+            )
         }
 
         private func pointOnVideoPlane(

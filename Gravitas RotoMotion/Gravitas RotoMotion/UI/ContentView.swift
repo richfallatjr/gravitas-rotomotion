@@ -20,6 +20,12 @@ struct ContentView: View {
     @State private var uiAudioEndObserver: NSObjectProtocol?
     @State private var uiSecurityScopedURL: URL?
     @State private var uiSecurityScopedAccessActive = false
+    @State private var uiSourceCharacterUSDZURL: URL?
+    @State private var uiSourceCharacterSecurityScopedURL: URL?
+    @State private var uiSourceCharacterSecurityScopedAccessActive = false
+    @State private var uiAnimatedUSDZSourceURL: URL?
+    @State private var uiAnimatedUSDZSourceSecurityScopedURL: URL?
+    @State private var uiAnimatedUSDZSourceSecurityScopedAccessActive = false
     @State private var pipelineRenderToken = 0
 
     var body: some View {
@@ -49,6 +55,8 @@ struct ContentView: View {
         }
         .onDisappear {
             releaseUIVideoAccess()
+            releaseUISourceCharacterAccess()
+            releaseUIAnimatedUSDZSourceAccess()
         }
     }
 
@@ -127,6 +135,11 @@ struct ContentView: View {
                     .font(.caption)
                     .monospacedDigit()
 
+                Text("t \(String(format: "%.3f", currentUIVideoTimeSeconds))s")
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+
                 Text(uiStatus)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -145,7 +158,6 @@ struct ContentView: View {
                 showSmoothedMeshy: false,
                 showGroundPlane: roto.groundPlane.visible
             )
-            .frame(minWidth: 620, minHeight: 520)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.black)
             .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -191,10 +203,10 @@ struct ContentView: View {
                 GroupBox("Video") {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("File: \(uiVideoURL?.lastPathComponent ?? "none")")
-                Text("Source frames: \(uiDecodedFrames.count)")
-                Text("Current image: \(uiCurrentImage == nil ? "nil" : "yes")")
-                Text("Current time: \(String(format: "%.3f", currentUIVideoTimeSeconds))s")
-                Text("Visual FPS: \(String(format: "%.3f", RotoVideoFrameCache.estimatedFPS(frames: uiDecodedFrames)))")
+                        Text("Source frames: \(uiDecodedFrames.count)")
+                        Text("Current image: \(uiCurrentImage == nil ? "nil" : "yes")")
+                        Text("Current time: \(String(format: "%.3f", currentUIVideoTimeSeconds))s")
+                        Text("Visual FPS: \(String(format: "%.3f", RotoVideoFrameCache.estimatedFPS(frames: uiDecodedFrames)))")
                     }
                     .font(.caption)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -244,10 +256,177 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
+                animatedUSDZExportPanel
+
+                runtimePreviewPackagePanel
+
                 diagnosticsPanel
             }
             .padding(10)
         }
+    }
+
+    private var runtimePreviewPackagePanel: some View {
+        GroupBox("Runtime Preview Package") {
+            VStack(alignment: .leading, spacing: 8) {
+                Button("Choose Source Character USDZ") {
+                    chooseSourceCharacterUSDZDirectly()
+                }
+
+                Text((uiSourceCharacterUSDZURL ?? roto.sourceCharacterUSDZURL)?.lastPathComponent ?? "No character USDZ selected")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                TextField("Clip ID", text: $roto.exportClipID)
+                    .textFieldStyle(.roundedBorder)
+
+                TextField("Display Name", text: $roto.exportDisplayName)
+                    .textFieldStyle(.roundedBorder)
+
+                Button("Export Jock Sidecar Package") {
+                    if let uiSourceCharacterUSDZURL {
+                        roto.sourceCharacterUSDZURL = uiSourceCharacterUSDZURL
+                    }
+
+                    roto.exportPreviewPackage()
+                    uiStatus = roto.status
+                    pipelineRenderToken += 1
+                }
+
+                Text(previewPackageReadinessText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(roto.exportStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var animatedUSDZExportPanel: some View {
+        GroupBox("Animated USDZ Export") {
+            VStack(alignment: .leading, spacing: 8) {
+                Button("Check OpenUSD Tools") {
+                    roto.checkOpenUSDTools()
+                    uiStatus = roto.status
+                    pipelineRenderToken += 1
+                }
+
+                Text(openUSDToolsText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button("Choose Source USDZ") {
+                    chooseAnimatedUSDZSourceDirectly()
+                }
+
+                Text((uiAnimatedUSDZSourceURL ?? roto.animatedUSDZSourceURL)?.lastPathComponent ?? "No source USDZ")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Text(animatedUSDZMemorySourceText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                TextField("Clip ID", text: $roto.animatedUSDZClipID)
+                    .textFieldStyle(.roundedBorder)
+
+                Button("Export Animated USDZ") {
+                    if let uiAnimatedUSDZSourceURL {
+                        roto.animatedUSDZSourceURL = uiAnimatedUSDZSourceURL
+                    }
+
+                    roto.exportAnimatedUSDZ()
+                    uiStatus = roto.status
+                    pipelineRenderToken += 1
+                }
+
+                Text(animatedUSDZReadinessText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(roto.animatedUSDZExportStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var openUSDToolsText: String {
+        guard let openUSDToolStatus = roto.openUSDToolStatus else {
+            return "Tools not checked."
+        }
+
+        if openUSDToolStatus.ready {
+            return "Tools ready. usdzip: \(openUSDToolStatus.usdzipPath ?? "found")"
+        }
+
+        return """
+        Tools missing.
+        Python OK: \(openUSDToolStatus.pythonOK)
+        usdzip OK: \(openUSDToolStatus.usdzipOK)
+        """
+    }
+
+    private var animatedUSDZReadinessText: String {
+        var missing: [String] = []
+
+        if uiAnimatedUSDZSourceURL == nil && roto.animatedUSDZSourceURL == nil {
+            missing.append("source USDZ")
+        }
+
+        if roto.fitResult == nil && roto.normalizedCapture == nil && roto.smoothedCapture == nil {
+            missing.append("normalized, smoothed, or fitted in-memory animation")
+        }
+
+        if missing.isEmpty {
+            return "Ready to export from current in-memory animation."
+        }
+
+        return "Needs: \(missing.joined(separator: ", "))."
+    }
+
+    private var animatedUSDZMemorySourceText: String {
+        if let fitResult = roto.fitResult {
+            return "Animation source: current rig fit local rotations in memory (\(fitResult.frames.count) frames)."
+        }
+
+        if let smoothed = roto.smoothedCapture {
+            return "Animation source: smoothed Meshy markers in memory (\(smoothed.frames.count) frames), solved against source bone lengths at 1.74 m."
+        }
+
+        if let normalized = roto.normalizedCapture {
+            return "Animation source: normalized Meshy markers in memory (\(normalized.frames.count) frames), solved against source bone lengths at 1.74 m."
+        }
+
+        return "Animation source: none yet. Run Vision and Normalize first."
+    }
+
+    private var previewPackageReadinessText: String {
+        var missing: [String] = []
+
+        if uiSourceCharacterUSDZURL == nil && roto.sourceCharacterUSDZURL == nil {
+            missing.append("source character USDZ")
+        }
+
+        if roto.normalizedCapture == nil && roto.smoothedCapture == nil {
+            missing.append("normalized or smoothed animation")
+        }
+
+        if missing.isEmpty {
+            return "Ready to export."
+        }
+
+        return "Needs: \(missing.joined(separator: ", "))."
     }
 
     private var diagnosticsPanel: some View {
@@ -365,6 +544,83 @@ struct ContentView: View {
         return frames.min {
             abs($0.timeSeconds - time) < abs($1.timeSeconds - time)
         }
+    }
+
+    private func chooseSourceCharacterUSDZDirectly() {
+        print("[RotoMotion UI] Choose Source Character USDZ requested.")
+
+        guard let url = FilePanelHelpers.openUSDZURL() else {
+            roto.exportStatus = "Source USDZ selection canceled."
+            roto.status = roto.exportStatus
+            uiStatus = roto.exportStatus
+            roto.diagnostics.log(roto.exportStatus)
+            pipelineRenderToken += 1
+            return
+        }
+
+        releaseUISourceCharacterAccess()
+
+        let didAccess = url.startAccessingSecurityScopedResource()
+
+        uiSourceCharacterUSDZURL = url
+        uiSourceCharacterSecurityScopedURL = url
+        uiSourceCharacterSecurityScopedAccessActive = didAccess
+
+        roto.sourceCharacterUSDZURL = url
+        roto.exportStatus = "Selected source character: \(url.lastPathComponent)"
+        roto.status = roto.exportStatus
+        uiStatus = roto.exportStatus
+        pipelineRenderToken += 1
+
+        roto.diagnostics.log("""
+        Selected source character USDZ:
+          path: \(url.path)
+          securityScoped: \(didAccess)
+          fileExists: \(FileManager.default.fileExists(atPath: url.path))
+        """)
+
+        print(
+            """
+            [RotoMotion UI] Selected Source Character USDZ
+              path: \(url.path)
+              securityScoped: \(didAccess)
+              fileExists: \(FileManager.default.fileExists(atPath: url.path))
+            """
+        )
+    }
+
+    private func chooseAnimatedUSDZSourceDirectly() {
+        print("[RotoMotion UI] Choose Animated USDZ Source requested.")
+
+        guard let url = FilePanelHelpers.openUSDZURL() else {
+            roto.animatedUSDZExportStatus = "Animated USDZ source selection canceled."
+            roto.status = roto.animatedUSDZExportStatus
+            uiStatus = roto.animatedUSDZExportStatus
+            roto.diagnostics.log(roto.animatedUSDZExportStatus)
+            pipelineRenderToken += 1
+            return
+        }
+
+        releaseUIAnimatedUSDZSourceAccess()
+
+        let didAccess = url.startAccessingSecurityScopedResource()
+
+        uiAnimatedUSDZSourceURL = url
+        uiAnimatedUSDZSourceSecurityScopedURL = url
+        uiAnimatedUSDZSourceSecurityScopedAccessActive = didAccess
+
+        roto.animatedUSDZSourceURL = url
+        roto.animatedUSDZExportStatus = "Selected source USDZ: \(url.lastPathComponent)"
+        roto.status = roto.animatedUSDZExportStatus
+        uiStatus = roto.animatedUSDZExportStatus
+        pipelineRenderToken += 1
+
+        roto.diagnostics.log("""
+        Selected animated USDZ source:
+          path: \(url.path)
+          securityScoped: \(didAccess)
+          fileExists: \(FileManager.default.fileExists(atPath: url.path))
+        """)
     }
 
     private func openVideoDirectlyInContentView() {
@@ -709,4 +965,25 @@ struct ContentView: View {
         uiSecurityScopedURL = nil
         uiSecurityScopedAccessActive = false
     }
+
+    private func releaseUISourceCharacterAccess() {
+        if uiSourceCharacterSecurityScopedAccessActive,
+           let uiSourceCharacterSecurityScopedURL {
+            uiSourceCharacterSecurityScopedURL.stopAccessingSecurityScopedResource()
+        }
+
+        uiSourceCharacterSecurityScopedURL = nil
+        uiSourceCharacterSecurityScopedAccessActive = false
+    }
+
+    private func releaseUIAnimatedUSDZSourceAccess() {
+        if uiAnimatedUSDZSourceSecurityScopedAccessActive,
+           let uiAnimatedUSDZSourceSecurityScopedURL {
+            uiAnimatedUSDZSourceSecurityScopedURL.stopAccessingSecurityScopedResource()
+        }
+
+        uiAnimatedUSDZSourceSecurityScopedURL = nil
+        uiAnimatedUSDZSourceSecurityScopedAccessActive = false
+    }
+
 }

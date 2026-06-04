@@ -57,6 +57,15 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var rigOpacity = 0.5
     @Published var rigImportStatus = "No USDZ rig loaded."
 
+    @Published var sourceCharacterUSDZURL: URL?
+    @Published var exportClipID = "rotomotion_test_01"
+    @Published var exportDisplayName = "RotoMotion Test 01"
+    @Published var exportStatus = "No package exported."
+    @Published var animatedUSDZSourceURL: URL?
+    @Published var animatedUSDZClipID = "rotomotion_anim_test_01"
+    @Published var animatedUSDZExportStatus = "No animated USDZ exported."
+    @Published var openUSDToolStatus: OpenUSDToolStatus?
+
     @Published var status = "Open a video to begin."
     @Published var logLines: [String] = ["Ready."]
     @Published var isWorking = false
@@ -1059,6 +1068,189 @@ final class RotoMotionViewModel: ObservableObject {
         } catch {
             status = "JockAnim export failed."
             log("JockAnim export failed: \(error.localizedDescription)")
+        }
+    }
+
+    func chooseSourceCharacterUSDZ() {
+        guard let url = FilePanelHelpers.openUSDZURL() else {
+            exportStatus = "Source USDZ selection canceled."
+            status = exportStatus
+            diagnostics.log(exportStatus)
+            return
+        }
+
+        sourceCharacterUSDZURL = url
+        exportStatus = "Selected source character: \(url.lastPathComponent)"
+        status = exportStatus
+        diagnostics.log("Selected source character USDZ: \(url.path)")
+    }
+
+    func exportPreviewPackage() {
+        var missing: [String] = []
+
+        if sourceCharacterUSDZURL == nil {
+            missing.append("source character USDZ")
+        }
+
+        if normalizedCapture == nil && smoothedCapture == nil {
+            missing.append("normalized or smoothed animation")
+        }
+
+        guard missing.isEmpty else {
+            exportStatus = "Cannot export preview package. Needs: \(missing.joined(separator: ", "))."
+            status = exportStatus
+            diagnostics.log(exportStatus)
+            return
+        }
+
+        guard let sourceCharacterUSDZURL else {
+            exportStatus = "Cannot export preview package. Source character USDZ URL is missing."
+            status = exportStatus
+            diagnostics.log(exportStatus)
+            return
+        }
+
+        guard let outputDir = FilePanelHelpers.chooseOutputDirectory() else {
+            exportStatus = "Export canceled."
+            status = exportStatus
+            diagnostics.log(exportStatus)
+            return
+        }
+
+        let didAccess = sourceCharacterUSDZURL.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                sourceCharacterUSDZURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        do {
+            let packageURL = try RotoMotionPreviewPackageExporter.exportPackage(
+                sourceCharacterUSDZ: sourceCharacterUSDZURL,
+                clipID: exportClipID,
+                displayName: exportDisplayName,
+                videoURL: videoURL,
+                normalized: normalizedCapture,
+                smoothed: smoothedCapture,
+                rawCapture: rawCapture,
+                outputDirectory: outputDir
+            )
+
+            exportStatus = "Exported package: \(packageURL.path)"
+            status = exportStatus
+            diagnostics.log(exportStatus)
+            NSWorkspace.shared.open(packageURL)
+        } catch {
+            exportStatus = "Preview package export failed: \(error.localizedDescription)"
+            status = exportStatus
+            diagnostics.log("Preview package export failed: \(error)")
+        }
+    }
+
+    func checkOpenUSDTools() {
+        let toolStatus = OpenUSDToolChecker.check()
+        openUSDToolStatus = toolStatus
+
+        if toolStatus.ready {
+            animatedUSDZExportStatus = "OpenUSD tools ready."
+        } else {
+            animatedUSDZExportStatus = """
+            OpenUSD tools missing.
+            Python OK: \(toolStatus.pythonOK)
+            usdzip OK: \(toolStatus.usdzipOK)
+            \(toolStatus.pythonMessage)
+            """
+        }
+
+        status = animatedUSDZExportStatus
+        diagnostics.log(animatedUSDZExportStatus)
+    }
+
+    func chooseAnimatedUSDZSource() {
+        guard let url = FilePanelHelpers.openUSDZURL() else {
+            animatedUSDZExportStatus = "Animated USDZ source selection canceled."
+            status = animatedUSDZExportStatus
+            diagnostics.log(animatedUSDZExportStatus)
+            return
+        }
+
+        animatedUSDZSourceURL = url
+        animatedUSDZExportStatus = "Selected source USDZ: \(url.lastPathComponent)"
+        status = animatedUSDZExportStatus
+        diagnostics.log("Selected animated USDZ source: \(url.path)")
+    }
+
+    func exportAnimatedUSDZ() {
+        guard let source = animatedUSDZSourceURL else {
+            animatedUSDZExportStatus = "Choose source USDZ first."
+            status = animatedUSDZExportStatus
+            diagnostics.log(animatedUSDZExportStatus)
+            return
+        }
+
+        guard fitResult != nil || normalizedCapture != nil || smoothedCapture != nil else {
+            animatedUSDZExportStatus = "Run Vision and Normalize before animated USDZ export."
+            status = animatedUSDZExportStatus
+            diagnostics.log(animatedUSDZExportStatus)
+            return
+        }
+
+        let toolStatus = OpenUSDToolChecker.check()
+        openUSDToolStatus = toolStatus
+
+        guard toolStatus.ready else {
+            animatedUSDZExportStatus = """
+            OpenUSD tools missing. Cannot export animated USDZ.
+            Python OK: \(toolStatus.pythonOK)
+            usdzip OK: \(toolStatus.usdzipOK)
+            \(toolStatus.pythonMessage)
+            """
+            status = animatedUSDZExportStatus
+            diagnostics.log(animatedUSDZExportStatus)
+            return
+        }
+
+        guard let pythonExecutablePath = toolStatus.pythonExecutablePath else {
+            animatedUSDZExportStatus = "OpenUSD Python executable missing. Cannot export animated USDZ."
+            status = animatedUSDZExportStatus
+            diagnostics.log(animatedUSDZExportStatus)
+            return
+        }
+
+        guard let outputDir = FilePanelHelpers.chooseOutputDirectory() else {
+            animatedUSDZExportStatus = "Animated USDZ export canceled."
+            status = animatedUSDZExportStatus
+            diagnostics.log(animatedUSDZExportStatus)
+            return
+        }
+
+        let didAccessSource = source.startAccessingSecurityScopedResource()
+
+        defer {
+            if didAccessSource {
+                source.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        do {
+            let output = try AnimatedUSDZExporter.exportAnimatedUSDZ(
+                sourceUSDZ: source,
+                clipID: animatedUSDZClipID,
+                normalized: normalizedCapture,
+                smoothed: smoothedCapture,
+                fitResult: fitResult,
+                pythonExecutablePath: pythonExecutablePath,
+                outputDirectory: outputDir
+            )
+
+            animatedUSDZExportStatus = "Exported animated USDZ: \(output.path)"
+            status = animatedUSDZExportStatus
+            diagnostics.log(animatedUSDZExportStatus)
+            NSWorkspace.shared.open(output.deletingLastPathComponent())
+        } catch {
+            animatedUSDZExportStatus = "Animated USDZ export failed: \(error.localizedDescription)"
+            status = animatedUSDZExportStatus
+            diagnostics.log("Animated USDZ export failed: \(error)")
         }
     }
 

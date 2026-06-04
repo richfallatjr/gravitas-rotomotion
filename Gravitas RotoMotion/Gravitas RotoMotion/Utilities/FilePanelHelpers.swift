@@ -42,6 +42,19 @@ enum FilePanelHelpers {
         return panel.runModal() == .OK ? panel.url : nil
     }
 
+    static func openUSDZURL() -> URL? {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = ["usdz"].compactMap {
+            UTType(filenameExtension: $0)
+        }
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.resolvesAliases = true
+
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
     static func openJSONURL() -> URL? {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.json]
