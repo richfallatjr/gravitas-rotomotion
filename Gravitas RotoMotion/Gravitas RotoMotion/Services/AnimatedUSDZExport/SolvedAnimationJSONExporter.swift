@@ -20,10 +20,10 @@ enum SolvedAnimationJSONExporter {
     ) throws {
         let sceneUnitsPerMeter = max(solve.sceneUnitsPerMeter, 0.0001)
         let firstHips = solve.frames.first?.jointPositions["Hips"] ?? SIMD3<Float>(0, 0, 0)
-        var joints: [String: [[Any]]] = [:]
+        var joints: [String: [[String: Any]]] = [:]
 
         for jointName in CanonicalRig.jointNames {
-            var keys: [[Any]] = []
+            var keys: [[String: Any]] = []
             var previousRotation: SIMD4<Float>?
 
             for frame in solve.frames {
@@ -46,19 +46,33 @@ enum SolvedAnimationJSONExporter {
                     translationMeters = SIMD3<Float>(0, 0, 0)
                 }
 
-                // Explicit quaternion-safe format:
-                // [frame, tx, ty, tz, qw, qx, qy, qz, curve]
-                keys.append([
-                    frame.frameIndex,
-                    Double(translationMeters.x),
-                    Double(translationMeters.y),
-                    Double(translationMeters.z),
-                    Double(rotation.x),
-                    Double(rotation.y),
-                    Double(rotation.z),
-                    Double(rotation.w),
-                    "linear"
-                ])
+                let qw = rotation.x
+                let qx = rotation.y
+                let qy = rotation.z
+                let qz = rotation.w
+
+                var key: [String: Any] = [
+                    "frame": frame.frameIndex,
+                    "time": frame.timeSeconds,
+                    "rotation_wxyz": [
+                        Double(qw),
+                        Double(qx),
+                        Double(qy),
+                        Double(qz)
+                    ],
+                    "curve": "linear"
+                ]
+
+                if includeHipsTranslation,
+                   jointName == "Hips" {
+                    key["translation_xyz"] = [
+                        Double(translationMeters.x),
+                        Double(translationMeters.y),
+                        Double(translationMeters.z)
+                    ]
+                }
+
+                keys.append(key)
             }
 
             if !keys.isEmpty {
@@ -67,7 +81,7 @@ enum SolvedAnimationJSONExporter {
         }
 
         let root: [String: Any] = [
-            "schema": "com.gravitas.rotomotion.solved_animation_keys.v0",
+            "schema": "com.gravitas.rotomotion.solved_animation.v1",
             "sourceKind": solve.sourceKind,
             "rigID": solve.rigID,
             "rigVersion": solve.rigVersion,
@@ -75,9 +89,8 @@ enum SolvedAnimationJSONExporter {
             "sceneUnitsPerMeter": solve.sceneUnitsPerMeter,
             "frameCount": solve.frameCount,
             "fps": inferredFPS(solve.frames),
-            "includeHipsTranslation": includeHipsTranslation,
-            "keyFormat": "[frame, tx, ty, tz, qw, qx, qy, qz, curve]",
-            "quaternionOrder": "wxyz",
+            "rotation_order": "wxyz",
+            "translation_policy": includeHipsTranslation ? "hips_only" : "none",
             "joints": joints
         ]
 

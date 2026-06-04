@@ -105,9 +105,11 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var targetCharacterUSDZURL: URL?
     @Published var retargetClipID = "rotomotion_inside_out_01"
     @Published var includeHipsTranslationInUSDZ = true
-    @Published var scaleRootMotionToTargetHeight = true
     @Published var referenceRigProfile: USDZSkeletonProfile?
-    @Published var targetRigProfile: USDZSkeletonProfile?
+    @Published var sessionSkeletonPath: String?
+    @Published var sessionJointPaths: [String] = []
+    @Published var sessionJointLeafNames: [String] = []
+    @Published var sessionSkeletonStatus = "No session skeleton captured."
     @Published var usdzRetargetStatus = "No animated target USDZ exported."
     @Published var lastAnimatedUSDZExportURL: URL?
     @Published var lastAnimatedUSDZExportFolderURL: URL?
@@ -313,6 +315,7 @@ final class RotoMotionViewModel: ObservableObject {
 
     private func calibratedRayReferenceArmature() -> RotoReferenceArmature {
         if let referenceRigProfile {
+            diagnostics.log("Using reference USDZ skeleton profile. Manual height scaling disabled for solve.")
             return RotoReferenceArmature.fromUSDZProfile(
                 referenceRigProfile,
                 sceneUnitsPerMeter: raySceneUnitsPerMeter
@@ -325,6 +328,28 @@ final class RotoMotionViewModel: ObservableObject {
         let scale = targetSceneHeight / RotoReferenceArmature.meshy24Default.restHeight
 
         return RotoReferenceArmature.meshy24Default.scaled(by: scale)
+    }
+
+    private func captureSessionSkeletonIdentity(from profile: USDZSkeletonProfile) {
+        sessionSkeletonPath = profile.skeletonPath
+        sessionJointPaths = profile.jointPaths
+        sessionJointLeafNames = profile.jointLeafNames
+
+        sessionSkeletonStatus = """
+        Session skeleton captured:
+        \(profile.skeletonPath)
+        joints: \(profile.jointPaths.count)
+        """
+
+        diagnostics.log(sessionSkeletonStatus)
+    }
+
+    private func captureCanonicalSessionSkeletonIdentity() {
+        sessionSkeletonPath = nil
+        sessionJointPaths = CanonicalRig.jointPaths
+        sessionJointLeafNames = CanonicalRig.jointNames
+        sessionSkeletonStatus = "Session is using canonical Meshy24 fallback armature, not USDZ skeleton."
+        diagnostics.log(sessionSkeletonStatus)
     }
 
     private func checkedOpenUSDPythonForRetarget(
@@ -473,6 +498,12 @@ final class RotoMotionViewModel: ObservableObject {
             status = rayAnimationSolveStatus
             diagnostics.log(rayAnimationSolveStatus)
             return
+        }
+
+        if let referenceRigProfile {
+            captureSessionSkeletonIdentity(from: referenceRigProfile)
+        } else {
+            captureCanonicalSessionSkeletonIdentity()
         }
 
         let result = RotoRayAnimationSolver.solveAnimation(
@@ -1303,6 +1334,10 @@ final class RotoMotionViewModel: ObservableObject {
 
         referenceSolveUSDZURL = url
         referenceRigProfile = nil
+        sessionSkeletonPath = nil
+        sessionJointPaths = []
+        sessionJointLeafNames = []
+        sessionSkeletonStatus = "No session skeleton captured."
         rayAnimationSolveResult = nil
         rayAnimationSolveStatus = "Ray animation solve cleared because reference USDZ changed."
         lastAnimatedUSDZExportURL = nil
@@ -1323,14 +1358,18 @@ final class RotoMotionViewModel: ObservableObject {
         }
 
         targetCharacterUSDZURL = url
-        targetRigProfile = nil
         lastAnimatedUSDZExportURL = nil
         lastAnimatedUSDZExportFolderURL = nil
-        usdzRetargetStatus = "Selected target USDZ: \(url.lastPathComponent)"
-        status = usdzRetargetStatus
-        diagnostics.log("Selected target character USDZ: \(url.path)")
+        usdzRetargetStatus = """
+        Selected target model USDZ:
+        \(url.lastPathComponent)
 
-        inspectTargetUSDZ()
+        Target is used only as the model package for export.
+        No target preflight.
+        No target validation.
+        """
+        status = usdzRetargetStatus
+        diagnostics.log("Selected target model USDZ: \(url.path)")
     }
 
     func checkOpenUSDToolsForRetarget() {
@@ -1393,6 +1432,7 @@ final class RotoMotionViewModel: ObservableObject {
                 pythonExecutablePath: pythonExecutablePath
             )
             referenceRigProfile = profile
+            captureSessionSkeletonIdentity(from: profile)
 
             if let height = profile.estimatedHeightMeters, height > 0 {
                 rayTargetHeightMeters = height
@@ -1414,54 +1454,6 @@ final class RotoMotionViewModel: ObservableObject {
         }
     }
 
-    func inspectTargetUSDZ() {
-        guard let url = targetCharacterUSDZURL else {
-            return
-        }
-
-        guard let pythonExecutablePath = checkedOpenUSDPythonForRetarget() else {
-            return
-        }
-
-        let didAccess = url.startAccessingSecurityScopedResource()
-        defer {
-            if didAccess {
-                url.stopAccessingSecurityScopedResource()
-            }
-        }
-
-        do {
-            let profile = try USDZSkeletonInspector.inspectUSDZ(
-                url,
-                pythonExecutablePath: pythonExecutablePath
-            )
-            targetRigProfile = profile
-
-            usdzRetargetStatus = """
-            Target USDZ inspected.
-            Matched: \(profile.canonicalMatchedJoints.count)
-            Missing: \(profile.missingCanonicalJoints.isEmpty ? "none" : profile.missingCanonicalJoints.joined(separator: ", "))
-            Height: \(profile.estimatedHeightMeters.map { String(format: "%.3f m", $0) } ?? "unknown")
-            """
-            status = usdzRetargetStatus
-            diagnostics.log(usdzRetargetStatus)
-        } catch {
-            targetRigProfile = nil
-
-            if error.localizedDescription.contains("No UsdSkel.Skeleton") {
-                usdzRetargetStatus = """
-                Target USDZ has no UsdSkel skeleton.
-                Export will preserve the target model and add the animated session armature.
-                """
-            } else {
-                usdzRetargetStatus = "Target USDZ inspect failed: \(error.localizedDescription)"
-            }
-
-            status = usdzRetargetStatus
-            diagnostics.log(usdzRetargetStatus)
-        }
-    }
-
     func exportAnimatedTargetUSDZFromRaySolve() {
         diagnostics.log("""
         Export Animated Target USDZ requested:
@@ -1471,22 +1463,28 @@ final class RotoMotionViewModel: ObservableObject {
           solvedFrames: \(rayAnimationSolveResult?.frames.count ?? 0)
         """)
 
-        guard let targetCharacterUSDZURL else {
-            usdzRetargetStatus = "Choose target character USDZ first."
+        guard let solve = rayAnimationSolveResult,
+              !solve.frames.isEmpty else {
+            usdzRetargetStatus = "Run full ray animation solve before exporting."
             status = usdzRetargetStatus
             diagnostics.log(usdzRetargetStatus)
             return
         }
 
-        guard let solve = rayAnimationSolveResult else {
-            usdzRetargetStatus = "Run full inside-out ray animation solve before exporting."
-            status = usdzRetargetStatus
-            diagnostics.log(usdzRetargetStatus)
-            return
-        }
+        let targetURL: URL
 
-        guard !solve.frames.isEmpty else {
-            usdzRetargetStatus = "Ray solve has 0 frames. Cannot export."
+        if let existingTarget = targetCharacterUSDZURL {
+            targetURL = existingTarget
+        } else if let referenceURL = referenceSolveUSDZURL {
+            targetURL = referenceURL
+            targetCharacterUSDZURL = referenceURL
+            diagnostics.log("No target selected. Using reference USDZ as target package: \(referenceURL.path)")
+        } else if let chosen = FilePanelHelpers.openUSDZURL() {
+            targetURL = chosen
+            targetCharacterUSDZURL = chosen
+            diagnostics.log("Target chosen during export: \(chosen.path)")
+        } else {
+            usdzRetargetStatus = "Export canceled: no target USDZ selected."
             status = usdzRetargetStatus
             diagnostics.log(usdzRetargetStatus)
             return
@@ -1508,41 +1506,115 @@ final class RotoMotionViewModel: ObservableObject {
             return
         }
 
-        if targetRigProfile == nil {
-            inspectTargetUSDZ()
-        }
-
         guard let outputDir = FilePanelHelpers.chooseOutputDirectory() else {
-            usdzRetargetStatus = "Animated target USDZ export canceled."
+            usdzRetargetStatus = "Export canceled."
             status = usdzRetargetStatus
             diagnostics.log(usdzRetargetStatus)
             return
         }
 
-        let didAccessTarget = targetCharacterUSDZURL.startAccessingSecurityScopedResource()
+        let safeClipID = retargetClipID
+            .replacingOccurrences(of: " ", with: "_")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: ":", with: "_")
+        let workDir = outputDir.appendingPathComponent(
+            "\(safeClipID)_animated_usdz_work",
+            isDirectory: true
+        )
+
+        let didAccessTarget = targetURL.startAccessingSecurityScopedResource()
         let didAccessOutput = outputDir.startAccessingSecurityScopedResource()
+        let didAccessReference = referenceSolveUSDZURL?.startAccessingSecurityScopedResource() ?? false
+
         defer {
             if didAccessTarget {
-                targetCharacterUSDZURL.stopAccessingSecurityScopedResource()
+                targetURL.stopAccessingSecurityScopedResource()
             }
 
             if didAccessOutput {
                 outputDir.stopAccessingSecurityScopedResource()
             }
+
+            if didAccessReference {
+                referenceSolveUSDZURL?.stopAccessingSecurityScopedResource()
+            }
         }
 
-        let sourceHeight = max(referenceRigProfile?.estimatedHeightMeters ?? solve.targetHeightMeters, 0.0001)
-        let targetHeight = max(targetRigProfile?.estimatedHeightMeters ?? sourceHeight, 0.0001)
-        let rootTranslationScale = scaleRootMotionToTargetHeight
-            ? targetHeight / sourceHeight
-            : 1.0
         do {
+            if FileManager.default.fileExists(atPath: workDir.path) {
+                try FileManager.default.removeItem(at: workDir)
+            }
+
+            try FileManager.default.createDirectory(
+                at: workDir,
+                withIntermediateDirectories: true
+            )
+
+            let solvedJSON = workDir.appendingPathComponent(
+                "\(safeClipID)_solved_animation_v1.json"
+            )
+
+            try SolvedAnimationJSONExporter.write(
+                solve: solve,
+                includeHipsTranslation: includeHipsTranslationInUSDZ,
+                to: solvedJSON
+            )
+
+            diagnostics.log("Wrote solved animation JSON: \(solvedJSON.path)")
+
+            if sessionJointPaths.isEmpty {
+                if let referenceRigProfile {
+                    captureSessionSkeletonIdentity(from: referenceRigProfile)
+                } else {
+                    captureCanonicalSessionSkeletonIdentity()
+                }
+            }
+
+            guard !sessionJointPaths.isEmpty else {
+                usdzRetargetStatus = """
+                No session joint order captured. Cannot export.
+
+                Work dir:
+                \(workDir.path)
+                """
+                status = usdzRetargetStatus
+                diagnostics.log(usdzRetargetStatus)
+                return
+            }
+
+            let sessionSkeletonJSON = workDir.appendingPathComponent(
+                "session_skeleton_identity.json"
+            )
+
+            try SessionSkeletonIdentityExporter.write(
+                skeletonPath: sessionSkeletonPath,
+                jointPaths: sessionJointPaths,
+                jointLeafNames: sessionJointLeafNames,
+                to: sessionSkeletonJSON
+            )
+
+            diagnostics.log("Wrote session skeleton identity JSON: \(sessionSkeletonJSON.path)")
+
+            if referenceSolveUSDZURL?.standardizedFileURL == targetURL.standardizedFileURL {
+                diagnostics.log("Reference and Target USDZ are the same file. Export must resolve the exact session skeleton path.")
+            }
+
+            diagnostics.log("""
+            Animated target export:
+              Reference USDZ: \(referenceSolveUSDZURL?.path ?? "nil")
+              Target USDZ: \(targetURL.path)
+              Session skeleton path: \(sessionSkeletonPath ?? "nil")
+              Session joint count: \(sessionJointPaths.count)
+              Solved frames: \(solve.frames.count)
+            """)
+
             let exportResult = try RetargetedAnimatedUSDZExporter.exportAnimatedTargetUSDZ(
-                targetUSDZ: targetCharacterUSDZURL,
+                targetUSDZ: targetURL,
+                sessionSkeletonIdentityJSON: sessionSkeletonJSON,
+                solvedAnimationJSON: solvedJSON,
                 solve: solve,
                 clipID: retargetClipID,
                 includeHipsTranslation: includeHipsTranslationInUSDZ,
-                rootTranslationScale: rootTranslationScale,
                 pythonExecutablePath: pythonExecutablePath,
                 outputDirectory: outputDir
             )
@@ -1569,16 +1641,17 @@ final class RotoMotionViewModel: ObservableObject {
             Animated target USDZ export complete:
               output: \(exportResult.outputUSDZ.path)
               workDir: \(exportResult.workDirectory.path)
+              sessionSkeletonIdentity: \(exportResult.sessionSkeletonIdentityJSON.path)
               raySolveReference: \(exportResult.raySolveReferenceJSON.path)
               exportInput: \(exportResult.exportInputJSON.path)
+              preflight: \(exportResult.preflightJSON.path)
               readback: \(exportResult.readbackJSON.path)
               auditText: \(exportResult.auditTextReport.path)
               auditJSON: \(exportResult.auditJSONReport.path)
               auditIssues: \(exportResult.auditHighSeverityCount) high / \(exportResult.auditIssueCount) total
-              target: \(targetCharacterUSDZURL.lastPathComponent)
+              target: \(targetURL.lastPathComponent)
               frames: \(solve.frames.count)
               includeHipsTranslation: \(includeHipsTranslationInUSDZ)
-              rootTranslationScale: \(String(format: "%.4f", rootTranslationScale))
               python: \(pythonExecutablePath)
             """)
             NSWorkspace.shared.activateFileViewerSelecting([exportResult.outputUSDZ])
@@ -1589,9 +1662,12 @@ final class RotoMotionViewModel: ObservableObject {
             usdzRetargetStatus = """
             Animated target USDZ export failed:
             \(error.localizedDescription)
+
+            Work dir:
+            \(workDir.path)
             """
             status = usdzRetargetStatus
-            diagnostics.log("Animated target USDZ export failed: \(error)")
+            diagnostics.log(usdzRetargetStatus)
         }
     }
 

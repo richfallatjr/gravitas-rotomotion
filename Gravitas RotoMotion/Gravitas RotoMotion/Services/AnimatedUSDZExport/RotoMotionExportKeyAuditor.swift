@@ -79,12 +79,16 @@ enum RotoMotionExportKeyAuditor {
             )
         }
 
-        if (inputRoot["quaternionOrder"] as? String) != "wxyz" {
+        let declaredQuaternionOrder =
+            (inputRoot["rotation_order"] as? String)
+            ?? (inputRoot["quaternionOrder"] as? String)
+
+        if declaredQuaternionOrder != "wxyz" {
             addIssue(
                 severity: "high",
                 joint: nil,
                 problem: "ambiguous quaternion order",
-                detail: "Export input does not declare quaternionOrder=wxyz."
+                detail: "Export input does not declare rotation_order=wxyz."
             )
         }
 
@@ -291,6 +295,30 @@ enum RotoMotionExportKeyAuditor {
     }
 
     private static func parseInputRotations(_ root: [String: Any]) -> [String: RotationSeries] {
+        if let joints = root["joints"] as? [String: [[String: Any]]] {
+            return joints.mapValues { keys in
+                var frames: [Int] = []
+                var values: [SIMD4<Double>] = []
+
+                for key in keys {
+                    guard let frame = intValue(key["frame"] as Any),
+                          let rotation = key["rotation_wxyz"] as? [Any],
+                          rotation.count == 4,
+                          let qw = doubleValue(rotation[0]),
+                          let qx = doubleValue(rotation[1]),
+                          let qy = doubleValue(rotation[2]),
+                          let qz = doubleValue(rotation[3]) else {
+                        continue
+                    }
+
+                    frames.append(frame)
+                    values.append(normalizeQuaternion(SIMD4<Double>(qw, qx, qy, qz)))
+                }
+
+                return RotationSeries(frames: frames, values: values)
+            }
+        }
+
         guard let joints = root["joints"] as? [String: [[Any]]] else {
             return [:]
         }
@@ -329,6 +357,29 @@ enum RotoMotionExportKeyAuditor {
     }
 
     private static func parseInputTranslations(_ root: [String: Any]) -> [String: TranslationSeries] {
+        if let joints = root["joints"] as? [String: [[String: Any]]] {
+            return joints.mapValues { keys in
+                var frames: [Int] = []
+                var values: [SIMD3<Double>] = []
+
+                for key in keys {
+                    guard let frame = intValue(key["frame"] as Any) else {
+                        continue
+                    }
+
+                    let translation = key["translation_xyz"] as? [Any]
+                    let x = translation.flatMap { $0.count == 3 ? doubleValue($0[0]) : nil } ?? 0
+                    let y = translation.flatMap { $0.count == 3 ? doubleValue($0[1]) : nil } ?? 0
+                    let z = translation.flatMap { $0.count == 3 ? doubleValue($0[2]) : nil } ?? 0
+
+                    frames.append(frame)
+                    values.append(SIMD3<Double>(x, y, z))
+                }
+
+                return TranslationSeries(frames: frames, values: values)
+            }
+        }
+
         guard let joints = root["joints"] as? [String: [[Any]]] else {
             return [:]
         }

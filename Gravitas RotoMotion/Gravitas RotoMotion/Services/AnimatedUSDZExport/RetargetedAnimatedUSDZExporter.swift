@@ -4,8 +4,10 @@ enum RetargetedAnimatedUSDZExporter {
     struct ExportResult {
         let outputUSDZ: URL
         let workDirectory: URL
+        let sessionSkeletonIdentityJSON: URL
         let raySolveReferenceJSON: URL
         let exportInputJSON: URL
+        let preflightJSON: URL
         let readbackJSON: URL
         let auditTextReport: URL
         let auditJSONReport: URL
@@ -15,10 +17,11 @@ enum RetargetedAnimatedUSDZExporter {
 
     static func exportAnimatedTargetUSDZ(
         targetUSDZ: URL,
+        sessionSkeletonIdentityJSON: URL,
+        solvedAnimationJSON: URL,
         solve: RotoRayAnimationSolveResult,
         clipID: String,
         includeHipsTranslation: Bool,
-        rootTranslationScale: Double,
         pythonExecutablePath: String,
         outputDirectory: URL
     ) throws -> ExportResult {
@@ -28,15 +31,12 @@ enum RetargetedAnimatedUSDZExporter {
         let workDir = outputDirectory
             .appendingPathComponent("\(safeClipID)_animated_usdz_work", isDirectory: true)
         let raySolveReferenceJSON = workDir.appendingPathComponent("ray_solve_reference.json")
-        let exportInputJSON = workDir.appendingPathComponent("animated_usdz_export_input.json")
+        let exportInputJSON = solvedAnimationJSON
+        let preflightJSON = workDir.appendingPathComponent("retarget_export_preflight.json")
         let readbackJSON = workDir.appendingPathComponent("animated_usdz_readback.json")
         let auditTextReport = workDir.appendingPathComponent("export_audit_report.txt")
         let auditJSONReport = workDir.appendingPathComponent("export_audit_report.json")
         let scriptURL = workDir.appendingPathComponent("rotomotion_usdz_retarget.py")
-
-        if FileManager.default.fileExists(atPath: workDir.path) {
-            try FileManager.default.removeItem(at: workDir)
-        }
 
         if FileManager.default.fileExists(atPath: outputUSDZ.path) {
             try FileManager.default.removeItem(at: outputUSDZ)
@@ -52,12 +52,6 @@ enum RetargetedAnimatedUSDZExporter {
             to: raySolveReferenceJSON
         )
 
-        try SolvedAnimationJSONExporter.write(
-            solve: solve,
-            includeHipsTranslation: includeHipsTranslation,
-            to: exportInputJSON
-        )
-
         try RotoMotionUSDZRetargetPythonScript.contents.write(
             to: scriptURL,
             atomically: true,
@@ -70,20 +64,20 @@ enum RetargetedAnimatedUSDZExporter {
                 scriptURL.path,
                 "--target-usdz",
                 targetUSDZ.path,
+                "--session-skeleton-identity",
+                sessionSkeletonIdentityJSON.path,
                 "--solved-json",
                 exportInputJSON.path,
-                "--ray-solve-reference",
-                raySolveReferenceJSON.path,
                 "--clip-id",
                 clipID,
                 "--work-dir",
                 workDir.path,
                 "--output-usdz",
                 outputUSDZ.path,
+                "--preflight-json",
+                preflightJSON.path,
                 "--readback-json",
-                readbackJSON.path,
-                "--root-translation-scale",
-                String(format: "%.8f", rootTranslationScale)
+                readbackJSON.path
             ] + (includeHipsTranslation ? ["--include-hips-translation"] : [])
         )
 
@@ -182,8 +176,10 @@ enum RetargetedAnimatedUSDZExporter {
         return ExportResult(
             outputUSDZ: outputUSDZ,
             workDirectory: workDir,
+            sessionSkeletonIdentityJSON: sessionSkeletonIdentityJSON,
             raySolveReferenceJSON: raySolveReferenceJSON,
             exportInputJSON: exportInputJSON,
+            preflightJSON: preflightJSON,
             readbackJSON: readbackJSON,
             auditTextReport: auditTextReport,
             auditJSONReport: auditJSONReport,

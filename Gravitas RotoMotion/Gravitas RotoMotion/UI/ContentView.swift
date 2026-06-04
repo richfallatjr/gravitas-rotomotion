@@ -270,13 +270,22 @@ struct ContentView: View {
     private var usdzRetargetExportPanel: some View {
         GroupBox("USDZ Retarget Export") {
             VStack(alignment: .leading, spacing: 8) {
-                Button("Choose Target Character USDZ") {
+                Text("Target Model USDZ")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+
+                Text("Optional. If empty, export will use the Reference USDZ or ask for a file.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button("Choose Target Model USDZ") {
                     roto.chooseTargetCharacterUSDZ()
                     uiStatus = roto.status
                     pipelineRenderToken += 1
                 }
 
-                Text(roto.targetCharacterUSDZURL?.lastPathComponent ?? "No target USDZ")
+                Text(roto.targetCharacterUSDZURL?.lastPathComponent ?? "No target model USDZ")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -284,8 +293,6 @@ struct ContentView: View {
                     .textFieldStyle(.roundedBorder)
 
                 Toggle("Include Hips Translation", isOn: $roto.includeHipsTranslationInUSDZ)
-
-                Toggle("Scale Root Motion To Target Height", isOn: $roto.scaleRootMotionToTargetHeight)
 
                 Button("Check OpenUSD Tools") {
                     roto.checkOpenUSDToolsForRetarget()
@@ -303,7 +310,7 @@ struct ContentView: View {
                     uiStatus = roto.status
                     pipelineRenderToken += 1
                 }
-                .disabled(roto.targetCharacterUSDZURL == nil || roto.rayAnimationSolveResult == nil)
+                .disabled(roto.rayAnimationSolveResult == nil)
 
                 Button("Reveal Last Export") {
                     roto.revealLastAnimatedUSDZExport()
@@ -348,10 +355,6 @@ struct ContentView: View {
     private var usdzRetargetReadinessText: String {
         var needs: [String] = []
 
-        if roto.targetCharacterUSDZURL == nil {
-            needs.append("target USDZ")
-        }
-
         if roto.rayAnimationSolveResult == nil {
             needs.append("solved ray IK animation")
         }
@@ -364,11 +367,8 @@ struct ContentView: View {
         let referenceHeight = roto.referenceRigProfile?.estimatedHeightMeters
             .map { String(format: "%.3f m", $0) }
             ?? "default/reference not selected"
-        let targetHeight = roto.targetRigProfile?.estimatedHeightMeters
-            .map { String(format: "%.3f m", $0) }
-            ?? "target height unknown"
-
-        return "Exports animated target USDZ: \(frames) frames, reference \(referenceHeight), target \(targetHeight)."
+        let targetText = roto.targetCharacterUSDZURL?.lastPathComponent ?? "target chosen during export"
+        return "Exports animated target USDZ: \(frames) frames, reference \(referenceHeight), target \(targetText)."
     }
 
     private var rayRigSolvePanel: some View {
@@ -387,6 +387,11 @@ struct ContentView: View {
                     uiStatus = roto.status
                     pipelineRenderToken += 1
                 }
+
+                Text("Defines skeleton path, bone lengths, scale, and joint map.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 Text(roto.referenceSolveUSDZURL?.lastPathComponent ?? "No reference USDZ")
                     .font(.caption)

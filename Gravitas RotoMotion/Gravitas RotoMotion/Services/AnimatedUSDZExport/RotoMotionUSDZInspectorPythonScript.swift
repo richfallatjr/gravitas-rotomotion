@@ -63,20 +63,23 @@ def unzip_usdz(source_usdz, dst_dir):
     os.makedirs(dst_dir, exist_ok=True)
 
     with zipfile.ZipFile(source_usdz, "r") as archive:
+        names = archive.namelist()
         archive.extractall(dst_dir)
 
-    candidates = []
+    usd_names = [
+        name for name in names
+        if name.lower().endswith((".usd", ".usda", ".usdc"))
+    ]
 
-    for root, _, files in os.walk(dst_dir):
-        for filename in files:
-            if filename.lower().endswith((".usd", ".usda", ".usdc")):
-                candidates.append(os.path.join(root, filename))
+    if not usd_names:
+        raise RuntimeError("No USD root file found inside USDZ.")
 
-    if not candidates:
-        raise RuntimeError("No USD/USDAscii/USDCompressed file found inside USDZ.")
+    # USDZ convention: the first USD file in package order is the root layer.
+    root_member = usd_names[0]
+    root_layer = os.path.join(dst_dir, root_member)
+    log(f"USDZ root layer from archive order: {root_layer}")
 
-    candidates.sort(key=lambda path: (path.count(os.sep), path))
-    return candidates[0]
+    return root_layer, root_member
 
 
 def leaf(path):
@@ -232,7 +235,7 @@ def estimate_height_meters(stage, joint_paths, rest_transforms, meters_per_unit,
 def main():
     args = parse_args()
     work = tempfile.mkdtemp(prefix="rotomotion_usdz_inspect_")
-    root_layer = unzip_usdz(args.source_usdz, work)
+    root_layer, root_member = unzip_usdz(args.source_usdz, work)
 
     stage = Usd.Stage.Open(root_layer)
 
@@ -264,6 +267,7 @@ def main():
 
     profile = {
         "sourcePath": args.source_usdz,
+        "rootLayerPathInsideUSDZ": root_member,
         "skeletonPath": str(skeleton.GetPrim().GetPath()),
         "skelRootPath": find_skel_root(skeleton),
         "jointPaths": [str(joint_path) for joint_path in joint_paths],
