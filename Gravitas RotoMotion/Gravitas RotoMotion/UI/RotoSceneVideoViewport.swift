@@ -89,6 +89,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
 
     let rawFrame: RawVisionPoseCapture.PoseFrame?
     let normalizedFrame: NormalizedMeshyPoseCapture.Frame?
+    let rightRawFrame: RawVisionPoseCapture.PoseFrame?
+    let rightNormalizedFrame: NormalizedMeshyPoseCapture.Frame?
     let smoothedFrame: SmoothedMeshyPoseCapture.Frame?
     let stereoJointFrame: StereoMeshyJointCapture.Frame?
 
@@ -114,8 +116,11 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
 
     let showRawVision: Bool
     let showNormalizedMeshy: Bool
+    let showRightEyeVisionOverlay: Bool
+    let showRightEyeNormalizedOverlay: Bool
     let showSmoothedMeshy: Bool
     let showStereo3DSkeleton: Bool
+    let showStereoReprojectionOverlay: Bool
     let showGroundPlane: Bool
     let showVisionRays: Bool
     let showRaySolvedRig: Bool
@@ -150,6 +155,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             frameIndex: frameIndex,
             rawFrame: rawFrame,
             normalizedFrame: normalizedFrame,
+            rightRawFrame: rightRawFrame,
+            rightNormalizedFrame: rightNormalizedFrame,
             smoothedFrame: smoothedFrame,
             stereoJointFrame: stereoJointFrame,
             groundPlane: groundPlane,
@@ -173,8 +180,11 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             rotationOverrideRevision: rotationOverrideRevision,
             showRawVision: showRawVision,
             showNormalizedMeshy: showNormalizedMeshy,
+            showRightEyeVisionOverlay: showRightEyeVisionOverlay,
+            showRightEyeNormalizedOverlay: showRightEyeNormalizedOverlay,
             showSmoothedMeshy: showSmoothedMeshy,
             showStereo3DSkeleton: showStereo3DSkeleton,
+            showStereoReprojectionOverlay: showStereoReprojectionOverlay,
             showGroundPlane: showGroundPlane,
             showVisionRays: showVisionRays,
             showRaySolvedRig: showRaySolvedRig,
@@ -192,8 +202,11 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private let videoPlaneNode = SCNNode()
         private let rawOverlayRoot = SCNNode()
         private let normalizedOverlayRoot = SCNNode()
+        private let rightRawOverlayRoot = SCNNode()
+        private let rightNormalizedOverlayRoot = SCNNode()
         private let smoothedOverlayRoot = SCNNode()
-        private let stereoDepthRoot = SCNNode()
+        private let stereoSkeletonRoot = SCNNode()
+        private let stereoReprojectionRoot = SCNNode()
         private let groundRoot = SCNNode()
         private let visionRayRoot = SCNNode()
         private let solvedRigRoot = SCNNode()
@@ -305,8 +318,11 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
 
             rawOverlayRoot.name = "RawVisionOverlayRoot"
             normalizedOverlayRoot.name = "NormalizedMeshyOverlayRoot"
+            rightRawOverlayRoot.name = "RightEyeRawVisionOverlayRoot"
+            rightNormalizedOverlayRoot.name = "RightEyeNormalizedMeshyOverlayRoot"
             smoothedOverlayRoot.name = "SmoothedMeshyOverlayRoot"
-            stereoDepthRoot.name = "StereoJointDepthRoot"
+            stereoSkeletonRoot.name = "Stereo3DSkeletonRoot"
+            stereoReprojectionRoot.name = "StereoReprojectionOverlayRoot"
             groundRoot.name = "GroundPlaneRoot"
             visionRayRoot.name = "VisionRayRoot"
             solvedRigRoot.name = "RaySolvedRigRoot"
@@ -316,8 +332,11 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             scene.rootNode.addChildNode(groundRoot)
             scene.rootNode.addChildNode(rawOverlayRoot)
             scene.rootNode.addChildNode(normalizedOverlayRoot)
+            scene.rootNode.addChildNode(rightRawOverlayRoot)
+            scene.rootNode.addChildNode(rightNormalizedOverlayRoot)
             scene.rootNode.addChildNode(smoothedOverlayRoot)
-            scene.rootNode.addChildNode(stereoDepthRoot)
+            scene.rootNode.addChildNode(stereoSkeletonRoot)
+            scene.rootNode.addChildNode(stereoReprojectionRoot)
             scene.rootNode.addChildNode(visionRayRoot)
             scene.rootNode.addChildNode(solvedRigRoot)
             scene.rootNode.addChildNode(solveErrorRoot)
@@ -358,6 +377,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             frameIndex: Int,
             rawFrame: RawVisionPoseCapture.PoseFrame?,
             normalizedFrame: NormalizedMeshyPoseCapture.Frame?,
+            rightRawFrame: RawVisionPoseCapture.PoseFrame?,
+            rightNormalizedFrame: NormalizedMeshyPoseCapture.Frame?,
             smoothedFrame: SmoothedMeshyPoseCapture.Frame?,
             stereoJointFrame: StereoMeshyJointCapture.Frame?,
             groundPlane: GroundPlaneController?,
@@ -381,8 +402,11 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             rotationOverrideRevision: Int,
             showRawVision: Bool,
             showNormalizedMeshy: Bool,
+            showRightEyeVisionOverlay: Bool,
+            showRightEyeNormalizedOverlay: Bool,
             showSmoothedMeshy: Bool,
             showStereo3DSkeleton: Bool,
+            showStereoReprojectionOverlay: Bool,
             showGroundPlane: Bool,
             showVisionRays: Bool,
             showRaySolvedRig: Bool,
@@ -451,11 +475,23 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
 
             updateRawOverlay(rawFrame, visible: showRawVision)
             updateNormalizedOverlay(normalizedFrame, visible: showNormalizedMeshy)
+            updateRightRawVisionOverlay(
+                rightRawFrame,
+                visible: showRightEyeVisionOverlay
+            )
+            updateRightNormalizedOverlay(
+                rightNormalizedFrame,
+                visible: showRightEyeNormalizedOverlay
+            )
             updateSmoothedOverlay(smoothedFrame, visible: showSmoothedMeshy)
             updateStereoDepthOverlay(
                 stereoJointFrame,
                 visible: showStereo3DSkeleton,
                 sceneUnitsPerMeter: stereoSceneUnitsPerMeter
+            )
+            updateStereoReprojectionOverlay(
+                stereoJointFrame,
+                visible: showStereoReprojectionOverlay
             )
             updateRaySolveDebug(
                 result: raySolveResult,
@@ -658,6 +694,18 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             )
         }
 
+        private func pointOnCurrentVideoPlane(
+            x: Double,
+            y: Double,
+            zOffsetTowardCamera: Float
+        ) -> SIMD3<Float> {
+            pointOnCurrentImagePlane(
+                x: x,
+                y: y,
+                zOffsetTowardCamera: zOffsetTowardCamera
+            )
+        }
+
         private func currentRawVisionPointRadius() -> CGFloat {
             max(0.75, videoPlaneSize.height * 0.0015)
         }
@@ -733,6 +781,120 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             )
         }
 
+        private func updateRightRawVisionOverlay(
+            _ frame: RawVisionPoseCapture.PoseFrame?,
+            visible: Bool
+        ) {
+            rightRawOverlayRoot.isHidden = !visible
+            removeAllChildren(from: rightRawOverlayRoot)
+
+            guard visible, let frame else {
+                return
+            }
+
+            var count = 0
+
+            for (_, joint) in frame.joints {
+                let p = pointOnCurrentVideoPlane(
+                    x: joint.x,
+                    y: joint.y,
+                    zOffsetTowardCamera: 0.85
+                )
+                let node = makePointNode(
+                    color: NSColor.systemPink.withAlphaComponent(
+                        CGFloat(max(0.25, min(joint.confidence, 1.0)))
+                    ),
+                    radius: currentRawVisionPointRadius()
+                )
+
+                node.simdPosition = p
+                node.renderingOrder = 900
+                rightRawOverlayRoot.addChildNode(node)
+                count += 1
+            }
+
+            if frame.frameIndex == 0 || frame.frameIndex % 30 == 0 {
+                print("""
+                [RotoSceneVideoViewport] Right-eye raw Vision overlay updated
+                  frame: \(frame.frameIndex)
+                  jointsDrawn: \(count)
+                """)
+            }
+        }
+
+        private func updateRightNormalizedOverlay(
+            _ frame: NormalizedMeshyPoseCapture.Frame?,
+            visible: Bool
+        ) {
+            rightNormalizedOverlayRoot.isHidden = !visible
+            removeAllChildren(from: rightNormalizedOverlayRoot)
+
+            guard visible, let frame else {
+                return
+            }
+
+            var jointCount = 0
+            var boneCount = 0
+            let color = NSColor.systemCyan
+
+            for (a, b) in meshySkeletonBones {
+                guard let ja = frame.joints[a],
+                      let jb = frame.joints[b],
+                      !ja.missing,
+                      !jb.missing else {
+                    continue
+                }
+
+                let pa = pointOnCurrentVideoPlane(
+                    x: ja.x,
+                    y: ja.y,
+                    zOffsetTowardCamera: 0.92
+                )
+                let pb = pointOnCurrentVideoPlane(
+                    x: jb.x,
+                    y: jb.y,
+                    zOffsetTowardCamera: 0.92
+                )
+                let line = makeLineNode(
+                    from: SCNVector3(pa.x, pa.y, pa.z),
+                    to: SCNVector3(pb.x, pb.y, pb.z),
+                    color: color.withAlphaComponent(0.9)
+                )
+
+                line.renderingOrder = 910
+                rightNormalizedOverlayRoot.addChildNode(line)
+                boneCount += 1
+            }
+
+            for (_, joint) in frame.joints where !joint.missing {
+                let p = pointOnCurrentVideoPlane(
+                    x: joint.x,
+                    y: joint.y,
+                    zOffsetTowardCamera: 0.95
+                )
+                let node = makePointNode(
+                    color: joint.generated
+                        ? color.withAlphaComponent(0.35)
+                        : color,
+                    radius: currentRawVisionPointRadius()
+                )
+
+                node.simdPosition = p
+                node.renderingOrder = 920
+                rightNormalizedOverlayRoot.addChildNode(node)
+                jointCount += 1
+            }
+
+            if frame.frameIndex == 0 || frame.frameIndex % 30 == 0 {
+                print("""
+                [RotoSceneVideoViewport] Right-eye normalized Meshy24 overlay updated
+                  frame: \(frame.frameIndex)
+                  jointsDrawn: \(jointCount)
+                  bonesDrawn: \(boneCount)
+                """)
+            }
+        }
+
         private func updateSmoothedOverlay(
             _ frame: SmoothedMeshyPoseCapture.Frame?,
             visible: Bool
@@ -768,8 +930,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             visible: Bool,
             sceneUnitsPerMeter: Double
         ) {
-            stereoDepthRoot.isHidden = !visible
-            removeAllChildren(from: stereoDepthRoot)
+            stereoSkeletonRoot.isHidden = !visible
+            removeAllChildren(from: stereoSkeletonRoot)
 
             guard visible, let frame else {
                 return
@@ -786,7 +948,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 )
             }
 
-            let color = NSColor.magenta
+            let color = NSColor.systemCyan
 
             for (a, b) in meshySkeletonBones {
                 guard let pa = positions[a],
@@ -794,23 +956,73 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                     continue
                 }
 
-                stereoDepthRoot.addChildNode(
-                    makeLineNode(
-                        from: SCNVector3(pa.x, pa.y, pa.z),
-                        to: SCNVector3(pb.x, pb.y, pb.z),
-                        color: color.withAlphaComponent(0.85)
-                    )
+                let line = makeLineNode(
+                    from: SCNVector3(pa.x, pa.y, pa.z),
+                    to: SCNVector3(pb.x, pb.y, pb.z),
+                    color: color.withAlphaComponent(0.9)
                 )
+                line.renderingOrder = 799
+                stereoSkeletonRoot.addChildNode(line)
             }
+
+            var drawn = 0
 
             for (_, p) in positions {
                 let node = makePointNode(
                     color: color,
-                    radius: 0.055
+                    radius: 0.025
                 )
                 node.position = SCNVector3(p.x, p.y, p.z)
-                node.renderingOrder = 700
-                stereoDepthRoot.addChildNode(node)
+                node.renderingOrder = 800
+                stereoSkeletonRoot.addChildNode(node)
+                drawn += 1
+            }
+
+            if frame.frameIndex == 0 || frame.frameIndex % 30 == 0 {
+                print("""
+                [RotoSceneVideoViewport] Stereo 3D skeleton updated
+                  frame: \(frame.frameIndex)
+                  jointsDrawn: \(drawn)
+                """)
+            }
+        }
+
+        private func updateStereoReprojectionOverlay(
+            _ frame: StereoMeshyJointCapture.Frame?,
+            visible: Bool
+        ) {
+            stereoReprojectionRoot.isHidden = !visible
+            removeAllChildren(from: stereoReprojectionRoot)
+
+            guard visible, let frame else {
+                return
+            }
+
+            var count = 0
+
+            for (_, joint) in frame.joints where joint.validStereo {
+                let p = pointOnCurrentVideoPlane(
+                    x: joint.reprojectedLeftX,
+                    y: joint.reprojectedLeftY,
+                    zOffsetTowardCamera: 1.10
+                )
+                let node = makePointNode(
+                    color: NSColor.systemCyan,
+                    radius: currentRawVisionPointRadius() * 0.85
+                )
+
+                node.simdPosition = p
+                node.renderingOrder = 960
+                stereoReprojectionRoot.addChildNode(node)
+                count += 1
+            }
+
+            if frame.frameIndex == 0 || frame.frameIndex % 30 == 0 {
+                print("""
+                [RotoSceneVideoViewport] Stereo reprojection overlay updated
+                  frame: \(frame.frameIndex)
+                  jointsDrawn: \(count)
+                """)
             }
         }
 

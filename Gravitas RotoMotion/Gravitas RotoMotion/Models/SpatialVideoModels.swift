@@ -32,6 +32,7 @@ struct SpatialDecodedFrames {
     let fps: Double
     let duration: Double
     let metadata: SpatialVideoCameraMetadata
+    let stereoDiagnostics: SpatialStereoDecodeResult
 }
 
 struct SpatialVideoCameraMetadata: Codable, Equatable {
@@ -43,7 +44,39 @@ struct SpatialVideoCameraMetadata: Codable, Equatable {
     var imageHeight: Int
 }
 
+enum NormalizedImageYConvention: String, CaseIterable, Identifiable, Codable {
+    case originBottomLeft
+    case originTopLeft
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .originBottomLeft:
+            return "Vision bottom-left"
+        case .originTopLeft:
+            return "Image top-left"
+        }
+    }
+}
+
+struct SpatialEyeLayerMap: Codable, Equatable {
+    let leftLayerID: Int?
+    let rightLayerID: Int?
+
+    static let empty = SpatialEyeLayerMap(
+        leftLayerID: nil,
+        rightLayerID: nil
+    )
+
+    var hasBothEyes: Bool {
+        leftLayerID != nil && rightLayerID != nil
+    }
+}
+
 struct StereoMeshyJointCapture: Codable {
+    static let currentSchema = "com.gravitas.rotomotion.stereo_meshy_joints.v0"
+
     let schema: String
     let cameraMetadata: SpatialVideoCameraMetadata
     let frames: [Frame]
@@ -73,5 +106,13 @@ struct StereoMeshyJointCapture: Codable {
 
         let stereoConfidence: Double
         let validStereo: Bool
+        let rejectReason: String?
+
+        let reprojectedLeftX: Double
+        let reprojectedLeftY: Double
+        let reprojectedRightX: Double
+        let reprojectedRightY: Double
+        let reprojectionErrorLeft: Double
+        let reprojectionErrorRight: Double
     }
 }

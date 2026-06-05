@@ -168,6 +168,8 @@ struct ContentView: View {
                 frameIndex: uiCurrentFrameIndex,
                 rawFrame: currentRawFrame,
                 normalizedFrame: currentNormalizedFrame,
+                rightRawFrame: currentRightRawFrame,
+                rightNormalizedFrame: currentRightNormalizedFrame,
                 smoothedFrame: nil,
                 stereoJointFrame: roto.spatialStereoAvailable ? roto.currentStereoJointFrame : nil,
                 groundPlane: roto.groundPlane,
@@ -191,8 +193,11 @@ struct ContentView: View {
                 rotationOverrideRevision: roto.rotationOverrideRevision,
                 showRawVision: roto.showRawVisionPoints,
                 showNormalizedMeshy: roto.showNormalizedMeshyPoints,
+                showRightEyeVisionOverlay: roto.shouldShowRightEyeVisionOverlay,
+                showRightEyeNormalizedOverlay: roto.shouldShowRightEyeNormalizedOverlay,
                 showSmoothedMeshy: false,
                 showStereo3DSkeleton: roto.showStereo3DSkeleton && roto.spatialStereoAvailable,
+                showStereoReprojectionOverlay: roto.showStereoReprojectionOverlay && roto.spatialStereoAvailable,
                 showGroundPlane: roto.groundPlane.visible,
                 showVisionRays: roto.showVisionRays,
                 showRaySolvedRig: roto.showDebugSolvedSkeleton,
@@ -455,6 +460,13 @@ struct ContentView: View {
                     Text("°")
                 }
 
+                Picker("Stereo Y", selection: $roto.stereoYConvention) {
+                    ForEach(NormalizedImageYConvention.allCases) { convention in
+                        Text(convention.displayName).tag(convention)
+                    }
+                }
+                .pickerStyle(.segmented)
+
                 Button("Run Vision") {
                     Task {
                         await roto.runVisionOnSpatialVideo()
@@ -465,7 +477,7 @@ struct ContentView: View {
                         pipelineRenderToken += 1
                     }
                 }
-                .disabled((roto.leftEyeFrames.isEmpty && roto.decodedFrames.isEmpty) || roto.isWorking)
+                .disabled(roto.isWorking)
 
                 Button("Build Stereo Joint Depth") {
                     roto.rebuildStereoJointDepthFromCurrentSettings()
@@ -475,6 +487,9 @@ struct ContentView: View {
                 .disabled(roto.normalizedLeftCapture == nil || roto.normalizedRightCapture == nil)
 
                 Toggle("Stereo 3D Skeleton", isOn: $roto.showStereo3DSkeleton)
+                    .disabled(!roto.spatialStereoAvailable)
+
+                Toggle("Stereo Reprojection Overlay", isOn: $roto.showStereoReprojectionOverlay)
                     .disabled(!roto.spatialStereoAvailable)
 
                 Text("Left frames: \(roto.leftEyeFrames.count), right frames: \(roto.rightEyeFrames.count)")
@@ -495,10 +510,24 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
+                Text(roto.spatialDecodeStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
                 Text(roto.stereoVisionStatus)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                SpatialStereoDiagnosticView(
+                    leftImage: roto.spatialLeftPreviewImage,
+                    rightImage: roto.spatialRightPreviewImage,
+                    leftCount: roto.spatialLeftEyeFrames.count,
+                    rightCount: roto.spatialRightEyeFrames.count,
+                    dumpDirectory: roto.spatialDumpDirectoryPath,
+                    diagnostics: roto.spatialDiagnostics
+                )
             }
             .font(.caption)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -959,6 +988,14 @@ struct ContentView: View {
         nearestNormalizedFrame(forTime: currentUIVideoTimeSeconds)
     }
 
+    private var currentRightRawFrame: RawVisionPoseCapture.PoseFrame? {
+        nearestRightRawFrame(forTime: currentUIVideoTimeSeconds)
+    }
+
+    private var currentRightNormalizedFrame: NormalizedMeshyPoseCapture.Frame? {
+        nearestRightNormalizedFrame(forTime: currentUIVideoTimeSeconds)
+    }
+
     private func nearestRawFrame(forTime time: Double) -> RawVisionPoseCapture.PoseFrame? {
         guard let frames = roto.rawCapture?.frames, !frames.isEmpty else {
             return nil
@@ -971,6 +1008,30 @@ struct ContentView: View {
 
     private func nearestNormalizedFrame(forTime time: Double) -> NormalizedMeshyPoseCapture.Frame? {
         guard let frames = roto.normalizedCapture?.frames, !frames.isEmpty else {
+            return nil
+        }
+
+        return frames.min {
+            abs($0.timeSeconds - time) < abs($1.timeSeconds - time)
+        }
+    }
+
+    private func nearestRightRawFrame(forTime time: Double) -> RawVisionPoseCapture.PoseFrame? {
+        guard roto.captureMode == .spatialVideo,
+              let frames = roto.rawRightVisionCapture?.frames,
+              !frames.isEmpty else {
+            return nil
+        }
+
+        return frames.min {
+            abs($0.timeSeconds - time) < abs($1.timeSeconds - time)
+        }
+    }
+
+    private func nearestRightNormalizedFrame(forTime time: Double) -> NormalizedMeshyPoseCapture.Frame? {
+        guard roto.captureMode == .spatialVideo,
+              let frames = roto.normalizedRightCapture?.frames,
+              !frames.isEmpty else {
             return nil
         }
 

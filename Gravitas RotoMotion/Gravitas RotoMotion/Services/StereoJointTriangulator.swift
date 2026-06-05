@@ -1,47 +1,44 @@
 import Foundation
 import simd
 
+struct StereoTriangulationSettings {
+    var yConvention: NormalizedImageYConvention = .originBottomLeft
+}
+
 enum StereoJointTriangulator {
     static func triangulate(
         left: NormalizedMeshyPoseCapture,
         right: NormalizedMeshyPoseCapture,
-        metadata: SpatialVideoCameraMetadata
+        metadata: SpatialVideoCameraMetadata,
+        settings: StereoTriangulationSettings = StereoTriangulationSettings()
     ) throws -> StereoMeshyJointCapture {
-        guard let baselineMeters = metadata.baselineMeters,
-              baselineMeters > 0 else {
-            throw NSError(
-                domain: "GravitasRotoMotion",
-                code: 7401,
-                userInfo: [NSLocalizedDescriptionKey: "Stereo triangulation requires an explicit baselineMeters value."]
-            )
+        guard let baselineMeters = metadata.baselineMeters, baselineMeters > 0 else {
+            throw stereoError("Missing baselineMeters.")
         }
 
-        guard let horizontalFOVDegrees = metadata.horizontalFOVDegrees,
-              horizontalFOVDegrees > 0,
-              horizontalFOVDegrees < 180 else {
-            throw NSError(
-                domain: "GravitasRotoMotion",
-                code: 7402,
-                userInfo: [NSLocalizedDescriptionKey: "Stereo triangulation requires an explicit horizontalFOVDegrees value."]
-            )
+        guard let horizontalFOVDegrees = metadata.horizontalFOVDegrees, horizontalFOVDegrees > 0 else {
+            throw stereoError("Missing horizontalFOVDegrees.")
         }
 
-        let width = max(Double(metadata.imageWidth), 1.0)
-        let height = max(Double(metadata.imageHeight), 1.0)
+        guard metadata.imageWidth > 0, metadata.imageHeight > 0 else {
+            throw stereoError("Invalid stereo image dimensions.")
+        }
+
+        let width = Double(metadata.imageWidth)
+        let height = Double(metadata.imageHeight)
         let horizontalFOVRadians = horizontalFOVDegrees * .pi / 180.0
         let focalPixels = 0.5 * width / tan(horizontalFOVRadians * 0.5)
         let cx = width * 0.5
         let cy = height * 0.5
 
-        let rightFramesByIndex = Dictionary(
-            uniqueKeysWithValues: right.frames.map { ($0.frameIndex, $0) }
-        )
+        var frames: [StereoMeshyJointCapture.Frame] = []
 
-        let frames = left.frames.compactMap { leftFrame -> StereoMeshyJointCapture.Frame? in
-            guard let rightFrame = rightFramesByIndex[leftFrame.frameIndex] else {
-                return nil
+        for leftFrame in left.frames {
+            guard let rightFrame = right.frames.min(by: {
+                abs($0.timeSeconds - leftFrame.timeSeconds) < abs($1.timeSeconds - leftFrame.timeSeconds)
+            }) else {
+                continue
             }
-
             var joints: [String: StereoMeshyJointCapture.Joint] = [:]
 
             for jointName in CanonicalRig.jointNames {
@@ -51,6 +48,7 @@ enum StereoJointTriangulator {
                 }
 
                 joints[jointName] = triangulateJoint(
+                    jointName: jointName,
                     leftJoint: leftJoint,
                     rightJoint: rightJoint,
                     width: width,
@@ -58,25 +56,29 @@ enum StereoJointTriangulator {
                     cx: cx,
                     cy: cy,
                     focalPixels: focalPixels,
-                    baselineMeters: baselineMeters
+                    baselineMeters: baselineMeters,
+                    yConvention: settings.yConvention
                 )
             }
 
-            return StereoMeshyJointCapture.Frame(
-                frameIndex: leftFrame.frameIndex,
-                timeSeconds: leftFrame.timeSeconds,
-                joints: joints
+            frames.append(
+                StereoMeshyJointCapture.Frame(
+                    frameIndex: leftFrame.frameIndex,
+                    timeSeconds: leftFrame.timeSeconds,
+                    joints: joints
+                )
             )
         }
 
         return StereoMeshyJointCapture(
-            schema: "com.gravitas.rotomotion.stereo_meshy_joint_capture.v0",
+            schema: StereoMeshyJointCapture.currentSchema,
             cameraMetadata: metadata,
             frames: frames
         )
     }
 
     private static func triangulateJoint(
+        jointName: String,
         leftJoint: NormalizedMeshyPoseCapture.Joint,
         rightJoint: NormalizedMeshyPoseCapture.Joint,
         width: Double,
@@ -84,36 +86,90 @@ enum StereoJointTriangulator {
         cx: Double,
         cy: Double,
         focalPixels: Double,
-        baselineMeters: Double
+        baselineMeters: Double,
+        yConvention: NormalizedImageYConvention
     ) -> StereoMeshyJointCapture.Joint {
-        let lx = leftJoint.x * width
-        let ly = leftJoint.y * height
-        let rx = rightJoint.x * width
-        let ry = rightJoint.y * height
+        let leftPoint = pixelPoint(
+            x: leftJoint.x,
+            y: leftJoint.y,
+            width: width,
+            height: height,
+            yConvention: yConvention
+        )
+        let rightPoint = pixelPoint(
+            x: rightJoint.x,
+            y: rightJoint.y,
+            width: width,
+            height: height,
+            yConvention: yConvention
+        )
 
-        let disparityPixels = lx - rx
-        let verticalMismatchPixels = abs(ly - ry)
-        let confidence = min(leftJoint.confidence, rightJoint.confidence)
-        let minimumDisparityPixels = 1.0
-        let disparityMagnitude = abs(disparityPixels)
-        let disparityQuality = min(max(disparityMagnitude / 24.0, 0.0), 1.0)
-        let stereoConfidence = confidence * disparityQuality
+        let lx = leftPoint.x
+        let ly = leftPoint.y
+        let rx = rightPoint.x
+        let ry = rightPoint.y
 
-        let validStereo =
-            !leftJoint.missing &&
-            !rightJoint.missing &&
-            confidence > 0.05 &&
-            disparityMagnitude >= minimumDisparityPixels &&
-            verticalMismatchPixels <= max(12.0, height * 0.08)
+        let disparity = lx - rx
+        let verticalMismatch = abs(ly - ry)
+        let minDisparityPixels = 0.25
+        let maxVerticalMismatch = height * 0.05
 
-        let safeDisparity = max(disparityMagnitude, minimumDisparityPixels)
-        let z = focalPixels * baselineMeters / safeDisparity
+        guard !leftJoint.missing, !rightJoint.missing else {
+            return invalidJoint(
+                leftJoint,
+                rightJoint,
+                reason: "\(jointName): missing left or right joint"
+            )
+        }
+
+        guard abs(disparity) >= minDisparityPixels else {
+            return invalidJoint(
+                leftJoint,
+                rightJoint,
+                reason: "\(jointName): near-zero disparity"
+            )
+        }
+
+        guard verticalMismatch <= maxVerticalMismatch else {
+            return invalidJoint(
+                leftJoint,
+                rightJoint,
+                reason: "\(jointName): vertical mismatch \(verticalMismatch)"
+            )
+        }
+
+        let depth = focalPixels * baselineMeters / abs(disparity)
         let mx = (lx + rx) * 0.5
         let my = (ly + ry) * 0.5
-        let x = (mx - cx) * z / focalPixels
-        let y = -(my - cy) * z / focalPixels
-        let plausibleDepth = z >= 0.2 && z <= 20.0
-        let finalValidStereo = validStereo && plausibleDepth
+        let x = (mx - cx) * depth / focalPixels
+        let y = (cy - my) * depth / focalPixels
+        let position = SIMD3<Double>(x, y, -depth)
+        let projectedLeft = projectCameraPointToNormalizedImage(
+            position,
+            width: width,
+            height: height,
+            focalPixels: focalPixels,
+            baselineMeters: baselineMeters,
+            eye: .left,
+            yConvention: yConvention
+        )
+        let projectedRight = projectCameraPointToNormalizedImage(
+            position,
+            width: width,
+            height: height,
+            focalPixels: focalPixels,
+            baselineMeters: baselineMeters,
+            eye: .right,
+            yConvention: yConvention
+        )
+        let leftError = hypot(
+            projectedLeft.x - leftJoint.x,
+            projectedLeft.y - leftJoint.y
+        )
+        let rightError = hypot(
+            projectedRight.x - rightJoint.x,
+            projectedRight.y - rightJoint.y
+        )
 
         return StereoMeshyJointCapture.Joint(
             leftX: leftJoint.x,
@@ -122,10 +178,109 @@ enum StereoJointTriangulator {
             rightY: rightJoint.y,
             leftConfidence: leftJoint.confidence,
             rightConfidence: rightJoint.confidence,
-            positionCameraXYZ: [x, y, -z],
-            depthMeters: z,
-            stereoConfidence: finalValidStereo ? stereoConfidence : 0,
-            validStereo: finalValidStereo
+            positionCameraXYZ: [
+                position.x,
+                position.y,
+                position.z
+            ],
+            depthMeters: depth,
+            stereoConfidence: min(leftJoint.confidence, rightJoint.confidence),
+            validStereo: true,
+            rejectReason: nil,
+            reprojectedLeftX: projectedLeft.x,
+            reprojectedLeftY: projectedLeft.y,
+            reprojectedRightX: projectedRight.x,
+            reprojectedRightY: projectedRight.y,
+            reprojectionErrorLeft: leftError,
+            reprojectionErrorRight: rightError
+        )
+    }
+
+    private static func invalidJoint(
+        _ leftJoint: NormalizedMeshyPoseCapture.Joint,
+        _ rightJoint: NormalizedMeshyPoseCapture.Joint,
+        reason: String
+    ) -> StereoMeshyJointCapture.Joint {
+        StereoMeshyJointCapture.Joint(
+            leftX: leftJoint.x,
+            leftY: leftJoint.y,
+            rightX: rightJoint.x,
+            rightY: rightJoint.y,
+            leftConfidence: leftJoint.confidence,
+            rightConfidence: rightJoint.confidence,
+            positionCameraXYZ: [0, 0, 0],
+            depthMeters: 0,
+            stereoConfidence: 0,
+            validStereo: false,
+            rejectReason: reason,
+            reprojectedLeftX: leftJoint.x,
+            reprojectedLeftY: leftJoint.y,
+            reprojectedRightX: rightJoint.x,
+            reprojectedRightY: rightJoint.y,
+            reprojectionErrorLeft: 0,
+            reprojectionErrorRight: 0
+        )
+    }
+
+    private static func pixelPoint(
+        x normalizedX: Double,
+        y normalizedY: Double,
+        width: Double,
+        height: Double,
+        yConvention: NormalizedImageYConvention
+    ) -> SIMD2<Double> {
+        let px = normalizedX * width
+        let py: Double
+
+        switch yConvention {
+        case .originBottomLeft:
+            py = (1.0 - normalizedY) * height
+        case .originTopLeft:
+            py = normalizedY * height
+        }
+
+        return SIMD2<Double>(px, py)
+    }
+
+    private static func projectCameraPointToNormalizedImage(
+        _ point: SIMD3<Double>,
+        width: Double,
+        height: Double,
+        focalPixels: Double,
+        baselineMeters: Double,
+        eye: StereoEye,
+        yConvention: NormalizedImageYConvention
+    ) -> SIMD2<Double> {
+        let z = max(-point.z, 0.000001)
+        let eyeOffsetX: Double
+
+        switch eye {
+        case .left:
+            eyeOffsetX = -baselineMeters * 0.5
+        case .right:
+            eyeOffsetX = baselineMeters * 0.5
+        }
+
+        let px = ((point.x - eyeOffsetX) * focalPixels / z) + width * 0.5
+        let py = height * 0.5 - (point.y * focalPixels / z)
+        let nx = px / width
+        let ny: Double
+
+        switch yConvention {
+        case .originBottomLeft:
+            ny = 1.0 - (py / height)
+        case .originTopLeft:
+            ny = py / height
+        }
+
+        return SIMD2<Double>(nx, ny)
+    }
+
+    private static func stereoError(_ message: String) -> NSError {
+        NSError(
+            domain: "RotoMotionStereo",
+            code: 9001,
+            userInfo: [NSLocalizedDescriptionKey: message]
         )
     }
 }
