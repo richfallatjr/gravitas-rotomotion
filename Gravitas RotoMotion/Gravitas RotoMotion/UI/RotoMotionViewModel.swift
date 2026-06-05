@@ -127,6 +127,36 @@ final class RotoMotionViewModel: ObservableObject {
         didSet { persist(isVideoLooping, AppStorageKeys.isVideoLooping) }
     }
     @Published var videoPlaybackStatus = "No video loaded."
+    @Published var captureMode: RotoMotionCaptureMode = .monocularVideo {
+        didSet { persist(captureMode.rawValue, AppStorageKeys.captureMode) }
+    }
+    @Published var spatialVideoURL: URL? {
+        didSet { persistURL(spatialVideoURL, forKey: AppStorageKeys.spatialVideoURL) }
+    }
+    @Published var leftEyeFrames: [VideoFrame] = []
+    @Published var rightEyeFrames: [VideoFrame] = []
+    @Published var rawLeftVisionCapture: RawVisionPoseCapture?
+    @Published var rawRightVisionCapture: RawVisionPoseCapture?
+    @Published var normalizedLeftCapture: NormalizedMeshyPoseCapture?
+    @Published var normalizedRightCapture: NormalizedMeshyPoseCapture?
+    @Published var stereoJointCapture: StereoMeshyJointCapture?
+    @Published var spatialVideoMetadata: SpatialVideoCameraMetadata?
+    @Published var spatialVideoStatus = "No spatial video loaded."
+    @Published var spatialBaselineMeters: Double = 0.019 {
+        didSet { persist(spatialBaselineMeters, AppStorageKeys.spatialBaselineMeters) }
+    }
+    @Published var spatialHorizontalFOVDegrees: Double = 49.6 {
+        didSet { persist(spatialHorizontalFOVDegrees, AppStorageKeys.spatialHorizontalFOVDegrees) }
+    }
+    @Published var spatialVerticalFOVDegrees: Double = 69.4 {
+        didSet { persist(spatialVerticalFOVDegrees, AppStorageKeys.spatialVerticalFOVDegrees) }
+    }
+    @Published var spatialDisparityAdjustment: Double = 0.0 {
+        didSet { persist(spatialDisparityAdjustment, AppStorageKeys.spatialDisparityAdjustment) }
+    }
+    @Published var showStereoJointDepth = true {
+        didSet { persist(showStereoJointDepth, AppStorageKeys.showStereoJointDepth) }
+    }
 
     @Published var currentSessionURL: URL? {
         didSet { persistURL(currentSessionURL, forKey: AppStorageKeys.currentSessionURL) }
@@ -461,6 +491,13 @@ final class RotoMotionViewModel: ObservableObject {
         static let sessionIsDirty = prefix + "sessionIsDirty"
         static let framePlaybackFPS = prefix + "framePlaybackFPS"
         static let isVideoLooping = prefix + "isVideoLooping"
+        static let captureMode = prefix + "captureMode"
+        static let spatialVideoURL = prefix + "spatialVideoURL"
+        static let spatialBaselineMeters = prefix + "spatialBaselineMeters"
+        static let spatialHorizontalFOVDegrees = prefix + "spatialHorizontalFOVDegrees"
+        static let spatialVerticalFOVDegrees = prefix + "spatialVerticalFOVDegrees"
+        static let spatialDisparityAdjustment = prefix + "spatialDisparityAdjustment"
+        static let showStereoJointDepth = prefix + "showStereoJointDepth"
         static let sampleFPS = prefix + "sampleFPS"
         static let visionSampleFPS = prefix + "visionSampleFPS"
         static let maxFrames = prefix + "maxFrames"
@@ -674,6 +711,7 @@ final class RotoMotionViewModel: ObservableObject {
         purgeLegacyRotationOverrideAppStorage()
 
         videoURL = storedURL(AppStorageKeys.videoURL)
+        spatialVideoURL = storedURL(AppStorageKeys.spatialVideoURL)
         outputDirectoryURL = storedURL(AppStorageKeys.outputDirectoryURL)
         currentSessionURL = storedURL(AppStorageKeys.currentSessionURL)
         sourceCharacterUSDZURL = storedURL(AppStorageKeys.sourceCharacterUSDZURL)
@@ -685,6 +723,15 @@ final class RotoMotionViewModel: ObservableObject {
 
         if let value = storedDouble(AppStorageKeys.framePlaybackFPS) { framePlaybackFPS = value }
         if let value = storedBool(AppStorageKeys.isVideoLooping) { isVideoLooping = value }
+        if let rawValue = storedString(AppStorageKeys.captureMode),
+           let value = RotoMotionCaptureMode(rawValue: rawValue) {
+            captureMode = value
+        }
+        if let value = storedDouble(AppStorageKeys.spatialBaselineMeters) { spatialBaselineMeters = value }
+        if let value = storedDouble(AppStorageKeys.spatialHorizontalFOVDegrees) { spatialHorizontalFOVDegrees = value }
+        if let value = storedDouble(AppStorageKeys.spatialVerticalFOVDegrees) { spatialVerticalFOVDegrees = value }
+        if let value = storedDouble(AppStorageKeys.spatialDisparityAdjustment) { spatialDisparityAdjustment = value }
+        if let value = storedBool(AppStorageKeys.showStereoJointDepth) { showStereoJointDepth = value }
         if let value = storedString(AppStorageKeys.sessionFileStatus) { sessionFileStatus = value }
         if let value = storedBool(AppStorageKeys.sessionIsDirty) { sessionIsDirty = value }
         if let value = storedDouble(AppStorageKeys.sampleFPS) { sampleFPS = value }
@@ -1925,6 +1972,8 @@ final class RotoMotionViewModel: ObservableObject {
 
         videoURL = url
         lastLoadedVideoURL = url
+        captureMode = .monocularVideo
+        clearSpatialVideoState(clearURL: true)
         outputDirectoryURL = RotoMotionProjectStore.defaultOutputDirectory(for: url)
         rawCapture = nil
         normalizedCapture = nil
@@ -2035,6 +2084,360 @@ final class RotoMotionViewModel: ObservableObject {
                 log("Video metadata failed: \(error.localizedDescription)")
             }
         }
+    }
+
+    func clearSpatialVideoState(clearURL: Bool = true) {
+        if clearURL {
+            spatialVideoURL = nil
+        }
+
+        leftEyeFrames = []
+        rightEyeFrames = []
+        rawLeftVisionCapture = nil
+        rawRightVisionCapture = nil
+        normalizedLeftCapture = nil
+        normalizedRightCapture = nil
+        stereoJointCapture = nil
+        spatialVideoMetadata = nil
+        spatialVideoStatus = "No spatial video loaded."
+    }
+
+    func loadSpatialVideo(
+        url: URL
+    ) async {
+        stopFramePlayback()
+        releaseCurrentVideoAccess()
+
+        let didAccess = url.startAccessingSecurityScopedResource()
+
+        videoSecurityScopedURL = url
+        videoSecurityScopedAccessActive = didAccess
+        captureMode = .spatialVideo
+        spatialVideoURL = url
+        videoURL = url
+        lastLoadedVideoURL = url
+        outputDirectoryURL = RotoMotionProjectStore.defaultOutputDirectory(for: url)
+
+        clearSpatialVideoState(clearURL: false)
+
+        decodedFrames = []
+        currentVideoFrameImage = nil
+        currentFrameIndex = 0
+        currentTimeSeconds = 0
+        maxFrameIndex = 0
+        rawCapture = nil
+        normalizedCapture = nil
+        smoothedCapture = nil
+        fitResult = nil
+        currentRaySolveResult = nil
+        rayAnimationSolveResult = nil
+        sessionArmatureSnapshot = nil
+        sessionArmaturePoseBuffer = nil
+        resetRotationAuthoringForNewSession()
+        bakedRigAnimation = nil
+        bakedRigAnimationStatus = "Spatial video changed. Bake rig animation before export."
+        sessionPoseSource = .none
+        sessionPoseStatus = "No session pose source detected."
+        currentVideoPlaneSize = nil
+        raySolveStatus = "Ray solve not run."
+        rayAnimationSolveStatus = "Ray animation solve not run."
+        raySolvedUSDZExportStatus = "No ray solve USDZ exported."
+        usdzRetargetStatus = "No animated target USDZ exported."
+        lastAnimatedUSDZExportURL = nil
+        lastAnimatedUSDZExportFolderURL = nil
+        spatialVideoStatus = "Decoding spatial video..."
+        status = spatialVideoStatus
+
+        diagnostics.log("""
+        Open Spatial Video selected:
+          path: \(url.path)
+          securityScoped: \(didAccess)
+          baselineMeters: \(spatialBaselineMeters)
+          horizontalFOVDegrees: \(spatialHorizontalFOVDegrees)
+          verticalFOVDegrees: \(spatialVerticalFOVDegrees)
+        """)
+
+        do {
+            let decoded = try await SpatialVideoFrameDecoder.decodeLeftRightFrames(
+                url: url,
+                metadataOverride: explicitSpatialMetadataOverride()
+            )
+
+            leftEyeFrames = decoded.leftFrames
+            rightEyeFrames = decoded.rightFrames
+            spatialVideoMetadata = decoded.metadata
+            decodedFrames = cachedFrames(from: decoded.leftFrames)
+            maxFrameIndex = max(0, decodedFrames.count - 1)
+            currentFrameIndex = 0
+            currentTimeSeconds = decodedFrames.first?.timeSeconds ?? 0
+            currentVideoFrameImage = decodedFrames.first?.image
+            imageRenderToken += 1
+
+            spatialVideoStatus = """
+            Spatial video loaded.
+            Displaying left eye on video card.
+              left frames: \(decoded.leftFrames.count)
+              right frames: \(decoded.rightFrames.count)
+              fps: \(String(format: "%.3f", decoded.fps))
+              baseline: \(decoded.metadata.baselineMeters.map { String(format: "%.5f", $0) } ?? "manual \(String(format: "%.5f", spatialBaselineMeters))")
+              hFOV: \(decoded.metadata.horizontalFOVDegrees.map { String(format: "%.2f", $0) } ?? "manual \(String(format: "%.2f", spatialHorizontalFOVDegrees))")
+            """
+            videoPlaybackStatus = "Spatial left-eye frames ready: \(decoded.leftFrames.count)"
+            status = "Spatial video ready: \(decoded.leftFrames.count) stereo frames"
+
+            diagnostics.log("""
+            Spatial display assigned to active video card:
+              using: left eye
+              frames: \(decodedFrames.count)
+              estimatedFPS: \(String(format: "%.3f", RotoVideoFrameCache.estimatedFPS(frames: decodedFrames)))
+              currentImage: \(currentVideoFrameImage != nil)
+
+            Spatial video metadata:
+              baselineMeters: \(decoded.metadata.baselineMeters.map { "\($0)" } ?? "nil")
+              horizontalFOVDegrees: \(decoded.metadata.horizontalFOVDegrees.map { "\($0)" } ?? "nil")
+              verticalFOVDegrees: \(decoded.metadata.verticalFOVDegrees.map { "\($0)" } ?? "nil")
+              disparityAdjustment: \(decoded.metadata.disparityAdjustment.map { "\($0)" } ?? "nil")
+              imageSize: \(decoded.metadata.imageWidth)x\(decoded.metadata.imageHeight)
+            """)
+        } catch {
+            diagnostics.log("""
+            Spatial left-eye decode failed. Falling back to primary video decode for display.
+              error: \(error)
+              path: \(url.path)
+            """)
+
+            do {
+                let fallbackFrames = try await RotoVideoFrameCache.decodeSourceFrames(
+                    from: url,
+                    maxFrames: 0,
+                    maximumImageDimension: 1280
+                )
+
+                leftEyeFrames = []
+                rightEyeFrames = []
+                rawLeftVisionCapture = nil
+                rawRightVisionCapture = nil
+                normalizedLeftCapture = nil
+                normalizedRightCapture = nil
+                stereoJointCapture = nil
+                spatialVideoMetadata = try? await SpatialVideoMetadataReader.readMetadata(url: url)
+                decodedFrames = fallbackFrames
+                maxFrameIndex = max(0, fallbackFrames.count - 1)
+                currentFrameIndex = 0
+                currentTimeSeconds = fallbackFrames.first?.timeSeconds ?? 0
+                currentVideoFrameImage = fallbackFrames.first?.image
+                imageRenderToken += 1
+
+                let fpsEstimate = RotoVideoFrameCache.estimatedFPS(frames: fallbackFrames)
+                spatialVideoStatus = """
+                Spatial video loaded, but left-eye frames were unavailable.
+                Displaying primary video stream as fallback.
+                frames: \(fallbackFrames.count)
+                fps: \(String(format: "%.3f", fpsEstimate))
+                """
+                videoPlaybackStatus = "Spatial fallback display frames ready: \(fallbackFrames.count)"
+                status = spatialVideoStatus
+
+                diagnostics.log("""
+                Spatial display assigned to active video card:
+                  using: fallback primary stream
+                  frames: \(fallbackFrames.count)
+                  estimatedFPS: \(String(format: "%.3f", fpsEstimate))
+                  currentImage: \(currentVideoFrameImage != nil)
+                """)
+            } catch {
+                clearSpatialVideoState(clearURL: false)
+                spatialVideoStatus = "Spatial video decode failed: \(error.localizedDescription)"
+                status = spatialVideoStatus
+                diagnostics.log("""
+                Spatial video decode FAILED:
+                  error: \(error)
+                  path: \(url.path)
+                """)
+            }
+        }
+    }
+
+    func runVisionOnSpatialVideo() async {
+        guard let spatialVideoURL else {
+            spatialVideoStatus = "Open a spatial video first."
+            status = spatialVideoStatus
+            diagnostics.log(spatialVideoStatus)
+            return
+        }
+
+        guard !leftEyeFrames.isEmpty, !rightEyeFrames.isEmpty else {
+            spatialVideoStatus = "Decode spatial left/right frames before Vision."
+            status = spatialVideoStatus
+            diagnostics.log(spatialVideoStatus)
+            return
+        }
+
+        isWorking = true
+        spatialVideoStatus = "Running Vision on left and right eyes..."
+        status = spatialVideoStatus
+
+        do {
+            let fps = RotoVideoFrameCache.estimatedFPS(frames: cachedFrames(from: leftEyeFrames))
+            let left = try await exporter.runExtraction(
+                frames: leftEyeFrames,
+                sourceURL: spatialVideoURL,
+                eyeLabel: "left",
+                nominalFPS: fps > 0 ? fps : visionSampleFPS
+            )
+            let right = try await exporter.runExtraction(
+                frames: rightEyeFrames,
+                sourceURL: spatialVideoURL,
+                eyeLabel: "right",
+                nominalFPS: fps > 0 ? fps : visionSampleFPS
+            )
+
+            rawLeftVisionCapture = left
+            rawRightVisionCapture = right
+            normalizedLeftCapture = PoseNormalizer.normalize(rawCapture: left)
+            normalizedRightCapture = PoseNormalizer.normalize(rawCapture: right)
+
+            // Keep the left eye as the existing monocular viewport/overlay source.
+            rawCapture = left
+            normalizedCapture = normalizedLeftCapture
+            smoothedCapture = nil
+            currentRaySolveResult = nil
+            rayAnimationSolveResult = nil
+            sessionArmatureSnapshot = nil
+            sessionArmaturePoseBuffer = nil
+            bakedRigAnimation = nil
+            bakedRigAnimationStatus = "Spatial Vision changed. Bake rig animation before export."
+            maxFrameIndex = max(maxFrameIndex, max(0, left.frames.count - 1))
+
+            try buildStereoJointDepth()
+
+            isWorking = false
+            status = spatialVideoStatus
+            diagnostics.log("""
+            Spatial Vision complete:
+              left raw frames: \(left.frames.count)
+              right raw frames: \(right.frames.count)
+              left normalized: \(normalizedLeftCapture?.frames.count ?? 0)
+              right normalized: \(normalizedRightCapture?.frames.count ?? 0)
+              stereo frames: \(stereoJointCapture?.frames.count ?? 0)
+            """)
+        } catch {
+            isWorking = false
+            spatialVideoStatus = "Spatial Vision failed: \(error.localizedDescription)"
+            status = spatialVideoStatus
+            diagnostics.log("""
+            Spatial Vision FAILED:
+              error: \(error)
+            """)
+        }
+    }
+
+    @discardableResult
+    func buildStereoJointDepth() throws -> StereoMeshyJointCapture {
+        guard let left = normalizedLeftCapture,
+              let right = normalizedRightCapture else {
+            throw NSError(
+                domain: "GravitasRotoMotion",
+                code: 7501,
+                userInfo: [NSLocalizedDescriptionKey: "Normalize both spatial eyes before stereo triangulation."]
+            )
+        }
+
+        let metadata = effectiveSpatialMetadata()
+        let stereo = try StereoJointTriangulator.triangulate(
+            left: left,
+            right: right,
+            metadata: metadata
+        )
+
+        stereoJointCapture = stereo
+        let validCounts = stereo.frames.map {
+            $0.joints.values.filter(\.validStereo).count
+        }
+        let averageValid = validCounts.isEmpty
+            ? 0
+            : Double(validCounts.reduce(0, +)) / Double(validCounts.count)
+
+        spatialVideoStatus = """
+        Stereo joint depth built:
+          frames: \(stereo.frames.count)
+          avg valid joints/frame: \(String(format: "%.1f", averageValid))
+          baselineMeters: \(String(format: "%.5f", metadata.baselineMeters ?? 0))
+          hFOV: \(String(format: "%.2f", metadata.horizontalFOVDegrees ?? 0))
+        """
+        status = spatialVideoStatus
+        diagnostics.log(spatialVideoStatus)
+
+        return stereo
+    }
+
+    func rebuildStereoJointDepthFromCurrentSettings() {
+        do {
+            _ = try buildStereoJointDepth()
+        } catch {
+            spatialVideoStatus = "Stereo depth failed: \(error.localizedDescription)"
+            status = spatialVideoStatus
+            diagnostics.log(spatialVideoStatus)
+        }
+    }
+
+    func cachedFrames(from frames: [VideoFrame]) -> [RotoVideoFrameCache.CachedFrame] {
+        frames.map {
+            RotoVideoFrameCache.CachedFrame(
+                id: $0.id,
+                frameIndex: $0.frameIndex,
+                timeSeconds: $0.timeSeconds,
+                image: $0.image
+            )
+        }
+    }
+
+    private func explicitSpatialMetadataOverride() -> SpatialVideoCameraMetadata {
+        SpatialVideoCameraMetadata(
+            baselineMeters: spatialBaselineMeters > 0 ? spatialBaselineMeters : nil,
+            horizontalFOVDegrees: spatialHorizontalFOVDegrees > 0 ? spatialHorizontalFOVDegrees : nil,
+            verticalFOVDegrees: spatialVerticalFOVDegrees > 0 ? spatialVerticalFOVDegrees : nil,
+            disparityAdjustment: spatialDisparityAdjustment,
+            imageWidth: spatialVideoMetadata?.imageWidth ?? 1,
+            imageHeight: spatialVideoMetadata?.imageHeight ?? 1
+        )
+    }
+
+    private func effectiveSpatialMetadata() -> SpatialVideoCameraMetadata {
+        var metadata = spatialVideoMetadata ?? SpatialVideoCameraMetadata(
+            baselineMeters: nil,
+            horizontalFOVDegrees: nil,
+            verticalFOVDegrees: nil,
+            disparityAdjustment: nil,
+            imageWidth: leftEyeFrames.first.map { Int($0.image.size.width.rounded()) } ?? 1,
+            imageHeight: leftEyeFrames.first.map { Int($0.image.size.height.rounded()) } ?? 1
+        )
+
+        if spatialBaselineMeters > 0 {
+            metadata.baselineMeters = spatialBaselineMeters
+        }
+
+        if spatialHorizontalFOVDegrees > 0 {
+            metadata.horizontalFOVDegrees = spatialHorizontalFOVDegrees
+        }
+
+        if spatialVerticalFOVDegrees > 0 {
+            metadata.verticalFOVDegrees = spatialVerticalFOVDegrees
+        }
+
+        metadata.disparityAdjustment = spatialDisparityAdjustment
+
+        if metadata.imageWidth <= 1,
+           let first = leftEyeFrames.first {
+            metadata.imageWidth = max(Int(first.image.size.width.rounded()), 1)
+        }
+
+        if metadata.imageHeight <= 1,
+           let first = leftEyeFrames.first {
+            metadata.imageHeight = max(Int(first.image.size.height.rounded()), 1)
+        }
+
+        return metadata
     }
 
     func playVideo() {
@@ -2261,11 +2664,42 @@ final class RotoMotionViewModel: ObservableObject {
         lastVisionError = nil
 
         do {
-            let capture = try await exporter.runExtraction(
-                videoURL: videoURL,
-                sampleFPS: visionSampleFPS,
-                maxFrames: 0
-            )
+            let capture: RawVisionPoseCapture
+
+            if captureMode == .spatialVideo, !leftEyeFrames.isEmpty {
+                let fps = RotoVideoFrameCache.estimatedFPS(frames: decodedFrames)
+
+                diagnostics.log("""
+                Run Vision requested on spatial video display frames:
+                  eye: left
+                  frames: \(leftEyeFrames.count)
+                  displayedFrames: \(decodedFrames.count)
+                """)
+
+                capture = try await exporter.runExtraction(
+                    frames: leftEyeFrames,
+                    sourceURL: videoURL,
+                    eyeLabel: "left",
+                    nominalFPS: fps > 0 ? fps : visionSampleFPS
+                )
+
+                rawLeftVisionCapture = capture
+                normalizedLeftCapture = nil
+            } else {
+                if captureMode == .spatialVideo {
+                    diagnostics.log("""
+                    Run Vision requested on spatial video fallback display frames:
+                      eye: fallback primary stream
+                      frames: \(decodedFrames.count)
+                    """)
+                }
+
+                capture = try await exporter.runExtraction(
+                    videoURL: videoURL,
+                    sampleFPS: visionSampleFPS,
+                    maxFrames: 0
+                )
+            }
 
             rawCapture = capture
             normalizedCapture = nil

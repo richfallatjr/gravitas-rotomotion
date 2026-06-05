@@ -163,7 +163,7 @@ final class RotoVideoFrameCache: ObservableObject {
         isLoading = false
     }
 
-    private static func decodeSourceFrames(
+    static func decodeSourceFrames(
         from url: URL,
         maxFrames: Int,
         maximumImageDimension: CGFloat

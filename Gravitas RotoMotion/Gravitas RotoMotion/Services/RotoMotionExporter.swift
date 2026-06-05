@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import Combine
 import Foundation
@@ -33,6 +34,38 @@ final class RotoMotionExporter: ObservableObject {
             return capture
         } catch {
             progressText = "Extraction failed: \(error.localizedDescription)"
+            isExtracting = false
+            throw error
+        }
+    }
+
+    func runExtraction(
+        frames: [VideoFrame],
+        sourceURL: URL,
+        eyeLabel: String,
+        nominalFPS: Double
+    ) async throws -> RawVisionPoseCapture {
+        isExtracting = true
+        progressText = "Starting \(eyeLabel) eye Vision extraction..."
+
+        do {
+            let capture = try await Self.buildCapture(
+                frames: frames,
+                sourceURL: sourceURL,
+                eyeLabel: eyeLabel,
+                nominalFPS: nominalFPS
+            ) { [weak self] text in
+                Task { @MainActor in
+                    self?.progressText = text
+                }
+            }
+
+            self.capture = capture
+            progressText = "\(eyeLabel) eye extraction complete: \(capture.frames.count) frames"
+            isExtracting = false
+            return capture
+        } catch {
+            progressText = "\(eyeLabel) eye extraction failed: \(error.localizedDescription)"
             isExtracting = false
             throw error
         }
@@ -103,6 +136,69 @@ final class RotoMotionExporter: ObservableObject {
                     notes: "Raw Vision evidence only. No smoothing, rig fitting, or semantic interpretation."
                 ),
                 frames: frames
+            )
+        }.value
+    }
+
+    private static func buildCapture(
+        frames: [VideoFrame],
+        sourceURL: URL,
+        eyeLabel: String,
+        nominalFPS: Double,
+        progress: @escaping (String) -> Void
+    ) async throws -> RawVisionPoseCapture {
+        try await Task.detached(priority: .userInitiated) {
+            let extractor = VisionPoseExtractor()
+            var poseFrames: [RawVisionPoseCapture.PoseFrame] = []
+            poseFrames.reserveCapacity(frames.count)
+
+            for frame in frames {
+                let rawJoints = try extractor.extractPose(from: frame.pixelBuffer)
+
+                poseFrames.append(
+                    RawVisionPoseCapture.PoseFrame(
+                        frameIndex: frame.frameIndex,
+                        sourceFrameIndex: frame.frameIndex,
+                        timeSeconds: frame.timeSeconds,
+                        timecode: TimecodeFormatter.timecode(seconds: frame.timeSeconds),
+                        detected: !rawJoints.isEmpty,
+                        joints: rawJoints
+                    )
+                )
+
+                if poseFrames.count % 10 == 0 {
+                    progress("Extracted \(eyeLabel) eye \(poseFrames.count) / \(frames.count) frames")
+                }
+            }
+
+            let firstImage = frames.first?.image
+            let width = Int((firstImage?.size.width ?? 0).rounded())
+            let height = Int((firstImage?.size.height ?? 0).rounded())
+            let duration = max(
+                (frames.last?.timeSeconds ?? 0) - (frames.first?.timeSeconds ?? 0),
+                0
+            )
+
+            return RawVisionPoseCapture(
+                schema: "com.gravitas.rotomotion.raw_vision.v0",
+                appName: "Gravitas RotoMotion",
+                appVersion: "0.1.0",
+                sourceVideo: .init(
+                    fileName: "\(sourceURL.lastPathComponent) [\(eyeLabel) eye]",
+                    filePath: sourceURL.path,
+                    durationSeconds: duration,
+                    nominalFrameRate: nominalFPS,
+                    naturalWidth: width,
+                    naturalHeight: height
+                ),
+                extraction: .init(
+                    visionRequest: "VNDetectHumanBodyPoseRequest",
+                    sampleFPS: nominalFPS,
+                    normalizedCoordinates: true,
+                    createdAtISO8601: ISO8601DateFormatter().string(from: Date()),
+                    notes: "Spatial \(eyeLabel) eye Vision evidence. No smoothing, rig fitting, or semantic interpretation."
+                ),
+                frames: poseFrames
             )
         }.value
     }

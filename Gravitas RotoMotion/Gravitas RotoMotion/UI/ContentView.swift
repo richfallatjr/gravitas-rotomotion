@@ -80,6 +80,10 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
 
+            Button("Open Spatial Video") {
+                openSpatialVideoDirectlyInContentView()
+            }
+
             Button(uiIsPlaying ? "Pause" : "Play") {
                 toggleUIDirectPlayback()
             }
@@ -165,6 +169,7 @@ struct ContentView: View {
                 rawFrame: currentRawFrame,
                 normalizedFrame: currentNormalizedFrame,
                 smoothedFrame: nil,
+                stereoJointFrame: currentStereoJointFrame,
                 groundPlane: roto.groundPlane,
                 raySolveResult: roto.currentRaySolveResult,
                 raySolvedFrame: roto.currentRaySolvedFrame,
@@ -187,11 +192,13 @@ struct ContentView: View {
                 showRawVision: roto.showRawVisionPoints,
                 showNormalizedMeshy: roto.showNormalizedMeshyPoints,
                 showSmoothedMeshy: false,
+                showStereoJointDepth: roto.showStereoJointDepth,
                 showGroundPlane: roto.groundPlane.visible,
                 showVisionRays: roto.showVisionRays,
                 showRaySolvedRig: roto.showDebugSolvedSkeleton,
                 showSkinnedRig: roto.showSkinnedRig,
                 showRotationGizmo: roto.showRotationGizmo,
+                stereoSceneUnitsPerMeter: roto.raySceneUnitsPerMeter,
                 rotationGizmoSpace: roto.rotationGizmoSpace,
                 selectedRotationJoint: roto.selectedRotationJoint,
                 onRotationGizmoEulerChanged: { joint, euler in
@@ -277,6 +284,13 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 14) {
                 GroupBox("Video") {
                     VStack(alignment: .leading, spacing: 4) {
+                        Picker("Input Mode", selection: $roto.captureMode) {
+                            ForEach(RotoMotionCaptureMode.allCases) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+
                         Text("File: \(uiVideoURL?.lastPathComponent ?? "none")")
                         Text("Source frames: \(uiDecodedFrames.count)")
                         Text("Current image: \(uiCurrentImage == nil ? "nil" : "yes")")
@@ -286,6 +300,8 @@ struct ContentView: View {
                     .font(.caption)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
+
+                spatialVideoPanel
 
                 sessionFilePanel
 
@@ -388,6 +404,92 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var spatialVideoPanel: some View {
+        GroupBox("Spatial Video Depth") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(roto.spatialVideoURL?.lastPathComponent ?? "No spatial video selected")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack {
+                    Text("Baseline m")
+                        .frame(width: 78, alignment: .leading)
+
+                    TextField(
+                        "baseline",
+                        value: $roto.spatialBaselineMeters,
+                        format: .number.precision(.fractionLength(5))
+                    )
+                    .textFieldStyle(.roundedBorder)
+                }
+
+                HStack {
+                    Text("H FOV")
+                        .frame(width: 78, alignment: .leading)
+
+                    TextField(
+                        "horizontal",
+                        value: $roto.spatialHorizontalFOVDegrees,
+                        format: .number.precision(.fractionLength(2))
+                    )
+                    .textFieldStyle(.roundedBorder)
+
+                    Text("°")
+                }
+
+                HStack {
+                    Text("V FOV")
+                        .frame(width: 78, alignment: .leading)
+
+                    TextField(
+                        "vertical",
+                        value: $roto.spatialVerticalFOVDegrees,
+                        format: .number.precision(.fractionLength(2))
+                    )
+                    .textFieldStyle(.roundedBorder)
+
+                    Text("°")
+                }
+
+                Button("Run Vision Both Eyes") {
+                    Task {
+                        await roto.runVisionOnSpatialVideo()
+                        uiDecodedFrames = roto.decodedFrames
+                        uiCurrentFrameIndex = 0
+                        uiCurrentImage = uiDecodedFrames.first?.image
+                        uiStatus = roto.status
+                        pipelineRenderToken += 1
+                    }
+                }
+                .disabled(roto.leftEyeFrames.isEmpty || roto.rightEyeFrames.isEmpty || roto.isWorking)
+
+                Button("Build Stereo Joint Depth") {
+                    roto.rebuildStereoJointDepthFromCurrentSettings()
+                    uiStatus = roto.status
+                    pipelineRenderToken += 1
+                }
+                .disabled(roto.normalizedLeftCapture == nil || roto.normalizedRightCapture == nil)
+
+                Toggle("Show Stereo 3D Skeleton", isOn: $roto.showStereoJointDepth)
+
+                Text("Left frames: \(roto.leftEyeFrames.count), right frames: \(roto.rightEyeFrames.count)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                Text("Stereo frames: \(roto.stereoJointCapture?.frames.count ?? 0)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                Text(roto.spatialVideoStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(.caption)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -846,6 +948,16 @@ struct ContentView: View {
         nearestNormalizedFrame(forTime: currentUIVideoTimeSeconds)
     }
 
+    private var currentStereoJointFrame: StereoMeshyJointCapture.Frame? {
+        guard let frames = roto.stereoJointCapture?.frames, !frames.isEmpty else {
+            return nil
+        }
+
+        return frames.min {
+            abs($0.timeSeconds - currentUIVideoTimeSeconds) < abs($1.timeSeconds - currentUIVideoTimeSeconds)
+        }
+    }
+
     private func nearestRawFrame(forTime time: Double) -> RawVisionPoseCapture.PoseFrame? {
         guard let frames = roto.rawCapture?.frames, !frames.isEmpty else {
             return nil
@@ -922,6 +1034,8 @@ struct ContentView: View {
 
         roto.videoURL = url
         roto.lastLoadedVideoURL = url
+        roto.captureMode = .monocularVideo
+        roto.clearSpatialVideoState()
         roto.outputDirectoryURL = RotoMotionProjectStore.defaultOutputDirectory(for: url)
         roto.decodedFrames = []
         roto.currentVideoFrameImage = nil
@@ -1005,6 +1119,57 @@ struct ContentView: View {
                       image size: \(String(describing: uiCurrentImage?.size))
                     """
                 )
+            }
+        }
+    }
+
+    private func openSpatialVideoDirectlyInContentView() {
+        print("[RotoMotion UI] Open Spatial Video requested.")
+
+        guard let url = FilePanelHelpers.openVideoURL() else {
+            uiStatus = "Open spatial video canceled."
+            roto.status = uiStatus
+            roto.diagnostics.log("Open Spatial Video canceled by user.")
+            return
+        }
+
+        releaseUIVideoAccess()
+
+        let didAccess = url.startAccessingSecurityScopedResource()
+        uiSecurityScopedURL = url
+        uiSecurityScopedAccessActive = didAccess
+        uiVideoURL = url
+
+        uiStatus = "Decoding spatial video \(url.lastPathComponent)..."
+        uiDecodedFrames = []
+        uiCurrentImage = nil
+        uiCurrentFrameIndex = 0
+        uiRenderToken += 1
+        playbackStartHostTime = nil
+        playbackStartVideoTime = 0
+        pipelineRenderToken += 1
+
+        installUIAudioPlayer(for: url)
+
+        Task {
+            await roto.loadSpatialVideo(url: url)
+
+            await MainActor.run {
+                let frames = roto.decodedFrames
+                uiDecodedFrames = frames
+                uiCurrentFrameIndex = 0
+                uiCurrentImage = frames.first?.image
+                uiRenderToken += 1
+                pipelineRenderToken += 1
+                uiStatus = roto.status
+
+                roto.diagnostics.log("""
+                Spatial video assigned to active UI:
+                  left viewport frames: \(frames.count)
+                  firstTime: \(frames.first?.timeSeconds ?? -1)
+                  lastTime: \(frames.last?.timeSeconds ?? -1)
+                  currentImage: \(uiCurrentImage != nil)
+                """)
             }
         }
     }

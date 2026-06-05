@@ -90,6 +90,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let rawFrame: RawVisionPoseCapture.PoseFrame?
     let normalizedFrame: NormalizedMeshyPoseCapture.Frame?
     let smoothedFrame: SmoothedMeshyPoseCapture.Frame?
+    let stereoJointFrame: StereoMeshyJointCapture.Frame?
 
     let groundPlane: GroundPlaneController?
     let raySolveResult: RotoRaySolveResult?
@@ -114,11 +115,13 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let showRawVision: Bool
     let showNormalizedMeshy: Bool
     let showSmoothedMeshy: Bool
+    let showStereoJointDepth: Bool
     let showGroundPlane: Bool
     let showVisionRays: Bool
     let showRaySolvedRig: Bool
     let showSkinnedRig: Bool
     let showRotationGizmo: Bool
+    let stereoSceneUnitsPerMeter: Double
     let rotationGizmoSpace: RotationGizmoSpace
     let selectedRotationJoint: String
     let onRotationGizmoEulerChanged: (_ joint: String, _ eulerXYZ: SIMD3<Float>) -> Void
@@ -148,6 +151,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             rawFrame: rawFrame,
             normalizedFrame: normalizedFrame,
             smoothedFrame: smoothedFrame,
+            stereoJointFrame: stereoJointFrame,
             groundPlane: groundPlane,
             raySolveResult: raySolveResult,
             raySolvedFrame: raySolvedFrame,
@@ -170,11 +174,13 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             showRawVision: showRawVision,
             showNormalizedMeshy: showNormalizedMeshy,
             showSmoothedMeshy: showSmoothedMeshy,
+            showStereoJointDepth: showStereoJointDepth,
             showGroundPlane: showGroundPlane,
             showVisionRays: showVisionRays,
             showRaySolvedRig: showRaySolvedRig,
             showSkinnedRig: showSkinnedRig,
             showRotationGizmo: showRotationGizmo,
+            stereoSceneUnitsPerMeter: stereoSceneUnitsPerMeter,
             rotationGizmoSpace: rotationGizmoSpace,
             selectedRotationJoint: selectedRotationJoint
         )
@@ -187,6 +193,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private let rawOverlayRoot = SCNNode()
         private let normalizedOverlayRoot = SCNNode()
         private let smoothedOverlayRoot = SCNNode()
+        private let stereoDepthRoot = SCNNode()
         private let groundRoot = SCNNode()
         private let visionRayRoot = SCNNode()
         private let solvedRigRoot = SCNNode()
@@ -299,6 +306,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             rawOverlayRoot.name = "RawVisionOverlayRoot"
             normalizedOverlayRoot.name = "NormalizedMeshyOverlayRoot"
             smoothedOverlayRoot.name = "SmoothedMeshyOverlayRoot"
+            stereoDepthRoot.name = "StereoJointDepthRoot"
             groundRoot.name = "GroundPlaneRoot"
             visionRayRoot.name = "VisionRayRoot"
             solvedRigRoot.name = "RaySolvedRigRoot"
@@ -309,6 +317,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             scene.rootNode.addChildNode(rawOverlayRoot)
             scene.rootNode.addChildNode(normalizedOverlayRoot)
             scene.rootNode.addChildNode(smoothedOverlayRoot)
+            scene.rootNode.addChildNode(stereoDepthRoot)
             scene.rootNode.addChildNode(visionRayRoot)
             scene.rootNode.addChildNode(solvedRigRoot)
             scene.rootNode.addChildNode(solveErrorRoot)
@@ -350,6 +359,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             rawFrame: RawVisionPoseCapture.PoseFrame?,
             normalizedFrame: NormalizedMeshyPoseCapture.Frame?,
             smoothedFrame: SmoothedMeshyPoseCapture.Frame?,
+            stereoJointFrame: StereoMeshyJointCapture.Frame?,
             groundPlane: GroundPlaneController?,
             raySolveResult: RotoRaySolveResult?,
             raySolvedFrame: RotoRayAnimationSolveResult.Frame?,
@@ -372,11 +382,13 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             showRawVision: Bool,
             showNormalizedMeshy: Bool,
             showSmoothedMeshy: Bool,
+            showStereoJointDepth: Bool,
             showGroundPlane: Bool,
             showVisionRays: Bool,
             showRaySolvedRig: Bool,
             showSkinnedRig: Bool,
             showRotationGizmo: Bool,
+            stereoSceneUnitsPerMeter: Double,
             rotationGizmoSpace: RotationGizmoSpace,
             selectedRotationJoint: String
         ) {
@@ -440,6 +452,11 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             updateRawOverlay(rawFrame, visible: showRawVision)
             updateNormalizedOverlay(normalizedFrame, visible: showNormalizedMeshy)
             updateSmoothedOverlay(smoothedFrame, visible: showSmoothedMeshy)
+            updateStereoDepthOverlay(
+                stereoJointFrame,
+                visible: showStereoJointDepth,
+                sceneUnitsPerMeter: stereoSceneUnitsPerMeter
+            )
             updateRaySolveDebug(
                 result: raySolveResult,
                 raySolvedFrame: raySolvedFrame,
@@ -746,6 +763,57 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             )
         }
 
+        private func updateStereoDepthOverlay(
+            _ frame: StereoMeshyJointCapture.Frame?,
+            visible: Bool,
+            sceneUnitsPerMeter: Double
+        ) {
+            stereoDepthRoot.isHidden = !visible
+            removeAllChildren(from: stereoDepthRoot)
+
+            guard visible, let frame else {
+                return
+            }
+
+            let scale = Float(max(sceneUnitsPerMeter, 0.0001))
+            var positions: [String: SIMD3<Float>] = [:]
+
+            for (name, joint) in frame.joints where joint.validStereo && joint.positionCameraXYZ.count == 3 {
+                positions[name] = SIMD3<Float>(
+                    Float(joint.positionCameraXYZ[0]) * scale,
+                    Float(joint.positionCameraXYZ[1]) * scale,
+                    Float(joint.positionCameraXYZ[2]) * scale
+                )
+            }
+
+            let color = NSColor.magenta
+
+            for (a, b) in meshySkeletonBones {
+                guard let pa = positions[a],
+                      let pb = positions[b] else {
+                    continue
+                }
+
+                stereoDepthRoot.addChildNode(
+                    makeLineNode(
+                        from: SCNVector3(pa.x, pa.y, pa.z),
+                        to: SCNVector3(pb.x, pb.y, pb.z),
+                        color: color.withAlphaComponent(0.85)
+                    )
+                )
+            }
+
+            for (_, p) in positions {
+                let node = makePointNode(
+                    color: color,
+                    radius: 0.055
+                )
+                node.position = SCNVector3(p.x, p.y, p.z)
+                node.renderingOrder = 700
+                stereoDepthRoot.addChildNode(node)
+            }
+        }
+
         private struct MeshyOverlayPoint {
             let x: Double
             let y: Double
@@ -759,33 +827,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             color: NSColor,
             zOffset: Float
         ) {
-            let bones: [(String, String)] = [
-                ("Hips", "LeftUpLeg"),
-                ("LeftUpLeg", "LeftLeg"),
-                ("LeftLeg", "LeftFoot"),
-                ("LeftFoot", "LeftToeBase"),
-                ("Hips", "RightUpLeg"),
-                ("RightUpLeg", "RightLeg"),
-                ("RightLeg", "RightFoot"),
-                ("RightFoot", "RightToeBase"),
-                ("Hips", "Spine02"),
-                ("Spine02", "Spine01"),
-                ("Spine01", "Spine"),
-                ("Spine", "neck"),
-                ("neck", "Head"),
-                ("Head", "head_end"),
-                ("Head", "headfront"),
-                ("Spine", "LeftShoulder"),
-                ("LeftShoulder", "LeftArm"),
-                ("LeftArm", "LeftForeArm"),
-                ("LeftForeArm", "LeftHand"),
-                ("Spine", "RightShoulder"),
-                ("RightShoulder", "RightArm"),
-                ("RightArm", "RightForeArm"),
-                ("RightForeArm", "RightHand")
-            ]
-
-            for (a, b) in bones {
+            for (a, b) in meshySkeletonBones {
                 guard let ja = joints[a],
                       let jb = joints[b],
                       !ja.missing,
@@ -816,6 +858,34 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 )
                 root.addChildNode(node)
             }
+        }
+
+        private var meshySkeletonBones: [(String, String)] {
+            [
+                ("Hips", "LeftUpLeg"),
+                ("LeftUpLeg", "LeftLeg"),
+                ("LeftLeg", "LeftFoot"),
+                ("LeftFoot", "LeftToeBase"),
+                ("Hips", "RightUpLeg"),
+                ("RightUpLeg", "RightLeg"),
+                ("RightLeg", "RightFoot"),
+                ("RightFoot", "RightToeBase"),
+                ("Hips", "Spine02"),
+                ("Spine02", "Spine01"),
+                ("Spine01", "Spine"),
+                ("Spine", "neck"),
+                ("neck", "Head"),
+                ("Head", "head_end"),
+                ("Head", "headfront"),
+                ("Spine", "LeftShoulder"),
+                ("LeftShoulder", "LeftArm"),
+                ("LeftArm", "LeftForeArm"),
+                ("LeftForeArm", "LeftHand"),
+                ("Spine", "RightShoulder"),
+                ("RightShoulder", "RightArm"),
+                ("RightArm", "RightForeArm"),
+                ("RightForeArm", "RightHand")
+            ]
         }
 
         private func updateSkinnedRig(
