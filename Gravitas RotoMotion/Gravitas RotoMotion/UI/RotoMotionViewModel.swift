@@ -301,25 +301,25 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var bakedRigAnimationStatus = "No baked rig animation." {
         didSet { persist(bakedRigAnimationStatus, AppStorageKeys.bakedRigAnimationStatus) }
     }
-    @Published var rotationEditLayer = JointRotationEditLayer.default {
-        didSet { persistCodable(rotationEditLayer, AppStorageKeys.rotationEditLayer) }
+    @Published var rotationOverrideLayer = JointRotationOverrideLayer.default {
+        didSet { persistCodable(rotationOverrideLayer, AppStorageKeys.rotationOverrideLayer) }
     }
     @Published var selectedRotationJoint = "Head" {
         didSet {
-            rotationEditLayer.selectedJoint = selectedRotationJoint
+            rotationOverrideLayer.selectedJoint = selectedRotationJoint
             persist(selectedRotationJoint, AppStorageKeys.selectedRotationJoint)
         }
     }
     @Published var cleanRotationKeysEnabled = false {
         didSet {
-            rotationEditLayer.cleanKeysEnabled = cleanRotationKeysEnabled
+            rotationOverrideLayer.cleanKeysEnabled = cleanRotationKeysEnabled
             if suppressSessionDirtyTracking {
                 persist(cleanRotationKeysEnabled, AppStorageKeys.cleanRotationKeysEnabled)
                 return
             }
 
             bakedRigAnimation = nil
-            bakedRigAnimationStatus = "Rotation edit mode changed. Bake rig animation before export."
+            bakedRigAnimationStatus = "Rotation override mode changed. Bake rig animation before export."
             sessionIsDirty = true
             applyCurrentFrameToLiveRig()
             persist(cleanRotationKeysEnabled, AppStorageKeys.cleanRotationKeysEnabled)
@@ -328,7 +328,7 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var rotationAuthoringStatus = "No rotation key." {
         didSet { persist(rotationAuthoringStatus, AppStorageKeys.rotationAuthoringStatus) }
     }
-    @Published var liveRotationEulerXYZByJoint: [String: SIMD3<Float>] = [:]
+    @Published var liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>] = [:]
     @Published var sessionSkeletonPath: String?
     @Published var sessionJointPaths: [String] = []
     @Published var sessionJointLeafNames: [String] = []
@@ -485,7 +485,7 @@ final class RotoMotionViewModel: ObservableObject {
         static let rigRotationApplyMode = prefix + "rigRotationApplyMode"
         static let bakedRigAnimation = prefix + "bakedRigAnimation"
         static let bakedRigAnimationStatus = prefix + "bakedRigAnimationStatus"
-        static let rotationEditLayer = prefix + "rotationEditLayer"
+        static let rotationOverrideLayer = prefix + "rotationOverrideLayer"
         static let selectedRotationJoint = prefix + "selectedRotationJoint"
         static let cleanRotationKeysEnabled = prefix + "cleanRotationKeysEnabled"
         static let rotationAuthoringStatus = prefix + "rotationAuthoringStatus"
@@ -668,8 +668,8 @@ final class RotoMotionViewModel: ObservableObject {
            let value = RigRotationApplyMode(rawValue: rawValue) {
             rigRotationApplyMode = value
         }
-        if let value = storedCodable(JointRotationEditLayer.self, AppStorageKeys.rotationEditLayer) {
-            rotationEditLayer = value
+        if let value = storedCodable(JointRotationOverrideLayer.self, AppStorageKeys.rotationOverrideLayer) {
+            rotationOverrideLayer = value
             selectedRotationJoint = value.selectedJoint
             cleanRotationKeysEnabled = value.cleanKeysEnabled
         }
@@ -752,7 +752,7 @@ final class RotoMotionViewModel: ObservableObject {
             normalizedCapture: normalizedCapture,
             rayAnimationSolveResult: rayAnimationSolveResult,
             bakedRigAnimation: bakedRigAnimation,
-            rotationEditLayer: rotationEditLayer,
+            rotationOverrideLayer: rotationOverrideLayer,
             selectedRotationJoint: selectedRotationJoint,
             cleanRotationKeysEnabled: cleanRotationKeysEnabled
         )
@@ -920,14 +920,14 @@ final class RotoMotionViewModel: ObservableObject {
             bakedRigAnimationStatus = "No baked rig animation in session."
         }
 
-        rotationEditLayer = document.rotationEditLayer
+        rotationOverrideLayer = document.rotationOverrideLayer
         selectedRotationJoint = document.selectedRotationJoint
         cleanRotationKeysEnabled = document.cleanRotationKeysEnabled
-        rotationEditLayer.selectedJoint = selectedRotationJoint
-        rotationEditLayer.cleanKeysEnabled = cleanRotationKeysEnabled
-        liveRotationEulerXYZByJoint = [:]
+        rotationOverrideLayer.selectedJoint = selectedRotationJoint
+        rotationOverrideLayer.cleanKeysEnabled = cleanRotationKeysEnabled
+        liveRotationOverrideEulerXYZByJoint = [:]
 
-        rotationAuthoringStatus = "Loaded rotation edit layer."
+        rotationAuthoringStatus = "Loaded rotation override layer."
     }
 
     var frameCount: Int {
@@ -1624,10 +1624,10 @@ final class RotoMotionViewModel: ObservableObject {
                 videoPlaneZ: currentVideoPlaneZ
             )
 
-            JointRotationEditApplier.apply(
+            JointRotationOverrideApplier.apply(
                 to: session,
-                editLayer: rotationEditLayer,
-                liveRotationEulerXYZByJoint: liveRotationEulerXYZByJoint,
+                overrideLayer: rotationOverrideLayer,
+                liveRotationOverrideEulerXYZByJoint: liveRotationOverrideEulerXYZByJoint,
                 timeSeconds: solvedFrame.timeSeconds
             )
 
@@ -2763,14 +2763,16 @@ final class RotoMotionViewModel: ObservableObject {
     ) {
         let joint = selectedRotationJoint
         let sensitivity: Float = 0.006
-        var values = liveRotationEulerXYZByJoint[joint] ?? SIMD3<Float>(0, 0, 0)
+        var values = liveRotationOverrideEulerXYZByJoint[joint]
+            ?? currentManualOverrideEuler(for: joint)
+            ?? currentBoneEuler(for: joint)
+            ?? SIMD3<Float>(0, 0, 0)
 
         switch joint {
         case "LeftForeArm", "RightForeArm":
             values.y += Float(dx) * sensitivity
 
         case "LeftLeg", "RightLeg":
-            // XYZ-only manual channel. W is derived from XYZ below.
             values.x += -Float(dy) * sensitivity
             values.z += Float(dx) * sensitivity
 
@@ -2779,23 +2781,24 @@ final class RotoMotionViewModel: ObservableObject {
             values.x += -Float(dy) * sensitivity
         }
 
-        values = ManualRotationConstraint.clampedAxisValues(
+        values = ManualRotationConstraint.clampedEulerXYZ(
             joint: joint,
             values: values
         )
 
-        liveRotationEulerXYZByJoint[joint] = values
+        liveRotationOverrideEulerXYZByJoint[joint] = values
 
         rotationAuthoringStatus = """
-        Editing \(joint)
-        \(ManualRotationChannelPolicy.lockedChannelsDescription(for: joint))
+        Override rotation for \(joint):
         constraint: \(ManualRotationConstraint.constrainedAxesDescription(for: joint))
-        XYZ radians: x \(String(format: "%.3f", values.x)) y \(String(format: "%.3f", values.y)) z \(String(format: "%.3f", values.z))
+        X \(String(format: "%.3f", values.x))
+        Y \(String(format: "%.3f", values.y))
+        Z \(String(format: "%.3f", values.z))
         """
         status = rotationAuthoringStatus
         sessionIsDirty = true
         bakedRigAnimation = nil
-        bakedRigAnimationStatus = "Rotation edits changed. Bake rig animation before export."
+        bakedRigAnimationStatus = "Rotation overrides changed. Bake rig animation before export."
         applyCurrentFrameToLiveRig()
     }
 
@@ -2816,132 +2819,102 @@ final class RotoMotionViewModel: ObservableObject {
             videoPlaneZ: currentVideoPlaneZ
         )
 
-        applyKeyedRotationEditLayerToLiveRig()
-        applyLiveRotationDeltaLayerToLiveRig()
+        applyRotationOverridesToLiveRig()
     }
 
-    func applyKeyedRotationEditLayerToLiveRig() {
+    func applyRotationOverridesToLiveRig() {
         guard let session = skinnedRigSession else {
             return
         }
 
-        JointRotationEditApplier.applyKeyedRotationEditLayer(
+        JointRotationOverrideApplier.apply(
             to: session,
-            editLayer: rotationEditLayer,
+            overrideLayer: rotationOverrideLayer,
+            liveRotationOverrideEulerXYZByJoint: liveRotationOverrideEulerXYZByJoint,
             timeSeconds: currentVideoTimeSeconds
         )
     }
 
-    func applyLiveRotationDeltaLayerToLiveRig() {
-        guard let session = skinnedRigSession else {
-            return
-        }
-
-        JointRotationEditApplier.applyLiveRotationDeltaLayer(
-            to: session,
-            liveRotationEulerXYZByJoint: liveRotationEulerXYZByJoint
-        )
-    }
-
     func endRotationOrbiterDrag() {
-        rotationAuthoringStatus = "Editing \(selectedRotationJoint). Press Key Current Rotation to commit."
+        rotationAuthoringStatus = "Override ready for \(selectedRotationJoint). Press Key Current Rotation to commit."
         status = rotationAuthoringStatus
         applyCurrentFrameToLiveRig()
     }
 
-    func keyCurrentRotationEdit() {
+    func keyCurrentRotationOverride() {
         let joint = selectedRotationJoint
 
-        guard liveRotationEulerXYZByJoint[joint] != nil else {
-            rotationAuthoringStatus = "No live rotation delta for \(joint)."
+        guard let euler = liveRotationOverrideEulerXYZByJoint[joint]
+            ?? currentBoneEuler(for: joint) else {
+            rotationAuthoringStatus = "No override value for \(joint)."
             return
         }
 
-        let axisValues = ManualRotationConstraint.clampedAxisValues(
+        let clamped = ManualRotationConstraint.clampedEulerXYZ(
             joint: joint,
-            values: liveRotationEulerXYZByJoint[joint] ?? SIMD3<Float>(0, 0, 0)
+            values: euler
         )
 
-        let key = JointRotationEditLayer.Keyframe(
+        let key = JointRotationOverrideLayer.Keyframe(
             frameIndex: currentFrameIndex,
             timeSeconds: currentVideoTimeSeconds,
             eulerXYZ: [
-                Double(axisValues.x),
-                Double(axisValues.y),
-                Double(axisValues.z)
+                Double(clamped.x),
+                Double(clamped.y),
+                Double(clamped.z)
             ]
         )
 
         if cleanRotationKeysEnabled {
-            rotationEditLayer.keyframesByJoint[joint] = [key]
-            if ManualRotationChannelPolicy.usesXYZOnly(joint) {
-                rotationAuthoringStatus = "Clean-keyed \(joint) with XYZ-only key."
-            } else {
-                rotationAuthoringStatus = "Clean-keyed \(joint) with one constrained held key."
-            }
+            rotationOverrideLayer.keyframesByJoint[joint] = [key]
+            rotationAuthoringStatus = "Clean-keyed \(joint) with one override key."
         } else {
-            var keys = rotationEditLayer.keyframesByJoint[joint] ?? []
+            var keys = rotationOverrideLayer.keyframesByJoint[joint] ?? []
             keys.removeAll { $0.frameIndex == currentFrameIndex }
             keys.append(key)
             keys.sort { $0.timeSeconds < $1.timeSeconds }
-            rotationEditLayer.keyframesByJoint[joint] = keys
-            rotationAuthoringStatus = "Keyed \(joint) at frame \(currentFrameIndex)."
+            rotationOverrideLayer.keyframesByJoint[joint] = keys
+            rotationAuthoringStatus = "Keyed override for \(joint) at frame \(currentFrameIndex)."
         }
 
         status = rotationAuthoringStatus
-        liveRotationEulerXYZByJoint[joint] = nil
+        liveRotationOverrideEulerXYZByJoint[joint] = nil
         sessionIsDirty = true
         bakedRigAnimation = nil
-        bakedRigAnimationStatus = "Rotation edits changed. Bake rig animation before export."
+        bakedRigAnimationStatus = "Rotation overrides changed. Bake rig animation before export."
         diagnostics.log(rotationAuthoringStatus)
         applyCurrentFrameToLiveRig()
     }
 
-    func clearRotationKeysForSelectedJoint() {
-        rotationEditLayer.keyframesByJoint[selectedRotationJoint] = []
-        liveRotationEulerXYZByJoint[selectedRotationJoint] = nil
-        rotationAuthoringStatus = "Cleared keys for \(selectedRotationJoint)."
-        status = rotationAuthoringStatus
-        sessionIsDirty = true
-        bakedRigAnimation = nil
-        bakedRigAnimationStatus = "Rotation edits changed. Bake rig animation before export."
-        diagnostics.log(rotationAuthoringStatus)
-        applyCurrentFrameToLiveRig()
-    }
-
-    func cleanAllRotationKeysForSelectedJoint() {
+    func clearRotationOverrideForSelectedJoint() {
         let joint = selectedRotationJoint
-        let oldCount = rotationEditLayer.keyframesByJoint[joint]?.count ?? 0
+        let oldCount = rotationOverrideLayer.keyframesByJoint[joint]?.count ?? 0
 
-        // Rotation edit cleanup only.
-        // Does not modify ray-solved positions, normalized joints, or curve-pinned solve data.
-        rotationEditLayer.keyframesByJoint[joint] = []
-        liveRotationEulerXYZByJoint[joint] = nil
+        rotationOverrideLayer.keyframesByJoint[joint] = []
+        liveRotationOverrideEulerXYZByJoint[joint] = nil
 
         rotationAuthoringStatus = """
-        Cleaned all rotation keys for \(joint).
-        Removed \(oldCount) keys.
+        Removed all rotation overrides for \(joint).
+        Removed \(oldCount) keyed overrides.
         """
-
-        bakedRigAnimation = nil
-        bakedRigAnimationStatus = "Rotation edits changed. Bake rig animation before export."
         status = rotationAuthoringStatus
         sessionIsDirty = true
+        bakedRigAnimation = nil
+        bakedRigAnimationStatus = "Rotation overrides changed. Bake rig animation before export."
         diagnostics.log(rotationAuthoringStatus)
         applyCurrentFrameToLiveRig()
     }
 
-    func zeroLiveRotationDeltaForSelectedJoint() {
-        let joint = selectedRotationJoint
+    func currentManualOverrideEuler(for joint: String) -> SIMD3<Float>? {
+        JointRotationOverrideApplier.interpolatedRotationOverrideEuler(
+            joint: joint,
+            timeSeconds: currentVideoTimeSeconds,
+            overrideLayer: rotationOverrideLayer
+        )
+    }
 
-        liveRotationEulerXYZByJoint[joint] = nil
-        rotationAuthoringStatus = "Zeroed live XYZ rotation delta for \(joint)."
-        status = rotationAuthoringStatus
-        sessionIsDirty = true
-        bakedRigAnimation = nil
-        bakedRigAnimationStatus = "Rotation edits changed. Bake rig animation before export."
-        diagnostics.log(rotationAuthoringStatus)
-        applyCurrentFrameToLiveRig()
+    func currentBoneEuler(for joint: String) -> SIMD3<Float>? {
+        skinnedRigSession?.bonesByCanonicalName[joint]?.simdEulerAngles
     }
 
     func inspectCurrentJointFrame() {

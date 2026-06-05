@@ -2,7 +2,7 @@ import Foundation
 import simd
 
 enum ManualRotationConstraint {
-    static func clampedAxisValues(
+    static func clampedEulerXYZ(
         joint: String,
         values: SIMD3<Float>
     ) -> SIMD3<Float> {
@@ -29,7 +29,7 @@ enum ManualRotationConstraint {
         case "LeftForeArm", "RightForeArm":
             return "Y >= 0"
         case "LeftLeg", "RightLeg":
-            return "X <= 0, W locked/derived"
+            return "X <= 0"
         default:
             return "none"
         }

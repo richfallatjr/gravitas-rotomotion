@@ -34,7 +34,7 @@ struct RotoMotionSessionDocument: Codable {
     var normalizedCapture: NormalizedMeshyPoseCapture?
     var rayAnimationSolveResult: RotoRayAnimationSolveResult?
     var bakedRigAnimation: BakedRigAnimation?
-    var rotationEditLayer: JointRotationEditLayer
+    var rotationOverrideLayer: JointRotationOverrideLayer
 
     var selectedRotationJoint: String
     var cleanRotationKeysEnabled: Bool

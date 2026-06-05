@@ -175,8 +175,8 @@ struct ContentView: View {
                 referenceRigYawDegrees: roto.referenceRigYawDegrees,
                 applySolvedPoseToReferenceRig: roto.applySolvedPoseToReferenceRig,
                 rigRotationApplyMode: roto.rigRotationApplyMode,
-                rotationEditLayer: roto.rotationEditLayer,
-                liveRotationEulerXYZByJoint: roto.liveRotationEulerXYZByJoint,
+                rotationOverrideLayer: roto.rotationOverrideLayer,
+                liveRotationOverrideEulerXYZByJoint: roto.liveRotationOverrideEulerXYZByJoint,
                 showRawVision: roto.showRawVisionPoints,
                 showNormalizedMeshy: roto.showNormalizedMeshyPoints,
                 showSmoothedMeshy: false,
@@ -381,7 +381,7 @@ struct ContentView: View {
     }
 
     private var selectedRotationKeyCount: Int {
-        roto.rotationEditLayer.keyframesByJoint[roto.selectedRotationJoint]?.count ?? 0
+        roto.rotationOverrideLayer.keyframesByJoint[roto.selectedRotationJoint]?.count ?? 0
     }
 
     private var rotationAuthoringPanel: some View {
@@ -396,7 +396,7 @@ struct ContentView: View {
 
                 Toggle("Clean Keys Mode", isOn: $roto.cleanRotationKeysEnabled)
 
-                Text("Rotation keys on \(roto.selectedRotationJoint): \(selectedRotationKeyCount)")
+                Text("Rotation override keys on \(roto.selectedRotationJoint): \(selectedRotationKeyCount)")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
 
@@ -419,33 +419,20 @@ struct ContentView: View {
                 .frame(height: 160)
 
                 Button("Key Current Rotation") {
-                    roto.keyCurrentRotationEdit()
+                    roto.keyCurrentRotationOverride()
                     uiStatus = roto.status
                     pipelineRenderToken += 1
                 }
 
-                Button("Zero Live Rotation") {
-                    roto.zeroLiveRotationDeltaForSelectedJoint()
+                Button("Clear Rotation Override For Joint") {
+                    roto.clearRotationOverrideForSelectedJoint()
                     uiStatus = roto.status
                     pipelineRenderToken += 1
                 }
                 .disabled(
-                    roto.liveRotationEulerXYZByJoint[roto.selectedRotationJoint] == nil
+                    selectedRotationKeyCount == 0 &&
+                        roto.liveRotationOverrideEulerXYZByJoint[roto.selectedRotationJoint] == nil
                 )
-
-                Button("Clear Selected Joint Keys") {
-                    roto.clearRotationKeysForSelectedJoint()
-                    uiStatus = roto.status
-                    pipelineRenderToken += 1
-                }
-                .disabled(selectedRotationKeyCount == 0)
-
-                Button("Clean All Rotation Keys From Joint") {
-                    roto.cleanAllRotationKeysForSelectedJoint()
-                    uiStatus = roto.status
-                    pipelineRenderToken += 1
-                }
-                .disabled(selectedRotationKeyCount == 0)
 
                 Text(roto.rotationAuthoringStatus)
                     .font(.caption)

@@ -1,6 +1,6 @@
 import Foundation
 
-struct JointRotationEditLayer: Codable {
+struct JointRotationOverrideLayer: Codable {
     let schema: String
     var selectedJoint: String
     var cleanKeysEnabled: Bool
@@ -12,7 +12,7 @@ struct JointRotationEditLayer: Codable {
         let frameIndex: Int
         let timeSeconds: Double
 
-        /// Euler XYZ radians. Source of truth for manual rotation authoring.
+        /// Absolute replacement local Euler XYZ radians.
         var eulerXYZ: [Double]
 
         enum CodingKeys: String, CodingKey {
@@ -57,8 +57,8 @@ struct JointRotationEditLayer: Codable {
         }
     }
 
-    static let `default` = JointRotationEditLayer(
-        schema: "com.gravitas.rotomotion.rotation_edit_layer.v0",
+    static let `default` = JointRotationOverrideLayer(
+        schema: "com.gravitas.rotomotion.rotation_override_layer.v0",
         selectedJoint: "Head",
         cleanKeysEnabled: false,
         keyframesByJoint: [:]

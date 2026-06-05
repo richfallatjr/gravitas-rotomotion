@@ -70,7 +70,9 @@ enum SkinnedRigRotomationDriver {
         ["RightShoulder", "RightArm", "RightForeArm", "RightHand"]
     ]
 
-    static let headChain: [String] = [
+    static let torsoChain: [String] = [
+        "Hips",
+        "Spine",
         "neck",
         "Head",
         "headfront"
@@ -80,8 +82,6 @@ enum SkinnedRigRotomationDriver {
         "Left",
         "Right"
     ]
-
-    static let enableAutomaticHeadSolve = false
 
     static let solveChains: [[String]] = [
         ["neck", "Head", "headfront"],
@@ -112,29 +112,23 @@ enum SkinnedRigRotomationDriver {
             videoPlaneZ: videoPlaneZ
         )
         rays.removeValue(forKey: "Hips")
-        rays.removeValue(forKey: "Spine")
 
         if frame.frameIndex == 0 {
             print(
                 """
-                [CurvePinnedRotomation] Base pinning disabled:
-                  Hips ray used: false
-                  Spine ray used: false
-                  displayRoot moved by driver: false
-                  knees: pole-locked rest bend side
+                [CurvePinnedRotomation] Spine animation enabled:
+                  Hips ray pinned: false
+                  Spine solved as child of Hips: true
+                  displayRoot moved: false
                 """
             )
         }
 
         for _ in 0..<settings.iterations {
-            if enableAutomaticHeadSolve {
-                solvePinnedLimbOutsideIn(
-                    chain: headChain,
-                    rays: rays,
-                    session: session,
-                    iterations: 1
-                )
-            }
+            solveTorsoChain(
+                rays: rays,
+                session: session
+            )
 
             for chain in armChains {
                 solvePinnedLimbOutsideIn(
@@ -222,6 +216,41 @@ enum SkinnedRigRotomationDriver {
             session: session,
             force: true
         )
+    }
+
+    private static func solveTorsoChain(
+        rays: [String: JointRay],
+        session: SkinnedRigSession
+    ) {
+        for i in 0..<(torsoChain.count - 1) {
+            let parentName = torsoChain[i]
+            let childName = torsoChain[i + 1]
+
+            guard let parentNode = session.bonesByCanonicalName[parentName],
+                  let childNode = session.bonesByCanonicalName[childName],
+                  let childRay = rays[childName] else {
+                continue
+            }
+
+            let parentWorld = parentNode.simdWorldPosition
+            let childWorld = childNode.simdWorldPosition
+            let boneLength = max(
+                simd_length(childWorld - parentWorld),
+                0.0001
+            )
+            let target = pointOnRayAtDistanceFromParent(
+                ray: childRay,
+                parent: parentWorld,
+                distance: boneLength,
+                fallback: childWorld
+            )
+
+            rotateParentToMoveChild(
+                parentNode: parentNode,
+                childNode: childNode,
+                childTarget: target
+            )
+        }
     }
 
     private static func solvePinnedLimbOutsideIn(
@@ -552,8 +581,7 @@ enum SkinnedRigRotomationDriver {
         var count: Float = 0
 
         for jointName in session.jointOrder {
-            guard jointName != "Hips",
-                  jointName != "Spine" else {
+            guard jointName != "Hips" else {
                 continue
             }
 

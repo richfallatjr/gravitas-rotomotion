@@ -95,7 +95,7 @@ enum SkinnedRigPoseDriver {
                 continue
             }
 
-            let delta = JointRotationEditApplier.quaternionFromEulerXYZ(eulerXYZ)
+            let delta = quaternionFromEulerXYZ(eulerXYZ)
 
             bone.simdPosition = restPosition
 
@@ -153,5 +153,22 @@ enum SkinnedRigPoseDriver {
             bone.simdOrientation = restOrientation
             bone.simdScale = restScale
         }
+    }
+
+    private static func quaternionFromEulerXYZ(_ values: SIMD3<Float>) -> simd_quatf {
+        let qx = simd_quatf(
+            angle: values.x,
+            axis: SIMD3<Float>(1, 0, 0)
+        )
+        let qy = simd_quatf(
+            angle: values.y,
+            axis: SIMD3<Float>(0, 1, 0)
+        )
+        let qz = simd_quatf(
+            angle: values.z,
+            axis: SIMD3<Float>(0, 0, 1)
+        )
+
+        return qz * qy * qx
     }
 }
