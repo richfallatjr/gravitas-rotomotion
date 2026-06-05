@@ -975,10 +975,10 @@ enum StereoTargetRigRotomationDriver {
     static func rotomateFrameWithStereoTargets(
         _ frame: StereoMeshyJointCapture.Frame,
         session: SkinnedRigSession,
-        sceneUnitsPerMeter: Double,
+        metersToSceneUnits: Float,
         iterations: Int = 6
     ) {
-        let targetScale = Float(max(sceneUnitsPerMeter, 0.0001))
+        let targetScale = max(metersToSceneUnits, 0.0001)
 
         SCNTransaction.begin()
         SCNTransaction.animationDuration = 0
@@ -1239,6 +1239,7 @@ enum StereoTargetRigRotomationDriver {
           avgPositionError: \(averageError)
           worstJoint: \(worstJoint)
           worstError: \(worstError)
+          metersToSceneUnits: \(targetScale)
         """)
     }
 }

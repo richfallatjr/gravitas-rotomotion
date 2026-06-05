@@ -204,7 +204,7 @@ struct ContentView: View {
                 showRaySolvedRig: roto.showDebugSolvedSkeleton,
                 showSkinnedRig: roto.showSkinnedRig,
                 showRotationGizmo: roto.showRotationGizmo,
-                stereoSceneUnitsPerMeter: roto.raySceneUnitsPerMeter,
+                stereoMetersToRigSceneUnits: roto.stereoMetersToRigSceneUnits,
                 solveTargetMode: roto.solveTargetMode,
                 rotationGizmoSpace: roto.rotationGizmoSpace,
                 selectedRotationJoint: roto.selectedRotationJoint,

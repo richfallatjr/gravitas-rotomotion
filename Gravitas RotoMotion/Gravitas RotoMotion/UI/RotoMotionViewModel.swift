@@ -486,6 +486,15 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var raySceneUnitsPerMeter = 5.0 {
         didSet { persist(raySceneUnitsPerMeter, AppStorageKeys.raySceneUnitsPerMeter) }
     }
+    var stereoMetersToRigSceneUnits: Float {
+        let unitScaleToMeters = Float(referenceRigProfile?.unitScaleToMeters ?? 1.0)
+
+        guard unitScaleToMeters > 0 else {
+            return 1.0
+        }
+
+        return 1.0 / unitScaleToMeters
+    }
     @Published var useCalibratedRigDepth = false {
         didSet { persist(useCalibratedRigDepth, AppStorageKeys.useCalibratedRigDepth) }
     }
@@ -1709,6 +1718,52 @@ final class RotoMotionViewModel: ObservableObject {
     }
 
     func solveFullAnimationWithCameraRays() {
+        if captureMode == .spatialVideo {
+            guard let stereoJointCapture else {
+                rayAnimationSolveStatus = "Spatial solve failed: no stereoJointCapture."
+                status = rayAnimationSolveStatus
+                diagnostics.log("""
+                Spatial solve failed:
+                  reason: no stereoJointCapture
+                  solveTargetMode: \(solveTargetMode.rawValue)
+                """)
+                return
+            }
+
+            if let referenceRigProfile {
+                captureSessionSkeletonIdentity(from: referenceRigProfile)
+            } else {
+                captureCanonicalSessionSkeletonIdentity()
+            }
+
+            solveTargetMode = .spatialStereo3D
+            applySolvedPoseToReferenceRig = true
+            showSkinnedRig = true
+            currentRaySolveResult = nil
+            rayAnimationSolveResult = nil
+            sessionArmatureSnapshot = nil
+            sessionArmaturePoseBuffer = nil
+            bakedRigAnimation = nil
+            bakedRigAnimationStatus = "Spatial stereo solve changed. Bake rig animation before export."
+            sessionPoseSource = .posedArmatureLocalTransforms
+            sessionPoseStatus = """
+            The actual skinned rig is rotomated live from triangulated stereo 3D joint targets.
+            Stereo target positions are converted from meters into the reference rig's native scene units.
+            """
+            raySolveStatus = "Single-frame ray solve cleared."
+            rayAnimationSolveStatus = "Spatial stereo target solve enabled for \(stereoJointCapture.frames.count) frames."
+            status = rayAnimationSolveStatus
+
+            diagnostics.log("""
+            Solve Full Animation using spatial stereo 3D targets.
+              stereoFrames: \(stereoJointCapture.frames.count)
+              metersToSceneUnits: \(stereoMetersToRigSceneUnits)
+              referenceUnitScaleToMeters: \(referenceRigProfile?.unitScaleToMeters ?? 1.0)
+              applySolvedPoseToReferenceRig: \(applySolvedPoseToReferenceRig)
+            """)
+            return
+        }
+
         guard let normalizedCapture else {
             rayAnimationSolveStatus = "Normalize Meshy24 before ray solve."
             status = rayAnimationSolveStatus

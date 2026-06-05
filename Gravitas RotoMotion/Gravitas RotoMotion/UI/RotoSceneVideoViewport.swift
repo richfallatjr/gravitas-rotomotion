@@ -127,7 +127,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let showRaySolvedRig: Bool
     let showSkinnedRig: Bool
     let showRotationGizmo: Bool
-    let stereoSceneUnitsPerMeter: Double
+    let stereoMetersToRigSceneUnits: Float
     let solveTargetMode: RotoSolveTargetMode
     let rotationGizmoSpace: RotationGizmoSpace
     let selectedRotationJoint: String
@@ -193,7 +193,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             showRaySolvedRig: showRaySolvedRig,
             showSkinnedRig: showSkinnedRig,
             showRotationGizmo: showRotationGizmo,
-            stereoSceneUnitsPerMeter: stereoSceneUnitsPerMeter,
+            stereoMetersToRigSceneUnits: stereoMetersToRigSceneUnits,
             solveTargetMode: solveTargetMode,
             rotationGizmoSpace: rotationGizmoSpace,
             selectedRotationJoint: selectedRotationJoint
@@ -417,7 +417,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             showRaySolvedRig: Bool,
             showSkinnedRig: Bool,
             showRotationGizmo: Bool,
-            stereoSceneUnitsPerMeter: Double,
+            stereoMetersToRigSceneUnits: Float,
             solveTargetMode: RotoSolveTargetMode,
             rotationGizmoSpace: RotationGizmoSpace,
             selectedRotationJoint: String
@@ -453,7 +453,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 normalizedFrame: normalizedFrame,
                 stereoTargetFrame: stereoTargetFrame,
                 solveTargetMode: solveTargetMode,
-                stereoSceneUnitsPerMeter: stereoSceneUnitsPerMeter,
+                stereoMetersToRigSceneUnits: stereoMetersToRigSceneUnits,
                 referenceRigScaleMultiplier: referenceRigScaleMultiplier,
                 referenceRigX: referenceRigX,
                 referenceRigY: referenceRigY,
@@ -496,7 +496,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             updateStereoDepthOverlay(
                 stereoJointFrame,
                 visible: showStereo3DSkeleton,
-                sceneUnitsPerMeter: stereoSceneUnitsPerMeter
+                metersToRigSceneUnits: stereoMetersToRigSceneUnits
             )
             updateStereoReprojectionOverlay(
                 stereoJointFrame,
@@ -937,7 +937,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private func updateStereoDepthOverlay(
             _ frame: StereoMeshyJointCapture.Frame?,
             visible: Bool,
-            sceneUnitsPerMeter: Double
+            metersToRigSceneUnits: Float
         ) {
             stereoSkeletonRoot.isHidden = !visible
             removeAllChildren(from: stereoSkeletonRoot)
@@ -946,7 +946,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 return
             }
 
-            let scale = Float(max(sceneUnitsPerMeter, 0.0001))
+            let scale = max(metersToRigSceneUnits, 0.0001)
             var positions: [String: SIMD3<Float>] = [:]
 
             for (name, joint) in frame.joints where joint.validStereo && joint.positionCameraXYZ.count == 3 {
@@ -1116,7 +1116,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             normalizedFrame: NormalizedMeshyPoseCapture.Frame?,
             stereoTargetFrame: StereoMeshyJointCapture.Frame?,
             solveTargetMode: RotoSolveTargetMode,
-            stereoSceneUnitsPerMeter: Double,
+            stereoMetersToRigSceneUnits: Float,
             referenceRigScaleMultiplier: Double,
             referenceRigX: Double,
             referenceRigY: Double,
@@ -1174,7 +1174,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 StereoTargetRigRotomationDriver.rotomateFrameWithStereoTargets(
                     stereoTargetFrame,
                     session: session,
-                    sceneUnitsPerMeter: stereoSceneUnitsPerMeter
+                    metersToSceneUnits: stereoMetersToRigSceneUnits
                 )
 
                 applyViewportRotationOverrides(
