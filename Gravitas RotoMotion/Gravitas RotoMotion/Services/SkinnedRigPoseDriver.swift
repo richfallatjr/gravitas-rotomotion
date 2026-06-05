@@ -11,11 +11,15 @@ enum SkinnedRigPoseDriver {
 
         for jointName in session.jointOrder {
             guard let bone = session.bonesByCanonicalName[jointName],
-                  let rest = session.restLocalTransforms[jointName] else {
+                  let restPosition = session.restLocalPositions[jointName],
+                  let restOrientation = session.restLocalOrientations[jointName],
+                  let restScale = session.restLocalScales[jointName] else {
                 continue
             }
 
-            bone.simdTransform = rest
+            bone.simdPosition = restPosition
+            bone.simdOrientation = restOrientation
+            bone.simdScale = restScale
         }
 
         SCNTransaction.commit()
@@ -28,36 +32,65 @@ enum SkinnedRigPoseDriver {
         SCNTransaction.begin()
         SCNTransaction.animationDuration = 0
 
-        for jointName in session.jointOrder {
-            guard let bone = session.bonesByCanonicalName[jointName],
-                  let rest = session.restLocalTransforms[jointName] else {
-                continue
-            }
+        var applied = 0
+        var missing = 0
 
-            bone.simdTransform = rest
-        }
+        resetToRestWithoutTransaction(session: session)
 
         for jointName in session.jointOrder {
             guard let bone = session.bonesByCanonicalName[jointName],
                   let restPosition = session.restLocalPositions[jointName],
                   let restOrientation = session.restLocalOrientations[jointName],
                   let restScale = session.restLocalScales[jointName],
-                  let localRotation = frame.localRotationsWXYZ[jointName] else {
+                  let qWXYZ = frame.localRotationsWXYZ[jointName] else {
+                missing += 1
                 continue
             }
 
             let delta = simd_quatf(
-                ix: localRotation.y,
-                iy: localRotation.z,
-                iz: localRotation.w,
-                r: localRotation.x
+                vector: SIMD4<Float>(
+                    qWXYZ.y,
+                    qWXYZ.z,
+                    qWXYZ.w,
+                    qWXYZ.x
+                )
             )
 
             bone.simdPosition = restPosition
             bone.simdOrientation = restOrientation * delta
             bone.simdScale = restScale
+
+            applied += 1
         }
 
         SCNTransaction.commit()
+
+        if frame.frameIndex == 0 || frame.frameIndex % 30 == 0 {
+            print(
+                """
+                [SkinnedRigPoseDriver] Applied solved frame
+                  frame: \(frame.frameIndex)
+                  applied: \(applied)
+                  missing: \(missing)
+                """
+            )
+        }
+    }
+
+    private static func resetToRestWithoutTransaction(
+        session: SkinnedRigSession
+    ) {
+        for jointName in session.jointOrder {
+            guard let bone = session.bonesByCanonicalName[jointName],
+                  let restPosition = session.restLocalPositions[jointName],
+                  let restOrientation = session.restLocalOrientations[jointName],
+                  let restScale = session.restLocalScales[jointName] else {
+                continue
+            }
+
+            bone.simdPosition = restPosition
+            bone.simdOrientation = restOrientation
+            bone.simdScale = restScale
+        }
     }
 }

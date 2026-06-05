@@ -703,7 +703,12 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 )
             }
 
-            applyReferenceRigDisplayPlacement(session: session)
+            applyReferenceRigDisplayPlacement(
+                session: session,
+                x: referenceRigX,
+                y: referenceRigY,
+                z: referenceRigZ
+            )
 
             session.displayRootNode.isHidden = !visible
             rigBoundsRoot.isHidden = !visible
@@ -716,9 +721,16 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         }
 
         private func applyReferenceRigDisplayPlacement(
-            session: SkinnedRigSession
+            session: SkinnedRigSession,
+            x: Double,
+            y: Double,
+            z: Double
         ) {
-            session.displayRootNode.simdPosition = SIMD3<Float>(0, -0.75, -2)
+            session.displayRootNode.simdPosition = SIMD3<Float>(
+                Float(x),
+                Float(y),
+                Float(z)
+            )
 
             session.displayRootNode.simdScale = SIMD3<Float>(1, 1, 1)
 
@@ -740,6 +752,9 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
 
             let signature = [
                 session.sourceURL.path,
+                String(format: "x=%.4f", x),
+                String(format: "y=%.4f", y),
+                String(format: "z=%.4f", z),
                 "fixed-reference-display-transform"
             ].joined(separator: "|")
 

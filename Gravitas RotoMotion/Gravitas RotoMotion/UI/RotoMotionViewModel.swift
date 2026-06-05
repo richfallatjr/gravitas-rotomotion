@@ -264,7 +264,7 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var referenceRigYawDegrees: Double = 0.0 {
         didSet { persist(referenceRigYawDegrees, AppStorageKeys.referenceRigYawDegrees) }
     }
-    @Published var applySolvedPoseToReferenceRig = false {
+    @Published var applySolvedPoseToReferenceRig = true {
         didSet { persist(applySolvedPoseToReferenceRig, AppStorageKeys.applySolvedPoseToReferenceRig) }
     }
     @Published var referenceRigVisibleHeightFraction = 0.65 {
@@ -1049,6 +1049,8 @@ final class RotoMotionViewModel: ObservableObject {
             return
         }
 
+        fitReferenceRigHipsSpineIfPossible()
+
         if let referenceRigProfile {
             captureSessionSkeletonIdentity(from: referenceRigProfile)
         } else {
@@ -1122,42 +1124,18 @@ final class RotoMotionViewModel: ObservableObject {
             settings: solverSettings
         )
 
-        if applySolvedPoseToReferenceRig,
-           let session = skinnedRigSession,
-           let calibrationFrame = currentNormalizedFrame,
-           let rootDepthZ {
-            SkinnedRigPlacementSolver.placeRig(
-                session: session,
-                normalizedFrame: calibrationFrame,
-                rootDepthZ: rootDepthZ,
-                cameraOrigin: SIMD3<Float>(0, 0, cameraZ),
-                videoPlaneSize: videoPlaneSize,
-                videoPlaneZ: currentVideoPlaneZ
-            )
-            referenceRigCurrentZ = session.displayRootNode.simdPosition.z
-            updateReferenceRigPlacementStatus(
-                rigZ: referenceRigCurrentZ,
-                context: "Reference rig placement after solve"
-            )
-        }
-
         rayAnimationSolveResult = result
+        applySolvedPoseToReferenceRig = true
+        showSkinnedRig = true
         sessionArmatureSnapshot = nil
         sessionArmaturePoseBuffer = nil
 
         if skinnedRigSession != nil {
             sessionPoseSource = .posedArmatureLocalTransforms
-            if applySolvedPoseToReferenceRig {
-                sessionPoseStatus = """
-                Viewport is using real SCNSkinner bone nodes.
-                Current frame is posed from the ray solve; export will bake and sample those bone-node local transforms.
-                """
-            } else {
-                sessionPoseStatus = """
-                Viewport is using real SCNSkinner bone nodes.
-                Reference rig placement is manual; ray solve is not applied to the visible rig.
-                """
-            }
+            sessionPoseStatus = """
+            Viewport is using real SCNSkinner bone nodes.
+            Solve Full Animation is driving the loaded reference rig.
+            """
         } else {
             sessionPoseSource = .drawnJointPositions
             sessionPoseStatus = """
@@ -1169,6 +1147,13 @@ final class RotoMotionViewModel: ObservableObject {
         raySolveStatus = "Single-frame ray solve cleared."
         rayAnimationSolveStatus = "Solved \(result.frames.count) frames at \(String(format: "%.2f", result.targetHeightMeters)) m."
         status = rayAnimationSolveStatus
+        diagnostics.log("""
+        Solve Full Animation complete. Live skinned rig driving enabled:
+          applySolvedPoseToReferenceRig: \(applySolvedPoseToReferenceRig)
+          solvedFrames: \(result.frames.count)
+          currentFrame: \(currentFrameIndex)
+          currentRaySolvedFrame exists: \(currentRaySolvedFrame != nil)
+        """)
         diagnostics.log("""
         Ray animation solve complete:
           frames: \(result.frames.count)
@@ -1250,6 +1235,8 @@ final class RotoMotionViewModel: ObservableObject {
             diagnostics.log(skinnedRigStatus)
             diagnostics.log(referenceRigPlacementStatus)
             diagnostics.log(sessionPoseStatus)
+
+            fitReferenceRigHipsSpineIfPossible()
         } catch {
             skinnedRigSession = nil
             sessionArmaturePoseBuffer = nil
@@ -2276,6 +2263,8 @@ final class RotoMotionViewModel: ObservableObject {
             diagnostics.log(skinnedRigStatus)
             diagnostics.log(referenceRigPlacementStatus)
             diagnostics.log(sessionPoseStatus)
+
+            fitReferenceRigHipsSpineIfPossible()
         } catch {
             skinnedRigSession = nil
             sessionArmaturePoseBuffer = nil
@@ -2293,6 +2282,69 @@ final class RotoMotionViewModel: ObservableObject {
             status = skinnedRigStatus
             diagnostics.log(skinnedRigStatus)
         }
+    }
+
+    func fitReferenceRigHipsSpineIfPossible() {
+        guard let session = skinnedRigSession else {
+            diagnostics.log("Hips<->Spine fit skipped: no skinnedRigSession.")
+            return
+        }
+
+        guard let frame = currentNormalizedFrame ?? normalizedCapture?.frames.first else {
+            diagnostics.log("Hips<->Spine fit skipped: no normalized frame.")
+            return
+        }
+
+        guard let videoPlaneSize = currentVideoPlaneSize else {
+            diagnostics.log("Hips<->Spine fit skipped: no videoPlaneSize.")
+            return
+        }
+
+        applyCurrentReferenceRigDisplayTransform(to: session)
+
+        guard let result = ReferenceRigHipsSpineFitter.fit(
+            session: session,
+            normalizedFrame: frame,
+            cameraOrigin: SIMD3<Float>(0, 0, cameraZ),
+            videoPlaneSize: videoPlaneSize,
+            videoPlaneZ: currentVideoPlaneZ
+        ) else {
+            diagnostics.log("Hips<->Spine fit failed: missing Hips/Spine data.")
+            return
+        }
+
+        referenceRigX = Double(result.finalRootPosition.x)
+        referenceRigY = Double(result.finalRootPosition.y)
+        referenceRigZ = Double(result.finalRootPosition.z)
+        referenceRigCurrentZ = result.finalRootPosition.z
+
+        referenceRigPlacementStatus = """
+        Reference Hips<->Spine fit applied:
+          fittedZ: \(String(format: "%.4f", result.fittedZ))
+          error: \(String(format: "%.6f", result.error))
+          targetLength: \(String(format: "%.6f", result.targetLength))
+          projectedLength: \(String(format: "%.6f", result.projectedLength))
+          finalRootPosition: \(result.finalRootPosition)
+        """
+
+        diagnostics.log(referenceRigPlacementStatus)
+    }
+
+    private func applyCurrentReferenceRigDisplayTransform(
+        to session: SkinnedRigSession
+    ) {
+        session.displayRootNode.simdPosition = SIMD3<Float>(
+            Float(referenceRigX),
+            Float(referenceRigY),
+            Float(referenceRigZ)
+        )
+        session.displayRootNode.simdScale = SIMD3<Float>(1, 1, 1)
+        session.displayRootNode.simdEulerAngles = SIMD3<Float>(
+            -Float.pi / 2.0,
+            Float.pi * 2.0,
+            0
+        )
+        session.correctionNode.simdEulerAngles = SIMD3<Float>(0, 0, 0)
     }
 
     func chooseTargetCharacterUSDZ() {

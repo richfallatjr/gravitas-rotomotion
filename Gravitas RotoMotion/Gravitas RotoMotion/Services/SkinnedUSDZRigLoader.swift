@@ -24,13 +24,16 @@ enum SkinnedUSDZRigLoader {
 
         let placementNode = SCNNode()
         placementNode.name = "ReferenceRigPlacementNode"
+        placementNode.isPaused = true
 
         let correctionNode = SCNNode()
         correctionNode.name = "ReferenceRigCorrectionNode"
         correctionNode.simdEulerAngles = SIMD3<Float>(0, yawCorrectionRadians, 0)
+        correctionNode.isPaused = true
 
         let importedRigRoot = SCNNode()
         importedRigRoot.name = "ReferenceRigImportedRoot"
+        importedRigRoot.isPaused = true
 
         placementNode.addChildNode(correctionNode)
         correctionNode.addChildNode(importedRigRoot)
@@ -60,6 +63,7 @@ enum SkinnedUSDZRigLoader {
 
         if let skeleton = skinner.skeleton {
             removeAllAnimationsRecursively(skeleton)
+            skeleton.isPaused = true
         }
 
         for bone in skinner.bones {
