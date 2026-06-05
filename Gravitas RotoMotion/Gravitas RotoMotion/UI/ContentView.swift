@@ -437,56 +437,29 @@ struct ContentView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
-                        HStack {
-                            Text("X")
-                                .frame(width: 20, alignment: .leading)
+                        ScrollWheelDegreeField(
+                            label: "X",
+                            value: $roto.selectedJointEulerDegreesX,
+                            onValueChanged: { newValue in
+                                roto.setSelectedJointEulerDegrees(x: newValue)
+                            }
+                        )
 
-                            TextField(
-                                "X",
-                                value: Binding(
-                                    get: { roto.selectedJointEulerDegreesX },
-                                    set: { roto.setSelectedJointEulerDegrees(x: $0) }
-                                ),
-                                format: .number.precision(.fractionLength(2))
-                            )
-                            .textFieldStyle(.roundedBorder)
+                        ScrollWheelDegreeField(
+                            label: "Y",
+                            value: $roto.selectedJointEulerDegreesY,
+                            onValueChanged: { newValue in
+                                roto.setSelectedJointEulerDegrees(y: newValue)
+                            }
+                        )
 
-                            Text("°")
-                        }
-
-                        HStack {
-                            Text("Y")
-                                .frame(width: 20, alignment: .leading)
-
-                            TextField(
-                                "Y",
-                                value: Binding(
-                                    get: { roto.selectedJointEulerDegreesY },
-                                    set: { roto.setSelectedJointEulerDegrees(y: $0) }
-                                ),
-                                format: .number.precision(.fractionLength(2))
-                            )
-                            .textFieldStyle(.roundedBorder)
-
-                            Text("°")
-                        }
-
-                        HStack {
-                            Text("Z")
-                                .frame(width: 20, alignment: .leading)
-
-                            TextField(
-                                "Z",
-                                value: Binding(
-                                    get: { roto.selectedJointEulerDegreesZ },
-                                    set: { roto.setSelectedJointEulerDegrees(z: $0) }
-                                ),
-                                format: .number.precision(.fractionLength(2))
-                            )
-                            .textFieldStyle(.roundedBorder)
-
-                            Text("°")
-                        }
+                        ScrollWheelDegreeField(
+                            label: "Z",
+                            value: $roto.selectedJointEulerDegreesZ,
+                            onValueChanged: { newValue in
+                                roto.setSelectedJointEulerDegrees(z: newValue)
+                            }
+                        )
 
                         Text("Euler XYZ override. No W / quaternion channel.")
                             .font(.caption2)
@@ -1385,6 +1358,116 @@ struct ContentView: View {
         uiSecurityScopedAccessActive = false
     }
 
+}
+
+struct ScrollWheelDegreeField: View {
+    let label: String
+    @Binding var value: Double
+    let onValueChanged: (Double) -> Void
+
+    var stepDegrees: Double = 1.0
+    var scrollUnitsPerStep: CGFloat = 10.0
+
+    @State private var isHovered = false
+    @State private var scrollAccumulator: CGFloat = 0
+    @State private var monitor: Any?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(label)
+                .font(.caption)
+                .monospaced()
+                .frame(width: 16, alignment: .leading)
+                .foregroundStyle(.secondary)
+
+            TextField(
+                label,
+                value: Binding(
+                    get: { value },
+                    set: { newValue in
+                        value = newValue
+                        onValueChanged(newValue)
+                    }
+                ),
+                format: .number.precision(.fractionLength(2))
+            )
+            .textFieldStyle(.roundedBorder)
+            .monospacedDigit()
+            .frame(width: 82)
+
+            Text("°")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            isHovered = hovering
+
+            if hovering {
+                installScrollMonitor()
+            } else {
+                removeScrollMonitor()
+                scrollAccumulator = 0
+            }
+        }
+        .onDisappear {
+            removeScrollMonitor()
+            scrollAccumulator = 0
+        }
+    }
+
+    private func installScrollMonitor() {
+        guard monitor == nil else {
+            return
+        }
+
+        monitor = NSEvent.addLocalMonitorForEvents(
+            matching: .scrollWheel
+        ) { event in
+            guard isHovered else {
+                return event
+            }
+
+            handleScroll(event)
+            return nil
+        }
+    }
+
+    private func removeScrollMonitor() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+    }
+
+    private func handleScroll(_ event: NSEvent) {
+        let dominantDelta: CGFloat
+
+        if abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) {
+            dominantDelta = event.scrollingDeltaX
+        } else {
+            dominantDelta = event.scrollingDeltaY
+        }
+
+        guard abs(dominantDelta) > 0.0001 else {
+            return
+        }
+
+        scrollAccumulator += dominantDelta
+
+        let rawSteps = scrollAccumulator / scrollUnitsPerStep
+        let wholeSteps = Int(rawSteps.rounded(.towardZero))
+
+        guard wholeSteps != 0 else {
+            return
+        }
+
+        scrollAccumulator -= CGFloat(wholeSteps) * scrollUnitsPerStep
+
+        let newValue = value + Double(wholeSteps) * stepDegrees
+        value = newValue
+        onValueChanged(newValue)
+    }
 }
 
 struct RotationKeyTimelineMarkers: View {
