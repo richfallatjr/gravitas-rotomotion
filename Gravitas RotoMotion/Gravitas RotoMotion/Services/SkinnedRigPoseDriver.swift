@@ -2,6 +2,12 @@ import Foundation
 import SceneKit
 import simd
 
+enum RigRotationApplyMode: String {
+    case restThenDelta
+    case deltaThenRest
+    case deltaOnly
+}
+
 enum SkinnedRigPoseDriver {
     static func resetToRest(
         session: SkinnedRigSession
@@ -27,7 +33,8 @@ enum SkinnedRigPoseDriver {
 
     static func applySolvedFrame(
         _ frame: RotoRayAnimationSolveResult.Frame,
-        to session: SkinnedRigSession
+        to session: SkinnedRigSession,
+        mode: RigRotationApplyMode = .restThenDelta
     ) {
         SCNTransaction.begin()
         SCNTransaction.animationDuration = 0
@@ -57,7 +64,16 @@ enum SkinnedRigPoseDriver {
             )
 
             bone.simdPosition = restPosition
-            bone.simdOrientation = restOrientation * delta
+
+            switch mode {
+            case .restThenDelta:
+                bone.simdOrientation = restOrientation * delta
+            case .deltaThenRest:
+                bone.simdOrientation = delta * restOrientation
+            case .deltaOnly:
+                bone.simdOrientation = delta
+            }
+
             bone.simdScale = restScale
 
             applied += 1
@@ -70,6 +86,7 @@ enum SkinnedRigPoseDriver {
                 """
                 [SkinnedRigPoseDriver] Applied solved frame
                   frame: \(frame.frameIndex)
+                  rotationApplyMode: \(mode.rawValue)
                   applied: \(applied)
                   missing: \(missing)
                 """

@@ -116,6 +116,11 @@ enum SkinnedUSDZRigLoader {
         placementNode.simdPosition = SIMD3<Float>(0, 0, defaultRigZ)
         placementNode.simdEulerAngles = SIMD3<Float>(0, 0, 0)
 
+        for joint in CanonicalRig.jointNames {
+            let boneName = bonesByCanonicalName[joint]?.name ?? "MISSING"
+            print("[SkinnedUSDZRigLoader] canonical \(joint) -> SCN bone \(boneName)")
+        }
+
         return SkinnedRigSession(
             sourceURL: url,
             displayRootNode: placementNode,

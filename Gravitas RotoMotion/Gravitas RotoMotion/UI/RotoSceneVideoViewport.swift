@@ -72,6 +72,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let referenceRigZ: Double
     let referenceRigYawDegrees: Double
     let applySolvedPoseToReferenceRig: Bool
+    let rigRotationApplyMode: RigRotationApplyMode
 
     let showRawVision: Bool
     let showNormalizedMeshy: Bool
@@ -114,6 +115,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             referenceRigZ: referenceRigZ,
             referenceRigYawDegrees: referenceRigYawDegrees,
             applySolvedPoseToReferenceRig: applySolvedPoseToReferenceRig,
+            rigRotationApplyMode: rigRotationApplyMode,
             showRawVision: showRawVision,
             showNormalizedMeshy: showNormalizedMeshy,
             showSmoothedMeshy: showSmoothedMeshy,
@@ -276,6 +278,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             referenceRigZ: Double,
             referenceRigYawDegrees: Double,
             applySolvedPoseToReferenceRig: Bool,
+            rigRotationApplyMode: RigRotationApplyMode,
             showRawVision: Bool,
             showNormalizedMeshy: Bool,
             showSmoothedMeshy: Bool,
@@ -302,9 +305,6 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 clearVideoPlaneIfNeeded()
             }
             updateGroundPlane(groundPlane: groundPlane, visible: showGroundPlane)
-            updateRawOverlay(rawFrame, visible: showRawVision)
-            updateNormalizedOverlay(normalizedFrame, visible: showNormalizedMeshy)
-            updateSmoothedOverlay(smoothedFrame, visible: showSmoothedMeshy)
             updateSkinnedRig(
                 session: skinnedRigSession,
                 frame: raySolvedFrame,
@@ -314,8 +314,12 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 referenceRigZ: referenceRigZ,
                 referenceRigYawDegrees: referenceRigYawDegrees,
                 applySolvedPoseToReferenceRig: applySolvedPoseToReferenceRig,
+                rigRotationApplyMode: rigRotationApplyMode,
                 visible: showSkinnedRig
             )
+            updateRawOverlay(rawFrame, visible: showRawVision)
+            updateNormalizedOverlay(normalizedFrame, visible: showNormalizedMeshy)
+            updateSmoothedOverlay(smoothedFrame, visible: showSmoothedMeshy)
             updateRaySolveDebug(
                 result: raySolveResult,
                 raySolvedFrame: raySolvedFrame,
@@ -502,6 +506,25 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             )
         }
 
+        private func pointOnCurrentImagePlane(
+            x: Double,
+            y: Double,
+            zOffsetTowardCamera: Float
+        ) -> SIMD3<Float> {
+            let px = (Float(x) - 0.5) * Float(videoPlaneSize.width)
+            let py = (Float(y) - 0.5) * Float(videoPlaneSize.height)
+
+            return SIMD3<Float>(
+                px,
+                py,
+                currentVideoPlaneZ + zOffsetTowardCamera
+            )
+        }
+
+        private func currentRawVisionPointRadius() -> CGFloat {
+            max(0.75, videoPlaneSize.height * 0.0015)
+        }
+
         private func updateRawOverlay(
             _ frame: RawVisionPoseCapture.PoseFrame?,
             visible: Bool
@@ -513,19 +536,37 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 return
             }
 
+            var count = 0
+
             for (_, joint) in frame.joints {
-                let node = makePointNode(
-                    color: NSColor.orange.withAlphaComponent(
-                        CGFloat(max(0.25, min(joint.confidence, 1.0)))
-                    ),
-                    radius: 0.055
-                )
-                node.position = pointOnVideoPlane(
+                let p = pointOnCurrentImagePlane(
                     x: joint.x,
                     y: joint.y,
-                    zOffset: 0.035
+                    zOffsetTowardCamera: 0.50
                 )
+
+                let node = makePointNode(
+                    color: NSColor.systemOrange.withAlphaComponent(
+                        CGFloat(max(0.25, min(joint.confidence, 1.0)))
+                    ),
+                    radius: currentRawVisionPointRadius()
+                )
+                node.position = SCNVector3(p.x, p.y, p.z)
+                node.renderingOrder = 500
                 rawOverlayRoot.addChildNode(node)
+
+                count += 1
+            }
+
+            if frame.frameIndex == 0 || frame.frameIndex % 30 == 0 {
+                print(
+                    """
+                    [RotoSceneVideoViewport] Raw Vision overlay updated
+                      visible: \(visible)
+                      frame: \(frame.frameIndex)
+                      jointsDrawn: \(count)
+                    """
+                )
             }
         }
 
@@ -666,6 +707,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             referenceRigZ: Double,
             referenceRigYawDegrees: Double,
             applySolvedPoseToReferenceRig: Bool,
+            rigRotationApplyMode: RigRotationApplyMode,
             visible: Bool
         ) {
             guard let session else {
@@ -714,7 +756,11 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             rigBoundsRoot.isHidden = !visible
 
             if applySolvedPoseToReferenceRig, let frame {
-                SkinnedRigPoseDriver.applySolvedFrame(frame, to: session)
+                SkinnedRigPoseDriver.applySolvedFrame(
+                    frame,
+                    to: session,
+                    mode: rigRotationApplyMode
+                )
             } else {
                 SkinnedRigPoseDriver.resetToRest(session: session)
             }

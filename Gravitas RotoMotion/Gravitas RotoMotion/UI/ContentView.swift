@@ -157,6 +157,7 @@ struct ContentView: View {
                 referenceRigZ: roto.referenceRigZ,
                 referenceRigYawDegrees: roto.referenceRigYawDegrees,
                 applySolvedPoseToReferenceRig: roto.applySolvedPoseToReferenceRig,
+                rigRotationApplyMode: roto.rigRotationApplyMode,
                 showRawVision: roto.showRawVisionPoints,
                 showNormalizedMeshy: roto.showNormalizedMeshyPoints,
                 showSmoothedMeshy: false,
@@ -344,6 +345,16 @@ struct ContentView: View {
                     .monospaced()
 
                 Text(roto.sessionPoseStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button("Inspect Current Joint Frame") {
+                    roto.inspectCurrentJointFrame()
+                }
+                .disabled(roto.skinnedRigSession == nil || roto.rayAnimationSolveResult == nil)
+
+                Text(roto.jointDebugStatus)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

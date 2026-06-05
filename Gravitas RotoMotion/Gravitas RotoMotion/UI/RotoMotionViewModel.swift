@@ -276,6 +276,12 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var referenceRigPlacementStatus = "Reference rig not placed."
     @Published var referenceRigVisibilityStatus = "Reference rig not fitted."
     @Published var referenceRigProfile: USDZSkeletonProfile?
+    @Published var jointDebugStatus = "Joint debug not run."
+    @Published var jointDebugFrameIndex = 0
+    @Published var jointDebugJointName = "RightArm"
+    @Published var rigRotationApplyMode: RigRotationApplyMode = .restThenDelta {
+        didSet { persist(rigRotationApplyMode.rawValue, AppStorageKeys.rigRotationApplyMode) }
+    }
     @Published var sessionSkeletonPath: String?
     @Published var sessionJointPaths: [String] = []
     @Published var sessionJointLeafNames: [String] = []
@@ -425,6 +431,7 @@ final class RotoMotionViewModel: ObservableObject {
         static let applySolvedPoseToReferenceRig = prefix + "applySolvedPoseToReferenceRig"
         static let referenceRigVisibleHeightFraction = prefix + "referenceRigVisibleHeightFraction"
         static let referenceRigCameraZ = prefix + "referenceRigCameraZ"
+        static let rigRotationApplyMode = prefix + "rigRotationApplyMode"
         static let lastAnimatedUSDZExportURL = prefix + "lastAnimatedUSDZExportURL"
         static let lastAnimatedUSDZExportFolderURL = prefix + "lastAnimatedUSDZExportFolderURL"
         static let showVisionRays = prefix + "showVisionRays"
@@ -583,6 +590,10 @@ final class RotoMotionViewModel: ObservableObject {
         if let value = storedFloat(AppStorageKeys.referenceRigCurrentZ) { referenceRigCurrentZ = value }
         if let value = storedDouble(AppStorageKeys.referenceRigVisibleHeightFraction) { referenceRigVisibleHeightFraction = value }
         if let value = storedDouble(AppStorageKeys.referenceRigCameraZ) { referenceRigCameraZ = value }
+        if let rawValue = storedString(AppStorageKeys.rigRotationApplyMode),
+           let value = RigRotationApplyMode(rawValue: rawValue) {
+            rigRotationApplyMode = value
+        }
 
         if let value = storedBool(AppStorageKeys.showVisionRays) { showVisionRays = value }
         if let value = storedBool(AppStorageKeys.showRaySolvedRig) { showRaySolvedRig = value }
@@ -2345,6 +2356,55 @@ final class RotoMotionViewModel: ObservableObject {
             0
         )
         session.correctionNode.simdEulerAngles = SIMD3<Float>(0, 0, 0)
+    }
+
+    func inspectCurrentJointFrame() {
+        guard let session = skinnedRigSession else {
+            jointDebugStatus = "No skinned rig session."
+            status = jointDebugStatus
+            diagnostics.log(jointDebugStatus)
+            return
+        }
+
+        guard let solvedFrame = currentRaySolvedFrame else {
+            jointDebugStatus = "No current ray solved frame."
+            status = jointDebugStatus
+            diagnostics.log(jointDebugStatus)
+            return
+        }
+
+        jointDebugFrameIndex = solvedFrame.frameIndex
+
+        let report = SingleFrameRigPoseInspector.inspect(
+            session: session,
+            solvedFrame: solvedFrame,
+            normalizedFrame: currentNormalizedFrame,
+            jointNames: [
+                "Hips",
+                "Spine",
+                "neck",
+                "Head",
+                "LeftShoulder",
+                "LeftArm",
+                "LeftForeArm",
+                "LeftHand",
+                "RightShoulder",
+                "RightArm",
+                "RightForeArm",
+                "RightHand",
+                "LeftUpLeg",
+                "LeftLeg",
+                "LeftFoot",
+                "RightUpLeg",
+                "RightLeg",
+                "RightFoot"
+            ],
+            rotationApplyMode: rigRotationApplyMode
+        )
+
+        jointDebugStatus = report.summary
+        status = report.summary
+        diagnostics.log(report.fullText)
     }
 
     func chooseTargetCharacterUSDZ() {
