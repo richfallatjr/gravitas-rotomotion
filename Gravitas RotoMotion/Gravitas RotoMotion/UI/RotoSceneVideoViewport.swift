@@ -160,6 +160,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private var lastRigFitSignature: String?
         private var lastReferenceRigPlacementSignature: String?
         private var lastReferenceRigOverlaySignature: String?
+        private var lastCurvePinnedPlaybackLogFrame: Int?
 
         func makeView() -> SCNView {
             let view = SCNView()
@@ -308,6 +309,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             updateSkinnedRig(
                 session: skinnedRigSession,
                 frame: raySolvedFrame,
+                frameIndex: frameIndex,
                 normalizedFrame: normalizedFrame,
                 referenceRigScaleMultiplier: referenceRigScaleMultiplier,
                 referenceRigX: referenceRigX,
@@ -702,6 +704,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private func updateSkinnedRig(
             session: SkinnedRigSession?,
             frame: RotoRayAnimationSolveResult.Frame?,
+            frameIndex: Int,
             normalizedFrame: NormalizedMeshyPoseCapture.Frame?,
             referenceRigScaleMultiplier: Double,
             referenceRigX: Double,
@@ -768,6 +771,12 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                     videoPlaneSize: videoPlaneSize,
                     videoPlaneZ: currentVideoPlaneZ
                 )
+
+                if frameIndex % 30 == 0,
+                   lastCurvePinnedPlaybackLogFrame != frameIndex {
+                    print("[RotoMotion Playback] Applied curve-pinned rig frame \(frameIndex)")
+                    lastCurvePinnedPlaybackLogFrame = frameIndex
+                }
             } else {
                 SkinnedRigRotomationDriver.resetToRest(session: session)
             }
