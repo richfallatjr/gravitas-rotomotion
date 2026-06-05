@@ -3,6 +3,54 @@ import SceneKit
 import SwiftUI
 import simd
 
+private enum ReferenceRigMaterialOverlay {
+    private static let materialNamePrefix = "RotoMotionReferenceOverlay"
+
+    static func applyHalfOpacity(to root: SCNNode, opacity: CGFloat = 0.5) {
+        visit(root) { node in
+            guard let geometry = node.geometry else {
+                return
+            }
+
+            var materials: [SCNMaterial] = []
+            materials.reserveCapacity(geometry.materials.count)
+
+            for material in geometry.materials {
+                let overlayMaterial: SCNMaterial
+
+                if material.name?.hasPrefix(materialNamePrefix) == true {
+                    overlayMaterial = material
+                } else {
+                    overlayMaterial = material.copy() as! SCNMaterial
+                    overlayMaterial.name = "\(materialNamePrefix):\(material.name ?? "material")"
+                }
+
+                overlayMaterial.transparency = opacity
+                overlayMaterial.blendMode = .alpha
+                overlayMaterial.writesToDepthBuffer = false
+                overlayMaterial.readsFromDepthBuffer = true
+                overlayMaterial.isDoubleSided = true
+                overlayMaterial.transparencyMode = .dualLayer
+
+                materials.append(overlayMaterial)
+            }
+
+            geometry.materials = materials
+            node.opacity = 1.0
+            node.isHidden = false
+            node.renderingOrder = 100
+        }
+    }
+
+    private static func visit(_ node: SCNNode, _ body: (SCNNode) -> Void) {
+        body(node)
+
+        for child in node.childNodes {
+            visit(child, body)
+        }
+    }
+}
+
 struct RotoSceneVideoViewport: NSViewRepresentable {
     let image: NSImage?
     let frameIndex: Int
@@ -109,6 +157,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private var skinnedRigRoot: SCNNode?
         private var lastRigFitSignature: String?
         private var lastReferenceRigPlacementSignature: String?
+        private var lastReferenceRigOverlaySignature: String?
 
         func makeView() -> SCNView {
             let view = SCNView()
@@ -625,6 +674,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 currentSkinnedRigURL = nil
                 lastRigFitSignature = nil
                 lastReferenceRigPlacementSignature = nil
+                lastReferenceRigOverlaySignature = nil
                 removeAllChildren(from: rigBoundsRoot)
                 return
             }
@@ -641,6 +691,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 currentSkinnedRigURL = session.sourceURL
                 lastRigFitSignature = nil
                 lastReferenceRigPlacementSignature = nil
+                lastReferenceRigOverlaySignature = nil
                 removeAllChildren(from: rigBoundsRoot)
 
                 print(
@@ -682,6 +733,10 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             session.displayRootNode.opacity = 1.0
 
             forceReferenceRigVisible(session.displayRootNode)
+            ReferenceRigMaterialOverlay.applyHalfOpacity(
+                to: session.displayRootNode,
+                opacity: 0.5
+            )
 
             let signature = [
                 session.sourceURL.path,
@@ -696,6 +751,25 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                   scale: \(session.displayRootNode.simdScale)
                   rotationXDegrees: -90.0
                   rotationYDegrees: 360.0
+                """
+                print(status)
+                onReferenceRigVisibilityStatusChanged?(status)
+            }
+
+            let overlaySignature = [
+                session.sourceURL.path,
+                "reference-material-overlay-0.5"
+            ].joined(separator: "|")
+
+            if lastReferenceRigOverlaySignature != overlaySignature {
+                lastReferenceRigOverlaySignature = overlaySignature
+                let status = """
+                Applied reference rig material overlay:
+                opacity 0.5
+                blendMode alpha
+                writesToDepthBuffer false
+                readsFromDepthBuffer true
+                doubleSided true
                 """
                 print(status)
                 onReferenceRigVisibilityStatusChanged?(status)
@@ -980,18 +1054,6 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             visit(root) { node in
                 node.isHidden = false
                 node.opacity = 1.0
-                node.renderingOrder = 0
-
-                guard let geometry = node.geometry else {
-                    return
-                }
-
-                for material in geometry.materials {
-                    material.lightingModel = .constant
-                    material.readsFromDepthBuffer = true
-                    material.writesToDepthBuffer = true
-                    material.isDoubleSided = true
-                }
             }
         }
 

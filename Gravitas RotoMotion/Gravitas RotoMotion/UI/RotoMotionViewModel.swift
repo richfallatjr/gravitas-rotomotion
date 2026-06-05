@@ -2178,9 +2178,64 @@ final class RotoMotionViewModel: ObservableObject {
         }
 
         do {
-            let unitScale = Float(referenceRigProfile?.unitScaleToMeters ?? 0.01)
+            let viewportRigURL: URL
+            let viewportRigDescription: String
+
+            if let pythonExecutablePath = openUSDToolStatus?.pythonExecutablePath ?? checkedOpenUSDPythonForRetarget(requireUSDZip: true) {
+                do {
+                    let opacityWorkDir = FileManager.default.temporaryDirectory
+                        .appendingPathComponent(
+                            "rotomotion_reference_opacity_\(UUID().uuidString)",
+                            isDirectory: true
+                        )
+
+                    let transparentURL = try USDZReferenceOpacityPreprocessor.makeTransparentReferenceUSDZ(
+                        sourceUSDZ: url,
+                        opacity: 0.5,
+                        workDirectory: opacityWorkDir,
+                        pythonExecutablePath: pythonExecutablePath
+                    )
+
+                    viewportRigURL = transparentURL
+                    viewportRigDescription = transparentURL.lastPathComponent
+
+                    diagnostics.log(
+                        """
+                        Reference viewport USDZ opacity preprocessed:
+                        original: \(url.path)
+                        transparentCopy: \(transparentURL.path)
+                        opacity: 0.5
+                        python: \(pythonExecutablePath)
+                        """
+                    )
+                } catch {
+                    viewportRigURL = url
+                    viewportRigDescription = "\(url.lastPathComponent) (original; opacity preprocessing failed)"
+
+                    diagnostics.log(
+                        """
+                        Reference viewport opacity preprocessing failed. Loading original USDZ so placement stays visible.
+                        original: \(url.path)
+                        error: \(error.localizedDescription)
+                        """
+                    )
+                }
+            } else {
+                viewportRigURL = url
+                viewportRigDescription = "\(url.lastPathComponent) (original; OpenUSD Python unavailable)"
+
+                diagnostics.log(
+                    """
+                    Reference viewport opacity preprocessing skipped. Loading original USDZ so placement stays visible.
+                    original: \(url.path)
+                    reason: OpenUSD Python unavailable.
+                    """
+                )
+            }
+
+            let unitScale = Float(referenceRigProfile?.unitScaleToMeters ?? 1.0)
             let session = try SkinnedUSDZRigLoader.load(
-                url: url,
+                url: viewportRigURL,
                 unitScaleToMeters: unitScale,
                 sceneUnitsPerMeter: Float(raySceneUnitsPerMeter),
                 yawCorrectionRadians: 0,
@@ -2207,6 +2262,7 @@ final class RotoMotionViewModel: ObservableObject {
             skinnedRigStatus = """
             Loaded reference skinned rig:
             \(url.lastPathComponent)
+            viewport source: \(viewportRigDescription)
             matched bones: \(session.validBoneCount)
             """
 
