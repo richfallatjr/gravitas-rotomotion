@@ -93,6 +93,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let rightNormalizedFrame: NormalizedMeshyPoseCapture.Frame?
     let smoothedFrame: SmoothedMeshyPoseCapture.Frame?
     let stereoJointFrame: StereoMeshyJointCapture.Frame?
+    let stereoTargetFrame: StereoMeshyJointCapture.Frame?
 
     let groundPlane: GroundPlaneController?
     let raySolveResult: RotoRaySolveResult?
@@ -127,6 +128,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let showSkinnedRig: Bool
     let showRotationGizmo: Bool
     let stereoSceneUnitsPerMeter: Double
+    let solveTargetMode: RotoSolveTargetMode
     let rotationGizmoSpace: RotationGizmoSpace
     let selectedRotationJoint: String
     let onRotationGizmoEulerChanged: (_ joint: String, _ eulerXYZ: SIMD3<Float>) -> Void
@@ -159,6 +161,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             rightNormalizedFrame: rightNormalizedFrame,
             smoothedFrame: smoothedFrame,
             stereoJointFrame: stereoJointFrame,
+            stereoTargetFrame: stereoTargetFrame,
             groundPlane: groundPlane,
             raySolveResult: raySolveResult,
             raySolvedFrame: raySolvedFrame,
@@ -191,6 +194,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             showSkinnedRig: showSkinnedRig,
             showRotationGizmo: showRotationGizmo,
             stereoSceneUnitsPerMeter: stereoSceneUnitsPerMeter,
+            solveTargetMode: solveTargetMode,
             rotationGizmoSpace: rotationGizmoSpace,
             selectedRotationJoint: selectedRotationJoint
         )
@@ -381,6 +385,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             rightNormalizedFrame: NormalizedMeshyPoseCapture.Frame?,
             smoothedFrame: SmoothedMeshyPoseCapture.Frame?,
             stereoJointFrame: StereoMeshyJointCapture.Frame?,
+            stereoTargetFrame: StereoMeshyJointCapture.Frame?,
             groundPlane: GroundPlaneController?,
             raySolveResult: RotoRaySolveResult?,
             raySolvedFrame: RotoRayAnimationSolveResult.Frame?,
@@ -413,6 +418,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             showSkinnedRig: Bool,
             showRotationGizmo: Bool,
             stereoSceneUnitsPerMeter: Double,
+            solveTargetMode: RotoSolveTargetMode,
             rotationGizmoSpace: RotationGizmoSpace,
             selectedRotationJoint: String
         ) {
@@ -445,6 +451,9 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 frame: raySolvedFrame,
                 frameIndex: frameIndex,
                 normalizedFrame: normalizedFrame,
+                stereoTargetFrame: stereoTargetFrame,
+                solveTargetMode: solveTargetMode,
+                stereoSceneUnitsPerMeter: stereoSceneUnitsPerMeter,
                 referenceRigScaleMultiplier: referenceRigScaleMultiplier,
                 referenceRigX: referenceRigX,
                 referenceRigY: referenceRigY,
@@ -651,7 +660,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 [RotoSceneVideoViewport] Perspective Camera Applied
                   cameraProfile: \(cameraProfileName)
                   usesOrthographicProjection: false
-                  fieldOfView: \(String(format: "%.3f", cameraFOVDegrees))
+                  verticalFOV: \(String(format: "%.3f", cameraFOVDegrees))
                   projectionDirection: vertical
                   imagePlaneZ: \(currentVideoPlaneZ)
                 """
@@ -1105,6 +1114,9 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             frame: RotoRayAnimationSolveResult.Frame?,
             frameIndex: Int,
             normalizedFrame: NormalizedMeshyPoseCapture.Frame?,
+            stereoTargetFrame: StereoMeshyJointCapture.Frame?,
+            solveTargetMode: RotoSolveTargetMode,
+            stereoSceneUnitsPerMeter: Double,
             referenceRigScaleMultiplier: Double,
             referenceRigX: Double,
             referenceRigY: Double,
@@ -1157,8 +1169,31 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             rigBoundsRoot.isHidden = !visible
 
             if applySolvedPoseToReferenceRig,
-               let frame,
-               let normalizedFrame {
+               solveTargetMode == .spatialStereo3D,
+               let stereoTargetFrame {
+                StereoTargetRigRotomationDriver.rotomateFrameWithStereoTargets(
+                    stereoTargetFrame,
+                    session: session,
+                    sceneUnitsPerMeter: stereoSceneUnitsPerMeter
+                )
+
+                applyViewportRotationOverrides(
+                    session: session,
+                    overrideLayer: rotationOverrideLayer,
+                    liveOverridesActive: liveRotationOverridesActive,
+                    frameIndex: stereoTargetFrame.frameIndex,
+                    timeSeconds: stereoTargetFrame.timeSeconds
+                )
+
+                if frameIndex % 30 == 0,
+                   lastCurvePinnedPlaybackLogFrame != frameIndex {
+                    print("[RotoMotion Playback] Applied stereo-target rig frame \(frameIndex)")
+                    lastCurvePinnedPlaybackLogFrame = frameIndex
+                }
+            } else if applySolvedPoseToReferenceRig,
+                      solveTargetMode == .monocularRayPinned,
+                      let frame,
+                      let normalizedFrame {
                 SkinnedRigRotomationDriver.rotomateFrameWithCurvePins(
                     frame,
                     normalizedFrame: normalizedFrame,
@@ -1182,6 +1217,18 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                     lastCurvePinnedPlaybackLogFrame = frameIndex
                 }
             } else {
+                if applySolvedPoseToReferenceRig,
+                   solveTargetMode == .spatialStereo3D,
+                   frameIndex % 30 == 0,
+                   lastCurvePinnedPlaybackLogFrame != frameIndex {
+                    print("""
+                    [RotoMotion Playback] Stereo target solve unavailable
+                      frame: \(frameIndex)
+                      reason: no stereo target frame
+                    """)
+                    lastCurvePinnedPlaybackLogFrame = frameIndex
+                }
+
                 SkinnedRigRotomationDriver.resetToRest(session: session)
             }
         }

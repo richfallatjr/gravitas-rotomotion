@@ -44,6 +44,20 @@ struct SpatialVideoCameraMetadata: Codable, Equatable {
     var imageHeight: Int
 }
 
+enum ActiveCameraProfileSource: String, Codable {
+    case monocularVerticalProfile
+    case spatialVideoMetadata
+}
+
+struct RotoCameraIntrinsics: Codable, Equatable {
+    let source: String
+    let imageWidth: Int
+    let imageHeight: Int
+    let horizontalFOVDegrees: Double
+    let verticalFOVDegrees: Double
+    let baselineMeters: Double?
+}
+
 enum NormalizedImageYConvention: String, CaseIterable, Identifiable, Codable {
     case originBottomLeft
     case originTopLeft
@@ -58,6 +72,11 @@ enum NormalizedImageYConvention: String, CaseIterable, Identifiable, Codable {
             return "Image top-left"
         }
     }
+}
+
+enum RotoSolveTargetMode: String, Codable {
+    case monocularRayPinned
+    case spatialStereo3D
 }
 
 struct SpatialEyeLayerMap: Codable, Equatable {

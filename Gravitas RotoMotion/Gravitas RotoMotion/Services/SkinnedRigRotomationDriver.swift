@@ -970,3 +970,275 @@ enum SkinnedRigRotomationDriver {
         return v / len
     }
 }
+
+enum StereoTargetRigRotomationDriver {
+    static func rotomateFrameWithStereoTargets(
+        _ frame: StereoMeshyJointCapture.Frame,
+        session: SkinnedRigSession,
+        sceneUnitsPerMeter: Double,
+        iterations: Int = 6
+    ) {
+        let targetScale = Float(max(sceneUnitsPerMeter, 0.0001))
+
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = 0
+
+        resetBonesToRestOnly(session: session)
+        placeRootFromStereoHipsOrUpperLegs(
+            frame,
+            session: session,
+            targetScale: targetScale
+        )
+
+        solveChain(
+            ["LeftUpLeg", "LeftLeg", "LeftFoot", "LeftToeBase"],
+            frame,
+            session: session,
+            targetScale: targetScale,
+            passes: iterations
+        )
+        solveChain(
+            ["RightUpLeg", "RightLeg", "RightFoot", "RightToeBase"],
+            frame,
+            session: session,
+            targetScale: targetScale,
+            passes: iterations
+        )
+        solveChain(
+            ["Hips", "Spine", "neck", "Head", "headfront"],
+            frame,
+            session: session,
+            targetScale: targetScale,
+            passes: iterations
+        )
+        solveChain(
+            ["LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand"],
+            frame,
+            session: session,
+            targetScale: targetScale,
+            passes: iterations
+        )
+        solveChain(
+            ["RightShoulder", "RightArm", "RightForeArm", "RightHand"],
+            frame,
+            session: session,
+            targetScale: targetScale,
+            passes: iterations
+        )
+
+        SCNTransaction.commit()
+        logFitError(
+            frame,
+            session: session,
+            targetScale: targetScale
+        )
+    }
+
+    private static func resetBonesToRestOnly(
+        session: SkinnedRigSession
+    ) {
+        for jointName in session.jointOrder {
+            guard let bone = session.bonesByCanonicalName[jointName],
+                  let restPosition = session.restLocalPositions[jointName],
+                  let restOrientation = session.restLocalOrientations[jointName],
+                  let restScale = session.restLocalScales[jointName] else {
+                continue
+            }
+
+            bone.simdPosition = restPosition
+            bone.simdOrientation = restOrientation
+            bone.simdScale = restScale
+        }
+    }
+
+    private static func placeRootFromStereoHipsOrUpperLegs(
+        _ frame: StereoMeshyJointCapture.Frame,
+        session: SkinnedRigSession,
+        targetScale: Float
+    ) {
+        let targetNames = [
+            "Hips",
+            "LeftUpLeg",
+            "RightUpLeg"
+        ]
+        var deltas: [SIMD3<Float>] = []
+
+        for name in targetNames {
+            guard let bone = session.bonesByCanonicalName[name],
+                  let target = stereoPosition(
+                    name,
+                    in: frame,
+                    targetScale: targetScale
+                  ) else {
+                continue
+            }
+
+            deltas.append(target - bone.simdWorldPosition)
+        }
+
+        guard !deltas.isEmpty else {
+            return
+        }
+
+        let average = deltas.reduce(
+            SIMD3<Float>(0, 0, 0),
+            +
+        ) / Float(deltas.count)
+
+        session.displayRootNode.simdPosition += average
+    }
+
+    private static func solveChain(
+        _ chain: [String],
+        _ frame: StereoMeshyJointCapture.Frame,
+        session: SkinnedRigSession,
+        targetScale: Float,
+        passes: Int = 4
+    ) {
+        guard chain.count >= 2 else {
+            return
+        }
+
+        for _ in 0..<passes {
+            for i in 0..<(chain.count - 1) {
+                let parentName = chain[i]
+                let childName = chain[i + 1]
+
+                guard let parentNode = session.bonesByCanonicalName[parentName],
+                      let childNode = session.bonesByCanonicalName[childName],
+                      let childTarget = stereoPosition(
+                        childName,
+                        in: frame,
+                        targetScale: targetScale
+                      ) else {
+                    continue
+                }
+
+                rotateParentToMoveChild(
+                    parentNode: parentNode,
+                    childNode: childNode,
+                    childTarget: childTarget
+                )
+            }
+        }
+    }
+
+    private static func stereoPosition(
+        _ joint: String,
+        in frame: StereoMeshyJointCapture.Frame,
+        targetScale: Float
+    ) -> SIMD3<Float>? {
+        guard let target = frame.joints[joint],
+              target.validStereo,
+              target.positionCameraXYZ.count == 3 else {
+            return nil
+        }
+
+        return SIMD3<Float>(
+            Float(target.positionCameraXYZ[0]),
+            Float(target.positionCameraXYZ[1]),
+            Float(target.positionCameraXYZ[2])
+        ) * targetScale
+    }
+
+    private static func rotateParentToMoveChild(
+        parentNode: SCNNode,
+        childNode: SCNNode,
+        childTarget: SIMD3<Float>
+    ) {
+        let parentWorld = parentNode.simdWorldPosition
+        let childWorld = childNode.simdWorldPosition
+        let current = normalizeSafe(
+            childWorld - parentWorld,
+            fallback: SIMD3<Float>(0, 1, 0)
+        )
+        let target = normalizeSafe(
+            childTarget - parentWorld,
+            fallback: current
+        )
+        let deltaWorld = simd_quatf(
+            from: current,
+            to: target
+        )
+
+        applyWorldRotationDelta(
+            deltaWorld,
+            to: parentNode
+        )
+    }
+
+    private static func applyWorldRotationDelta(
+        _ deltaWorld: simd_quatf,
+        to node: SCNNode
+    ) {
+        guard let parent = node.parent else {
+            node.simdOrientation = deltaWorld * node.simdOrientation
+            return
+        }
+
+        let parentWorldRotation = parent.simdWorldOrientation
+        let localDelta = simd_inverse(parentWorldRotation) * deltaWorld * parentWorldRotation
+
+        node.simdOrientation = localDelta * node.simdOrientation
+    }
+
+    private static func normalizeSafe(
+        _ value: SIMD3<Float>,
+        fallback: SIMD3<Float>
+    ) -> SIMD3<Float> {
+        let length = simd_length(value)
+        guard length > 0.000001 else {
+            return fallback
+        }
+
+        return value / length
+    }
+
+    private static func logFitError(
+        _ frame: StereoMeshyJointCapture.Frame,
+        session: SkinnedRigSession,
+        targetScale: Float
+    ) {
+        var worstJoint = "none"
+        var worstError: Float = 0
+        var averageError: Float = 0
+        var count: Float = 0
+
+        for jointName in session.jointOrder {
+            guard let bone = session.bonesByCanonicalName[jointName],
+                  let target = stereoPosition(
+                    jointName,
+                    in: frame,
+                    targetScale: targetScale
+                  ) else {
+                continue
+            }
+
+            let error = simd_length(
+                bone.simdWorldPosition - target
+            )
+            averageError += error
+            count += 1
+
+            if error > worstError {
+                worstError = error
+                worstJoint = jointName
+            }
+        }
+
+        guard count > 0,
+              frame.frameIndex == 0 || frame.frameIndex % 30 == 0 else {
+            return
+        }
+
+        averageError /= count
+
+        print("""
+        [StereoTargetRigRotomation] fit error
+          frame: \(frame.frameIndex)
+          avgPositionError: \(averageError)
+          worstJoint: \(worstJoint)
+          worstError: \(worstError)
+        """)
+    }
+}

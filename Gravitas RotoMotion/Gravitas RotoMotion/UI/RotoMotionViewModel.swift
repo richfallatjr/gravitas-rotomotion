@@ -152,17 +152,53 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var spatialStereoAvailable = false
     @Published var spatialDepthStatus = "No stereo depth available."
     @Published var spatialBaselineMeters: Double = 0.019 {
-        didSet { persist(spatialBaselineMeters, AppStorageKeys.spatialBaselineMeters) }
+        didSet {
+            persist(spatialBaselineMeters, AppStorageKeys.spatialBaselineMeters)
+
+            if useManualSpatialCameraOverrides {
+                updateActiveCameraIntrinsicsForSpatialVideo()
+            }
+        }
     }
     @Published var spatialHorizontalFOVDegrees: Double = 49.6 {
-        didSet { persist(spatialHorizontalFOVDegrees, AppStorageKeys.spatialHorizontalFOVDegrees) }
+        didSet {
+            persist(spatialHorizontalFOVDegrees, AppStorageKeys.spatialHorizontalFOVDegrees)
+
+            if useManualSpatialCameraOverrides {
+                updateActiveCameraIntrinsicsForSpatialVideo()
+            }
+        }
     }
     @Published var spatialVerticalFOVDegrees: Double = 69.4 {
         didSet { persist(spatialVerticalFOVDegrees, AppStorageKeys.spatialVerticalFOVDegrees) }
     }
     @Published var spatialDisparityAdjustment: Double = 0.0 {
-        didSet { persist(spatialDisparityAdjustment, AppStorageKeys.spatialDisparityAdjustment) }
+        didSet {
+            persist(spatialDisparityAdjustment, AppStorageKeys.spatialDisparityAdjustment)
+
+            if useManualSpatialCameraOverrides {
+                updateActiveCameraIntrinsicsForSpatialVideo()
+            }
+        }
     }
+    @Published var useManualSpatialCameraOverrides = false {
+        didSet {
+            persist(useManualSpatialCameraOverrides, AppStorageKeys.useManualSpatialCameraOverrides)
+
+            if captureMode == .spatialVideo {
+                updateActiveCameraIntrinsicsForSpatialVideo()
+            }
+        }
+    }
+    @Published var activeCameraProfileSource: ActiveCameraProfileSource = .monocularVerticalProfile
+    @Published var activeCameraIntrinsics = RotoCameraIntrinsics(
+        source: "monocular vertical default",
+        imageWidth: 1080,
+        imageHeight: 1920,
+        horizontalFOVDegrees: 49.6,
+        verticalFOVDegrees: 69.4,
+        baselineMeters: nil
+    )
     @Published var stereoYConvention: NormalizedImageYConvention = .originBottomLeft {
         didSet {
             persist(stereoYConvention.rawValue, AppStorageKeys.stereoYConvention)
@@ -174,11 +210,11 @@ final class RotoMotionViewModel: ObservableObject {
             }
         }
     }
+    @Published var solveTargetMode: RotoSolveTargetMode = .monocularRayPinned {
+        didSet { persist(solveTargetMode.rawValue, AppStorageKeys.solveTargetMode) }
+    }
     @Published var showStereo3DSkeleton = true {
         didSet { persist(showStereo3DSkeleton, AppStorageKeys.showStereo3DSkeleton) }
-    }
-    @Published var showStereoReprojectionOverlay = true {
-        didSet { persist(showStereoReprojectionOverlay, AppStorageKeys.showStereoReprojectionOverlay) }
     }
     @Published var stereoVisionStatus = "No stereo Vision solve yet."
 
@@ -312,10 +348,22 @@ final class RotoMotionViewModel: ObservableObject {
         didSet { persist(viewportZoom, AppStorageKeys.viewportZoom) }
     }
     @Published var cameraProfile: CameraProfile = .iPhone17Main1x {
-        didSet { persist(cameraProfile.rawValue, AppStorageKeys.cameraProfile) }
+        didSet {
+            persist(cameraProfile.rawValue, AppStorageKeys.cameraProfile)
+
+            if activeCameraProfileSource == .monocularVerticalProfile {
+                updateActiveCameraIntrinsicsForCurrentMonocularFrame()
+            }
+        }
     }
     var activeCameraFOVDegrees: Double {
         cameraProfile.portraitVerticalFOVDegrees
+    }
+    var activeViewportVerticalFOVDegrees: Double {
+        activeCameraIntrinsics.verticalFOVDegrees
+    }
+    var activeViewportCameraProfileName: String {
+        activeCameraIntrinsics.source
     }
     var editableJointNames: [String] {
         CanonicalRig.jointNames
@@ -521,9 +569,10 @@ final class RotoMotionViewModel: ObservableObject {
         static let spatialHorizontalFOVDegrees = prefix + "spatialHorizontalFOVDegrees"
         static let spatialVerticalFOVDegrees = prefix + "spatialVerticalFOVDegrees"
         static let spatialDisparityAdjustment = prefix + "spatialDisparityAdjustment"
+        static let useManualSpatialCameraOverrides = prefix + "useManualSpatialCameraOverrides"
         static let stereoYConvention = prefix + "stereoYConvention"
+        static let solveTargetMode = prefix + "solveTargetMode"
         static let showStereo3DSkeleton = prefix + "showStereo3DSkeleton"
-        static let showStereoReprojectionOverlay = prefix + "showStereoReprojectionOverlay"
         static let sampleFPS = prefix + "sampleFPS"
         static let visionSampleFPS = prefix + "visionSampleFPS"
         static let maxFrames = prefix + "maxFrames"
@@ -757,12 +806,16 @@ final class RotoMotionViewModel: ObservableObject {
         if let value = storedDouble(AppStorageKeys.spatialHorizontalFOVDegrees) { spatialHorizontalFOVDegrees = value }
         if let value = storedDouble(AppStorageKeys.spatialVerticalFOVDegrees) { spatialVerticalFOVDegrees = value }
         if let value = storedDouble(AppStorageKeys.spatialDisparityAdjustment) { spatialDisparityAdjustment = value }
+        if let value = storedBool(AppStorageKeys.useManualSpatialCameraOverrides) { useManualSpatialCameraOverrides = value }
         if let rawValue = storedString(AppStorageKeys.stereoYConvention),
            let value = NormalizedImageYConvention(rawValue: rawValue) {
             stereoYConvention = value
         }
+        if let rawValue = storedString(AppStorageKeys.solveTargetMode),
+           let value = RotoSolveTargetMode(rawValue: rawValue) {
+            solveTargetMode = value
+        }
         if let value = storedBool(AppStorageKeys.showStereo3DSkeleton) { showStereo3DSkeleton = value }
-        if let value = storedBool(AppStorageKeys.showStereoReprojectionOverlay) { showStereoReprojectionOverlay = value }
         if let value = storedString(AppStorageKeys.sessionFileStatus) { sessionFileStatus = value }
         if let value = storedBool(AppStorageKeys.sessionIsDirty) { sessionIsDirty = value }
         if let value = storedDouble(AppStorageKeys.sampleFPS) { sampleFPS = value }
@@ -1073,6 +1126,111 @@ final class RotoMotionViewModel: ObservableObject {
         rotationAuthoringStatus = "Loaded held rotation overrides."
     }
 
+    static func verticalFOVFromHorizontalFOV(
+        horizontalFOVDegrees: Double,
+        aspectWidthOverHeight: Double
+    ) -> Double {
+        let horizontalRadians = horizontalFOVDegrees * .pi / 180.0
+        let verticalRadians = 2.0 * atan(
+            tan(horizontalRadians * 0.5) / aspectWidthOverHeight
+        )
+
+        return verticalRadians * 180.0 / .pi
+    }
+
+    static func horizontalFOVFromVerticalFOV(
+        verticalFOVDegrees: Double,
+        aspectWidthOverHeight: Double
+    ) -> Double {
+        let verticalRadians = verticalFOVDegrees * .pi / 180.0
+        let horizontalRadians = 2.0 * atan(
+            tan(verticalRadians * 0.5) * aspectWidthOverHeight
+        )
+
+        return horizontalRadians * 180.0 / .pi
+    }
+
+    func updateActiveCameraIntrinsicsForSpatialVideo() {
+        let metadata = effectiveSpatialMetadata()
+
+        guard let horizontalFOV = metadata.horizontalFOVDegrees,
+              metadata.imageWidth > 0,
+              metadata.imageHeight > 0 else {
+            diagnostics.log("Spatial camera intrinsics update failed: missing metadata.")
+            return
+        }
+
+        let aspect = Double(metadata.imageWidth) / Double(metadata.imageHeight)
+        let verticalFOV = Self.verticalFOVFromHorizontalFOV(
+            horizontalFOVDegrees: horizontalFOV,
+            aspectWidthOverHeight: aspect
+        )
+
+        activeCameraIntrinsics = RotoCameraIntrinsics(
+            source: useManualSpatialCameraOverrides
+                ? "spatial video manual override landscape"
+                : "spatial video metadata landscape",
+            imageWidth: metadata.imageWidth,
+            imageHeight: metadata.imageHeight,
+            horizontalFOVDegrees: horizontalFOV,
+            verticalFOVDegrees: verticalFOV,
+            baselineMeters: metadata.baselineMeters
+        )
+        activeCameraProfileSource = .spatialVideoMetadata
+
+        diagnostics.log("""
+        Active camera profile switched to spatial landscape:
+          source: \(activeCameraIntrinsics.source)
+          imageSize: \(metadata.imageWidth)x\(metadata.imageHeight)
+          horizontalFOV: \(String(format: "%.3f", horizontalFOV))
+          verticalFOV: \(String(format: "%.3f", verticalFOV))
+          baselineMeters: \(metadata.baselineMeters.map { String(format: "%.6f", $0) } ?? "nil")
+          manualOverride: \(useManualSpatialCameraOverrides)
+        """)
+    }
+
+    func updateActiveCameraIntrinsicsForMonocularVideo(
+        imageWidth: Int,
+        imageHeight: Int
+    ) {
+        let width = max(imageWidth, 1)
+        let height = max(imageHeight, 1)
+        let verticalFOV = activeCameraFOVDegrees
+        let aspect = Double(width) / Double(height)
+        let horizontalFOV = Self.horizontalFOVFromVerticalFOV(
+            verticalFOVDegrees: verticalFOV,
+            aspectWidthOverHeight: aspect
+        )
+
+        activeCameraIntrinsics = RotoCameraIntrinsics(
+            source: "monocular vertical default",
+            imageWidth: width,
+            imageHeight: height,
+            horizontalFOVDegrees: horizontalFOV,
+            verticalFOVDegrees: verticalFOV,
+            baselineMeters: nil
+        )
+        activeCameraProfileSource = .monocularVerticalProfile
+
+        diagnostics.log("""
+        Active camera profile set to monocular vertical:
+          imageSize: \(width)x\(height)
+          horizontalFOV: \(String(format: "%.3f", horizontalFOV))
+          verticalFOV: \(String(format: "%.3f", verticalFOV))
+        """)
+    }
+
+    private func updateActiveCameraIntrinsicsForCurrentMonocularFrame() {
+        let size = currentVideoFrameImage?.size ?? decodedFrames.first?.image.size
+        let width = max(Int((size?.width ?? 1080).rounded()), 1)
+        let height = max(Int((size?.height ?? 1920).rounded()), 1)
+
+        updateActiveCameraIntrinsicsForMonocularVideo(
+            imageWidth: width,
+            imageHeight: height
+        )
+    }
+
     var frameCount: Int {
         [
             decodedFrames.count,
@@ -1193,6 +1351,19 @@ final class RotoMotionViewModel: ObservableObject {
     var currentStereoJointFrame: StereoMeshyJointCapture.Frame? {
         guard spatialStereoAvailable,
               let frames = stereoJointCapture?.frames,
+              !frames.isEmpty else {
+            return nil
+        }
+
+        let time = currentVideoTimeSeconds
+
+        return frames.min {
+            abs($0.timeSeconds - time) < abs($1.timeSeconds - time)
+        }
+    }
+
+    var currentStereoTargetFrame: StereoMeshyJointCapture.Frame? {
+        guard let frames = stereoJointCapture?.frames,
               !frames.isEmpty else {
             return nil
         }
@@ -2056,6 +2227,8 @@ final class RotoMotionViewModel: ObservableObject {
         videoURL = url
         lastLoadedVideoURL = url
         captureMode = .monocularVideo
+        activeCameraProfileSource = .monocularVerticalProfile
+        solveTargetMode = .monocularRayPinned
         clearSpatialVideoState(clearURL: true)
         outputDirectoryURL = RotoMotionProjectStore.defaultOutputDirectory(for: url)
         rawCapture = nil
@@ -2137,6 +2310,7 @@ final class RotoMotionViewModel: ObservableObject {
             currentFrameIndex = 0
             currentTimeSeconds = frames.first?.timeSeconds ?? 0
             currentVideoFrameImage = frames.first?.image
+            updateActiveCameraIntrinsicsForCurrentMonocularFrame()
             imageRenderToken += 1
             videoPlaybackStatus = frames.isEmpty
                 ? cache.status
@@ -2193,6 +2367,9 @@ final class RotoMotionViewModel: ObservableObject {
         spatialDepthStatus = "No stereo depth available."
         spatialVideoStatus = "No spatial video loaded."
         stereoVisionStatus = "No stereo Vision solve yet."
+        solveTargetMode = .monocularRayPinned
+        activeCameraProfileSource = .monocularVerticalProfile
+        updateActiveCameraIntrinsicsForCurrentMonocularFrame()
     }
 
     func loadSpatialVideo(
@@ -2274,6 +2451,7 @@ final class RotoMotionViewModel: ObservableObject {
                 )
             }
             spatialVideoMetadata = decoded.metadata
+            updateActiveCameraIntrinsicsForSpatialVideo()
             spatialStereoAvailable = !decoded.leftFrames.isEmpty && !decoded.rightFrames.isEmpty
             spatialDepthStatus = spatialStereoAvailable
                 ? "Stereo left/right frames are available. Run Vision to build stereo depth."
@@ -2313,15 +2491,23 @@ final class RotoMotionViewModel: ObservableObject {
             Spatial video metadata:
               baselineMeters: \(decoded.metadata.baselineMeters.map { "\($0)" } ?? "nil")
               horizontalFOVDegrees: \(decoded.metadata.horizontalFOVDegrees.map { "\($0)" } ?? "nil")
-              verticalFOVDegrees: \(decoded.metadata.verticalFOVDegrees.map { "\($0)" } ?? "nil")
+              verticalFOVDegrees: \(String(format: "%.3f", activeCameraIntrinsics.verticalFOVDegrees))
               disparityAdjustment: \(decoded.metadata.disparityAdjustment.map { "\($0)" } ?? "nil")
               imageSize: \(decoded.metadata.imageWidth)x\(decoded.metadata.imageHeight)
+              manualOverride: \(useManualSpatialCameraOverrides)
 
             Spatial stereo diagnostic dump:
               dumpDirectory: \(decoded.stereoDiagnostics.dumpDirectory.path)
               leftPreview: \(spatialLeftPreviewImage != nil)
               rightPreview: \(spatialRightPreviewImage != nil)
               diagnostics: \(spatialDiagnostics.count)
+            """)
+            diagnostics.log("""
+            Viewport camera FOV:
+              captureMode: \(captureMode.rawValue)
+              source: \(activeCameraIntrinsics.source)
+              horizontalFOV: \(activeCameraIntrinsics.horizontalFOVDegrees)
+              verticalFOV: \(activeCameraIntrinsics.verticalFOVDegrees)
             """)
         } catch {
             leftEyeFrames = []
@@ -2507,7 +2693,8 @@ final class RotoMotionViewModel: ObservableObject {
           horizontalFOVDegrees: \(metadata.horizontalFOVDegrees.map { "\($0)" } ?? "nil")
           imageWidth: \(metadata.imageWidth)
           imageHeight: \(metadata.imageHeight)
-          source: formatDescription + decodedPixelBufferSize
+          source: \(useManualSpatialCameraOverrides ? "manual overrides + decodedPixelBufferSize" : "formatDescription + decodedPixelBufferSize")
+          manualSpatialCameraOverrides: \(useManualSpatialCameraOverrides)
         """)
 
         let stereo = try StereoJointTriangulator.triangulate(
@@ -2528,12 +2715,14 @@ final class RotoMotionViewModel: ObservableObject {
             : Double(validCounts.reduce(0, +)) / Double(validCounts.count)
 
         spatialStereoAvailable = true
+        solveTargetMode = .spatialStereo3D
         spatialDepthStatus = """
         Stereo joint depth built:
           frames: \(stereo.frames.count)
           avg valid joints/frame: \(String(format: "%.1f", averageValid))
           baselineMeters: \(String(format: "%.5f", metadata.baselineMeters ?? 0))
           hFOV: \(String(format: "%.2f", metadata.horizontalFOVDegrees ?? 0))
+          solveTargetMode: \(solveTargetMode.rawValue)
         """
         spatialVideoStatus = spatialDepthStatus
         stereoVisionStatus = spatialVideoStatus
@@ -2616,17 +2805,6 @@ final class RotoMotionViewModel: ObservableObject {
         }
     }
 
-    private func explicitSpatialMetadataOverride() -> SpatialVideoCameraMetadata {
-        SpatialVideoCameraMetadata(
-            baselineMeters: spatialBaselineMeters > 0 ? spatialBaselineMeters : nil,
-            horizontalFOVDegrees: spatialHorizontalFOVDegrees > 0 ? spatialHorizontalFOVDegrees : nil,
-            verticalFOVDegrees: spatialVerticalFOVDegrees > 0 ? spatialVerticalFOVDegrees : nil,
-            disparityAdjustment: spatialDisparityAdjustment,
-            imageWidth: spatialVideoMetadata?.imageWidth ?? 1,
-            imageHeight: spatialVideoMetadata?.imageHeight ?? 1
-        )
-    }
-
     private func effectiveSpatialMetadata() -> SpatialVideoCameraMetadata {
         var metadata = spatialVideoMetadata ?? SpatialVideoCameraMetadata(
             baselineMeters: nil,
@@ -2637,22 +2815,22 @@ final class RotoMotionViewModel: ObservableObject {
             imageHeight: leftEyeFrames.first.map { Int($0.image.size.height.rounded()) } ?? 1
         )
 
-        if metadata.baselineMeters == nil,
+        if useManualSpatialCameraOverrides,
            spatialBaselineMeters > 0 {
             metadata.baselineMeters = spatialBaselineMeters
         }
 
-        if metadata.horizontalFOVDegrees == nil,
+        if useManualSpatialCameraOverrides,
            spatialHorizontalFOVDegrees > 0 {
             metadata.horizontalFOVDegrees = spatialHorizontalFOVDegrees
         }
 
-        if metadata.verticalFOVDegrees == nil,
+        if useManualSpatialCameraOverrides,
            spatialVerticalFOVDegrees > 0 {
             metadata.verticalFOVDegrees = spatialVerticalFOVDegrees
         }
 
-        if metadata.disparityAdjustment == nil {
+        if useManualSpatialCameraOverrides {
             metadata.disparityAdjustment = spatialDisparityAdjustment
         }
 

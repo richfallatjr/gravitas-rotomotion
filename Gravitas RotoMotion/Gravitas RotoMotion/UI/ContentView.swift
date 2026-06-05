@@ -172,12 +172,13 @@ struct ContentView: View {
                 rightNormalizedFrame: currentRightNormalizedFrame,
                 smoothedFrame: nil,
                 stereoJointFrame: roto.spatialStereoAvailable ? roto.currentStereoJointFrame : nil,
+                stereoTargetFrame: roto.currentStereoTargetFrame,
                 groundPlane: roto.groundPlane,
                 raySolveResult: roto.currentRaySolveResult,
                 raySolvedFrame: roto.currentRaySolvedFrame,
                 skinnedRigSession: roto.skinnedRigSession,
-                cameraFOVDegrees: roto.activeCameraFOVDegrees,
-                cameraProfileName: roto.cameraProfile.displayName,
+                cameraFOVDegrees: roto.activeViewportVerticalFOVDegrees,
+                cameraProfileName: roto.activeViewportCameraProfileName,
                 currentVideoPlaneZ: roto.currentVideoPlaneZ,
                 referenceRigScaleMultiplier: roto.referenceRigScaleMultiplier,
                 referenceRigX: roto.referenceRigX,
@@ -197,13 +198,14 @@ struct ContentView: View {
                 showRightEyeNormalizedOverlay: roto.shouldShowRightEyeNormalizedOverlay,
                 showSmoothedMeshy: false,
                 showStereo3DSkeleton: roto.showStereo3DSkeleton && roto.spatialStereoAvailable,
-                showStereoReprojectionOverlay: roto.showStereoReprojectionOverlay && roto.spatialStereoAvailable,
+                showStereoReprojectionOverlay: roto.spatialStereoAvailable,
                 showGroundPlane: roto.groundPlane.visible,
                 showVisionRays: roto.showVisionRays,
                 showRaySolvedRig: roto.showDebugSolvedSkeleton,
                 showSkinnedRig: roto.showSkinnedRig,
                 showRotationGizmo: roto.showRotationGizmo,
                 stereoSceneUnitsPerMeter: roto.raySceneUnitsPerMeter,
+                solveTargetMode: roto.solveTargetMode,
                 rotationGizmoSpace: roto.rotationGizmoSpace,
                 selectedRotationJoint: roto.selectedRotationJoint,
                 onRotationGizmoEulerChanged: { joint, euler in
@@ -383,7 +385,7 @@ struct ContentView: View {
                 .pickerStyle(.menu)
 
                 Text(
-                    "FOV vertical \(String(format: "%.1f", roto.activeCameraFOVDegrees))° / horizontal \(String(format: "%.1f", roto.cameraProfile.portraitHorizontalFOVDegrees))°"
+                    "FOV vertical \(String(format: "%.1f", roto.activeCameraIntrinsics.verticalFOVDegrees))° / horizontal \(String(format: "%.1f", roto.activeCameraIntrinsics.horizontalFOVDegrees))°"
                 )
                 .foregroundStyle(.secondary)
 
@@ -420,6 +422,8 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
+                Toggle("Manual Spatial Camera Overrides", isOn: $roto.useManualSpatialCameraOverrides)
+
                 HStack {
                     Text("Baseline m")
                         .frame(width: 78, alignment: .leading)
@@ -430,6 +434,7 @@ struct ContentView: View {
                         format: .number.precision(.fractionLength(5))
                     )
                     .textFieldStyle(.roundedBorder)
+                    .disabled(!roto.useManualSpatialCameraOverrides)
                 }
 
                 HStack {
@@ -442,6 +447,7 @@ struct ContentView: View {
                         format: .number.precision(.fractionLength(2))
                     )
                     .textFieldStyle(.roundedBorder)
+                    .disabled(!roto.useManualSpatialCameraOverrides)
 
                     Text("°")
                 }
@@ -456,6 +462,7 @@ struct ContentView: View {
                         format: .number.precision(.fractionLength(2))
                     )
                     .textFieldStyle(.roundedBorder)
+                    .disabled(!roto.useManualSpatialCameraOverrides)
 
                     Text("°")
                 }
@@ -487,9 +494,6 @@ struct ContentView: View {
                 .disabled(roto.normalizedLeftCapture == nil || roto.normalizedRightCapture == nil)
 
                 Toggle("Stereo 3D Skeleton", isOn: $roto.showStereo3DSkeleton)
-                    .disabled(!roto.spatialStereoAvailable)
-
-                Toggle("Stereo Reprojection Overlay", isOn: $roto.showStereoReprojectionOverlay)
                     .disabled(!roto.spatialStereoAvailable)
 
                 Text("Left frames: \(roto.leftEyeFrames.count), right frames: \(roto.rightEyeFrames.count)")
