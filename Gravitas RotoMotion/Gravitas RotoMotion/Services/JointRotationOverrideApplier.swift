@@ -74,9 +74,44 @@ enum JointRotationOverrideApplier {
                 return eulerFromKey(joint: joint, key: exact)
             }
 
+            guard keys.count > 1 else {
+                return eulerFromKey(joint: joint, key: keys[0])
+            }
+
             if let frameIndex,
-               let previous = keys.last(where: { $0.frameIndex <= frameIndex }) {
-                return eulerFromKey(joint: joint, key: previous)
+               frameIndex <= keys[0].frameIndex {
+                return eulerFromKey(joint: joint, key: keys[0])
+            }
+
+            if let frameIndex,
+               frameIndex >= keys[keys.count - 1].frameIndex {
+                return eulerFromKey(
+                    joint: joint,
+                    key: keys[keys.count - 1]
+                )
+            }
+
+            if let frameIndex {
+                for i in 0..<(keys.count - 1) {
+                    let a = keys[i]
+                    let b = keys[i + 1]
+
+                    guard frameIndex >= a.frameIndex,
+                          frameIndex <= b.frameIndex,
+                          let ea = eulerFromKey(joint: joint, key: a),
+                          let eb = eulerFromKey(joint: joint, key: b) else {
+                        continue
+                    }
+
+                    let denom = max(Float(b.frameIndex - a.frameIndex), 1.0)
+                    let t = Float(frameIndex - a.frameIndex) / denom
+                    let e = ea + (eb - ea) * t
+
+                    return ManualRotationConstraint.clampedEulerXYZ(
+                        joint: joint,
+                        values: e
+                    )
+                }
             }
 
             return eulerFromKey(joint: joint, key: keys[0])

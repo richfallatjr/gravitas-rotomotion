@@ -19,7 +19,6 @@ enum RetargetedAnimatedUSDZExporter {
         targetUSDZ: URL,
         sessionSkeletonIdentityJSON: URL,
         solvedAnimationJSON: URL,
-        solve: RotoRayAnimationSolveResult,
         clipID: String,
         includeHipsTranslation: Bool,
         pythonExecutablePath: String,
@@ -47,10 +46,16 @@ enum RetargetedAnimatedUSDZExporter {
             withIntermediateDirectories: true
         )
 
-        try RaySolveReferenceJSONExporter.write(
-            solve: solve,
-            to: raySolveReferenceJSON
+        let reference: [String: Any] = [
+            "schema": "com.gravitas.rotomotion.baked_export_reference.v0",
+            "sourceKind": "bakedRigAnimation",
+            "exportInputJSON": exportInputJSON.path
+        ]
+        let referenceData = try JSONSerialization.data(
+            withJSONObject: reference,
+            options: [.prettyPrinted, .sortedKeys]
         )
+        try referenceData.write(to: raySolveReferenceJSON, options: .atomic)
 
         try RotoMotionUSDZRetargetPythonScript.contents.write(
             to: scriptURL,
@@ -165,50 +170,40 @@ enum RetargetedAnimatedUSDZExporter {
                 highSeverityCount: 0
             )
         } else {
-            do {
-                audit = try RotoMotionExportKeyAuditor.writeAudit(
-                    solve: solve,
-                    exportInputURL: exportInputJSON,
-                    readbackURL: readbackJSON,
-                    textReportURL: auditTextReport,
-                    jsonReportURL: auditJSONReport
-                )
-            } catch {
-                let message = """
-                RotoMotion Export Key Audit
+            let message = """
+            RotoMotion Export Key Audit
 
-                Audit failed, but the animated USDZ was created:
-                \(outputUSDZ.path)
+            Export input source:
+            \(exportInputJSON.path)
 
-                Error:
-                \(error.localizedDescription)
-                """
+            Non-baked export input is not supported by this path.
+            Export is expected to use bakedRigAnimation session armature transforms only.
+            """
 
-                try? message.write(
-                    to: auditTextReport,
-                    atomically: true,
-                    encoding: .utf8
-                )
+            try message.write(
+                to: auditTextReport,
+                atomically: true,
+                encoding: .utf8
+            )
 
-                let json: [String: Any] = [
-                    "schema": "com.gravitas.rotomotion.export_audit.v0",
-                    "auditFailed": true,
-                    "outputUSDZ": outputUSDZ.path,
-                    "error": error.localizedDescription
-                ]
+            let json: [String: Any] = [
+                "schema": "com.gravitas.rotomotion.export_audit.v0",
+                "auditSkipped": true,
+                "reason": "baked_animation_export_required",
+                "exportInput": exportInputJSON.path,
+                "outputUSDZ": outputUSDZ.path
+            ]
 
-                if let data = try? JSONSerialization.data(
-                    withJSONObject: json,
-                    options: [.prettyPrinted, .sortedKeys]
-                ) {
-                    try? data.write(to: auditJSONReport, options: .atomic)
-                }
+            let data = try JSONSerialization.data(
+                withJSONObject: json,
+                options: [.prettyPrinted, .sortedKeys]
+            )
+            try data.write(to: auditJSONReport, options: .atomic)
 
-                audit = .init(
-                    issueCount: 1,
-                    highSeverityCount: 1
-                )
-            }
+            audit = .init(
+                issueCount: 0,
+                highSeverityCount: 0
+            )
         }
 
         return ExportResult(

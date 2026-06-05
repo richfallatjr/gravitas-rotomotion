@@ -271,7 +271,6 @@ final class RotoMotionViewModel: ObservableObject {
     let defaultImagePlaneZ: Float = -2000.0
     let referenceRigYawCorrection: Float = .pi
     let referenceRigScaleVisualReduction: Float = 1.0 / 3.0
-    private let initialReferenceFitYOffsetMeters: Float = 0.1524
     @Published var currentVideoPlaneZ: Float = -2000.0 {
         didSet { persist(currentVideoPlaneZ, AppStorageKeys.currentVideoPlaneZ) }
     }
@@ -335,9 +334,7 @@ final class RotoMotionViewModel: ObservableObject {
                 return
             }
 
-            bakedRigAnimation = nil
-            bakedRigAnimationStatus = "Bake is stale. Re-bake animation."
-            sessionIsDirty = true
+            invalidateBakedAnimationBecauseRotationOverridesChanged()
             applyCurrentFrameToLiveRig()
         }
     }
@@ -1689,15 +1686,27 @@ final class RotoMotionViewModel: ObservableObject {
           held override joints: \(heldRotationOverrideEulerXYZByJoint.keys.sorted().joined(separator: ","))
         """)
 
+        let authoredJoints = authoredRotationJoints()
+        diagnostics.log("""
+        Bake authored rotation joints:
+        \(authoredJoints.sorted().joined(separator: ", "))
+        """)
+
         let selectedKeys = rotationOverrideLayer.keyframesByJoint[selectedRotationJoint] ?? []
         diagnostics.log("""
-        Bake selected joint key check:
+        Bake selected joint authored input:
           joint: \(selectedRotationJoint)
           keyCount: \(selectedKeys.count)
-          keyFrames: \(selectedKeys.map { "\($0.frameIndex)" }.joined(separator: ","))
+          keyFrames: \(selectedKeys.map { "\($0.frameIndex)" }.joined(separator: ", "))
+          keyEulerXYZ: \(selectedKeys.map { "\($0.frameIndex):\($0.eulerXYZ)" }.joined(separator: " | "))
+          authoredMode: \(selectedKeys.isEmpty ? "false" : "true")
         """)
 
         var frames: [BakedRigAnimation.Frame] = []
+        let selectedKeyFrameSet = Set(selectedKeys.map { $0.frameIndex })
+        var lastLoggedSelectedEuler: SIMD3<Float>?
+        var evaluatedDebugFrames: [[String: Any]] = []
+        var sampledDebugFrames: [[String: Any]] = []
 
         for solvedFrame in solve.frames {
             guard let normalizedFrame = normalizedFrameClosestTo(
@@ -1715,20 +1724,74 @@ final class RotoMotionViewModel: ObservableObject {
                 videoPlaneZ: currentVideoPlaneZ
             )
 
-            applyRotationOverridesToRigForBakeFrame(
+            let selectedEulerForFrame = authoredJoints.contains(selectedRotationJoint)
+                ? authoredEulerForFrame(
+                    joint: selectedRotationJoint,
+                    frameIndex: solvedFrame.frameIndex
+                )
+                : nil
+
+            var shouldLogSelectedSample = false
+
+            if let euler = selectedEulerForFrame {
+                evaluatedDebugFrames.append([
+                    "frame": solvedFrame.frameIndex,
+                    "time": solvedFrame.timeSeconds,
+                    "euler": [
+                        Double(euler.x),
+                        Double(euler.y),
+                        Double(euler.z)
+                    ]
+                ])
+
+                let didChange = lastLoggedSelectedEuler.map { previous in
+                    simd_length(euler - previous) > 0.0001
+                } ?? true
+
+                if didChange || selectedKeyFrameSet.contains(solvedFrame.frameIndex) {
+                    diagnostics.log("""
+                    Bake authored replacement:
+                      joint: \(selectedRotationJoint)
+                      frame: \(solvedFrame.frameIndex)
+                      time: \(String(format: "%.4f", solvedFrame.timeSeconds))
+                      eulerXYZ: \(euler)
+                    """)
+                    lastLoggedSelectedEuler = euler
+                    shouldLogSelectedSample = true
+                }
+            }
+
+            var bakedFrame = BakedRigAnimationSampler.sample(
                 session: session,
+                frameIndex: solvedFrame.frameIndex,
+                timeSeconds: solvedFrame.timeSeconds,
+                jointNames: session.jointOrder
+            )
+
+            bakedFrame = replaceAuthoredJointRotations(
+                bakedFrame,
+                authoredJoints: authoredJoints,
                 frameIndex: solvedFrame.frameIndex,
                 timeSeconds: solvedFrame.timeSeconds
             )
 
-            frames.append(
-                BakedRigAnimationSampler.sample(
-                    session: session,
-                    frameIndex: solvedFrame.frameIndex,
-                    timeSeconds: solvedFrame.timeSeconds,
-                    jointNames: session.jointOrder
-                )
-            )
+            frames.append(bakedFrame)
+
+            if let joint = bakedFrame.joints[selectedRotationJoint] {
+                sampledDebugFrames.append([
+                    "frame": bakedFrame.frameIndex,
+                    "time": bakedFrame.timeSeconds,
+                    "localRotationEulerXYZ": joint.localRotationEulerXYZ
+                ])
+
+                if shouldLogSelectedSample {
+                    diagnostics.log("""
+                    Bake sampled selected joint:
+                      frame: \(bakedFrame.frameIndex)
+                      localRotationEulerXYZ: \(joint.localRotationEulerXYZ)
+                    """)
+                }
+            }
         }
 
         let baked = BakedRigAnimation(
@@ -1739,6 +1802,12 @@ final class RotoMotionViewModel: ObservableObject {
             frames: frames
         )
 
+        writeBakeRotationOverrideDebugJSON(
+            selectedKeys: selectedKeys,
+            evaluatedFrames: evaluatedDebugFrames,
+            sampledFrames: sampledDebugFrames
+        )
+
         bakedRigAnimation = baked
         sessionArmaturePoseBuffer = baked.asSessionArmaturePoseBuffer()
         sessionPoseSource = .posedArmatureLocalTransforms
@@ -1747,6 +1816,41 @@ final class RotoMotionViewModel: ObservableObject {
         usdzRetargetStatus = bakedRigAnimationStatus
         status = bakedRigAnimationStatus
         diagnostics.log(bakedRigAnimationStatus)
+    }
+
+    private func writeBakeRotationOverrideDebugJSON(
+        selectedKeys: [JointRotationOverrideLayer.Keyframe],
+        evaluatedFrames: [[String: Any]],
+        sampledFrames: [[String: Any]]
+    ) {
+        let inputKeys: [[String: Any]] = selectedKeys.map { key in
+            [
+                "frame": key.frameIndex,
+                "time": key.timeSeconds,
+                "eulerXYZ": key.eulerXYZ
+            ]
+        }
+
+        let root: [String: Any] = [
+            "selectedJoint": selectedRotationJoint,
+            "inputKeys": inputKeys,
+            "evaluatedFrames": evaluatedFrames,
+            "sampledFrames": sampledFrames
+        ]
+
+        do {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("bake_rotation_override_debug.json")
+            let data = try JSONSerialization.data(
+                withJSONObject: root,
+                options: [.prettyPrinted, .sortedKeys]
+            )
+
+            try data.write(to: url, options: .atomic)
+            diagnostics.log("Wrote bake rotation override debug JSON: \(url.path)")
+        } catch {
+            diagnostics.log("Bake rotation override debug JSON failed: \(error.localizedDescription)")
+        }
     }
 
     func bakeSessionArmaturePoseBuffer() {
@@ -2791,6 +2895,8 @@ final class RotoMotionViewModel: ObservableObject {
             return
         }
 
+        applyCurrentReferenceRigDisplayTransform(to: session)
+
         guard let frame = currentNormalizedFrame ?? normalizedCapture?.frames.first else {
             diagnostics.log("Hips<->Spine fit skipped: no normalized frame.")
             return
@@ -2800,8 +2906,6 @@ final class RotoMotionViewModel: ObservableObject {
             diagnostics.log("Hips<->Spine fit skipped: no videoPlaneSize.")
             return
         }
-
-        applyCurrentReferenceRigDisplayTransform(to: session)
 
         guard let result = ReferenceRigHipsSpineFitter.fit(
             session: session,
@@ -2814,8 +2918,7 @@ final class RotoMotionViewModel: ObservableObject {
             return
         }
 
-        var correctedPosition = result.finalRootPosition
-        correctedPosition.y += initialReferenceFitYOffsetMeters
+        let correctedPosition = result.finalRootPosition
         session.displayRootNode.simdPosition = correctedPosition
 
         referenceRigX = Double(correctedPosition.x)
@@ -2830,17 +2933,10 @@ final class RotoMotionViewModel: ObservableObject {
           targetLength: \(String(format: "%.6f", result.targetLength))
           projectedLength: \(String(format: "%.6f", result.projectedLength))
           fitRootPosition: \(result.finalRootPosition)
-          yOffsetMeters: \(String(format: "%.4f", initialReferenceFitYOffsetMeters))
-          finalRootPositionWithOffset: \(correctedPosition)
+          finalRootPosition: \(correctedPosition)
         """
 
         diagnostics.log(referenceRigPlacementStatus)
-        diagnostics.log("""
-        Reference Hips<->Spine fit Y offset applied:
-          offsetMeters: \(initialReferenceFitYOffsetMeters)
-          offsetAxis: +Y
-          finalRootPositionWithOffset: \(session.displayRootNode.simdPosition)
-        """)
     }
 
     private func applyCurrentReferenceRigDisplayTransform(
@@ -2858,6 +2954,12 @@ final class RotoMotionViewModel: ObservableObject {
             0
         )
         session.correctionNode.simdEulerAngles = SIMD3<Float>(0, 0, 0)
+    }
+
+    private func invalidateBakedAnimationBecauseRotationOverridesChanged() {
+        bakedRigAnimation = nil
+        bakedRigAnimationStatus = "Bake is stale. Re-bake animation."
+        sessionIsDirty = true
     }
 
     func refreshSelectedJointEulerFields() {
@@ -2911,9 +3013,7 @@ final class RotoMotionViewModel: ObservableObject {
         liveRotationOverrideEulerXYZByJoint[joint] = eulerRadians
         isRotationGizmoDragging = true
         rotationOverrideRevision += 1
-        sessionIsDirty = true
-        bakedRigAnimation = nil
-        bakedRigAnimationStatus = "Bake is stale. Re-bake animation."
+        invalidateBakedAnimationBecauseRotationOverridesChanged()
 
         rotationAuthoringStatus = """
         Manual Euler override for \(joint):
@@ -2940,9 +3040,7 @@ final class RotoMotionViewModel: ObservableObject {
         heldRotationOverrideEulerXYZByJoint[joint] = clamped
         isRotationGizmoDragging = true
         rotationOverrideRevision += 1
-        sessionIsDirty = true
-        bakedRigAnimation = nil
-        bakedRigAnimationStatus = "Bake is stale. Re-bake animation."
+        invalidateBakedAnimationBecauseRotationOverridesChanged()
 
         if joint == selectedRotationJoint {
             isUpdatingEulerFieldsFromSelection = true
@@ -3030,46 +3128,68 @@ final class RotoMotionViewModel: ObservableObject {
         }
     }
 
-    func rotationOverrideEulerForFrame(
-        joint: String,
-        frameIndex: Int,
-        timeSeconds: Double
-    ) -> SIMD3<Float>? {
-        _ = timeSeconds
+    func authoredRotationJoints() -> Set<String> {
+        Set(
+            rotationOverrideLayer.keyframesByJoint
+                .filter { !$0.value.isEmpty }
+                .map { $0.key }
+        )
+    }
 
+    func authoredEulerForFrame(
+        joint: String,
+        frameIndex: Int
+    ) -> SIMD3<Float>? {
         let keys = (rotationOverrideLayer.keyframesByJoint[joint] ?? [])
             .sorted { $0.frameIndex < $1.frameIndex }
 
-        if !keys.isEmpty {
-            if let exact = keys.first(where: { $0.frameIndex == frameIndex }) {
-                return eulerFromRotationKey(joint: joint, key: exact)
-            }
-
-            if let previous = keys.last(where: { $0.frameIndex <= frameIndex }) {
-                return eulerFromRotationKey(joint: joint, key: previous)
-            }
-
-            return eulerFromRotationKey(joint: joint, key: keys[0])
+        guard !keys.isEmpty else {
+            return nil
         }
 
-        if let live = liveRotationOverrideEulerXYZByJoint[joint] {
-            return ManualRotationConstraint.clampedEulerXYZ(
+        if let exact = keys.first(where: { $0.frameIndex == frameIndex }) {
+            return eulerFromKey(joint: joint, key: exact)
+        }
+
+        if keys.count == 1 {
+            return eulerFromKey(joint: joint, key: keys[0])
+        }
+
+        if frameIndex <= keys[0].frameIndex {
+            return eulerFromKey(joint: joint, key: keys[0])
+        }
+
+        if frameIndex >= keys[keys.count - 1].frameIndex {
+            return eulerFromKey(
                 joint: joint,
-                values: live
+                key: keys[keys.count - 1]
             )
         }
 
-        if let held = heldRotationOverrideEulerXYZByJoint[joint] {
+        for i in 0..<(keys.count - 1) {
+            let a = keys[i]
+            let b = keys[i + 1]
+
+            guard frameIndex >= a.frameIndex,
+                  frameIndex <= b.frameIndex,
+                  let ea = eulerFromKey(joint: joint, key: a),
+                  let eb = eulerFromKey(joint: joint, key: b) else {
+                continue
+            }
+
+            let t = Float(frameIndex - a.frameIndex) / Float(max(b.frameIndex - a.frameIndex, 1))
+            let e = ea + (eb - ea) * t
+
             return ManualRotationConstraint.clampedEulerXYZ(
                 joint: joint,
-                values: held
+                values: e
             )
         }
 
         return nil
     }
 
-    private func eulerFromRotationKey(
+    private func eulerFromKey(
         joint: String,
         key: JointRotationOverrideLayer.Keyframe
     ) -> SIMD3<Float>? {
@@ -3084,6 +3204,55 @@ final class RotoMotionViewModel: ObservableObject {
                 Float(key.eulerXYZ[1]),
                 Float(key.eulerXYZ[2])
             )
+        )
+    }
+
+    func rotationOverrideEulerForFrame(
+        joint: String,
+        frameIndex: Int,
+        timeSeconds: Double
+    ) -> SIMD3<Float>? {
+        JointRotationOverrideApplier.rotationOverrideEuler(
+            joint: joint,
+            frameIndex: frameIndex,
+            timeSeconds: timeSeconds,
+            overrideLayer: rotationOverrideLayer,
+            heldRotationOverrideEulerXYZByJoint: heldRotationOverrideEulerXYZByJoint,
+            liveRotationOverrideEulerXYZByJoint: liveRotationOverrideEulerXYZByJoint,
+            liveOverridesActive: isRotationGizmoDragging
+        )
+    }
+
+    func replaceAuthoredJointRotations(
+        _ frame: BakedRigAnimation.Frame,
+        authoredJoints: Set<String>,
+        frameIndex: Int,
+        timeSeconds: Double
+    ) -> BakedRigAnimation.Frame {
+        var joints = frame.joints
+
+        for joint in authoredJoints {
+            guard var existing = joints[joint],
+                  let authoredEuler = authoredEulerForFrame(
+                    joint: joint,
+                    frameIndex: frameIndex
+                  ) else {
+                continue
+            }
+
+            existing.localRotationEulerXYZ = [
+                Double(authoredEuler.x),
+                Double(authoredEuler.y),
+                Double(authoredEuler.z)
+            ]
+
+            joints[joint] = existing
+        }
+
+        return BakedRigAnimation.Frame(
+            frameIndex: frame.frameIndex,
+            timeSeconds: frame.timeSeconds,
+            joints: joints
         )
     }
 
@@ -3138,9 +3307,7 @@ final class RotoMotionViewModel: ObservableObject {
         rotationOverrideRevision += 1
 
         status = rotationAuthoringStatus
-        sessionIsDirty = true
-        bakedRigAnimation = nil
-        bakedRigAnimationStatus = "Bake is stale. Re-bake animation."
+        invalidateBakedAnimationBecauseRotationOverridesChanged()
         diagnostics.log("""
         Rotation key added:
           joint: \(joint)
@@ -3166,9 +3333,7 @@ final class RotoMotionViewModel: ObservableObject {
 
         rotationAuthoringStatus = "Cleared \(oldCount) rotation keys for \(joint). Held override remains."
         status = rotationAuthoringStatus
-        sessionIsDirty = true
-        bakedRigAnimation = nil
-        bakedRigAnimationStatus = "Bake is stale. Re-bake animation."
+        invalidateBakedAnimationBecauseRotationOverridesChanged()
         diagnostics.log(rotationAuthoringStatus)
         applyCurrentFrameToLiveRig()
         refreshSelectedJointEulerFields()
@@ -3185,9 +3350,7 @@ final class RotoMotionViewModel: ObservableObject {
 
         rotationAuthoringStatus = "Cleared all Euler rotation override data for \(joint)."
         status = rotationAuthoringStatus
-        sessionIsDirty = true
-        bakedRigAnimation = nil
-        bakedRigAnimationStatus = "Bake is stale. Re-bake animation."
+        invalidateBakedAnimationBecauseRotationOverridesChanged()
         diagnostics.log(rotationAuthoringStatus)
         applyCurrentFrameToLiveRig()
         refreshSelectedJointEulerFields()
@@ -3389,24 +3552,14 @@ final class RotoMotionViewModel: ObservableObject {
         Export Animated Target USDZ requested:
           targetUSDZ: \(targetCharacterUSDZURL?.path ?? "nil")
           clipID: \(retargetClipID)
-          raySolveExists: \(rayAnimationSolveResult != nil)
-          solvedFrames: \(rayAnimationSolveResult?.frames.count ?? 0)
+          bakedFrames: \(bakedRigAnimation?.frames.count ?? 0)
         """)
 
-        guard let solve = rayAnimationSolveResult,
-              !solve.frames.isEmpty else {
-            usdzRetargetStatus = "Run full ray animation solve before exporting."
+        guard let bakedRigAnimation else {
+            usdzRetargetStatus = "Bake animation before export. Rotation keys are not baked."
             status = usdzRetargetStatus
             diagnostics.log(usdzRetargetStatus)
             return
-        }
-
-        if sessionPoseSource == .none {
-            sessionPoseSource = .drawnJointPositions
-            sessionPoseStatus = """
-            Ray solve exists, but no posed armature local-transform buffer has been captured.
-            Treating the viewport source as drawn joint positions.
-            """
         }
 
         guard sessionPoseSource == .posedArmatureLocalTransforms else {
@@ -3418,13 +3571,6 @@ final class RotoMotionViewModel: ObservableObject {
             Session pose source:
             \(sessionPoseSource.rawValue)
             """
-            status = usdzRetargetStatus
-            diagnostics.log(usdzRetargetStatus)
-            return
-        }
-
-        guard let bakedRigAnimation else {
-            usdzRetargetStatus = "Bake animation before export. Current rotation keys are not baked."
             status = usdzRetargetStatus
             diagnostics.log(usdzRetargetStatus)
             return
@@ -3590,14 +3736,13 @@ final class RotoMotionViewModel: ObservableObject {
               Target USDZ: \(targetURL.path)
               Session skeleton path: \(sessionSkeletonPath ?? "nil")
               Session joint count: \(sessionJointPaths.count)
-              Solved frames: \(solve.frames.count)
+              Baked frames: \(bakedRigAnimation.frames.count)
             """)
 
             let exportResult = try RetargetedAnimatedUSDZExporter.exportAnimatedTargetUSDZ(
                 targetUSDZ: targetURL,
                 sessionSkeletonIdentityJSON: sessionSkeletonJSON,
                 solvedAnimationJSON: sessionPoseJSON,
-                solve: solve,
                 clipID: retargetClipID,
                 includeHipsTranslation: includeHipsTranslationInUSDZ,
                 pythonExecutablePath: pythonExecutablePath,
@@ -3635,7 +3780,7 @@ final class RotoMotionViewModel: ObservableObject {
               auditJSON: \(exportResult.auditJSONReport.path)
               auditIssues: \(exportResult.auditHighSeverityCount) high / \(exportResult.auditIssueCount) total
               target: \(targetURL.lastPathComponent)
-              frames: \(solve.frames.count)
+              frames: \(bakedRigAnimation.frames.count)
               includeHipsTranslation: \(includeHipsTranslationInUSDZ)
               python: \(pythonExecutablePath)
             """)

@@ -15,7 +15,7 @@ struct BakedRigAnimation: Codable {
 
     struct JointTransform: Codable {
         let localTranslationXYZ: [Double]
-        let localRotationEulerXYZ: [Double]
+        var localRotationEulerXYZ: [Double]
         let localScaleXYZ: [Double]
     }
 

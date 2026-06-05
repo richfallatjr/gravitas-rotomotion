@@ -871,13 +871,6 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 )
             }
 
-            applyReferenceRigDisplayPlacement(
-                session: session,
-                x: referenceRigX,
-                y: referenceRigY,
-                z: referenceRigZ
-            )
-
             session.displayRootNode.isHidden = !visible
             rigBoundsRoot.isHidden = !visible
 

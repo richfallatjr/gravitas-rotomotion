@@ -1,0 +1,584 @@
+RotoMotion Hips Lock Root Cause Handoff
+======================================
+
+Context
+-------
+The current rig behavior locks Hips/root motion across the animation. The initial Hips <-> Spine fit is supposed to be only a rough spatial placement. After that, joint rotomation should refine the body freely. In the current code, that does not happen.
+
+The lock is primarily a global parent/root lock through `session.displayRootNode`, not per-joint shifting. The solver mostly rotates bones under a fixed display root. It does not translate Hips/root per frame.
+
+
+Main conclusion
+---------------
+Hips are locked because:
+
+1. Initial fitting writes a single fixed `displayRootNode.simdPosition`.
+2. The viewport reapplies that same `referenceRigX/Y/Z` display-root placement every update before solving.
+3. The per-frame rotomation driver resets bones to rest each frame but does not move `displayRootNode`.
+4. The per-frame curve-pinned solve explicitly removes the Hips ray.
+5. The solve can rotate Hips to move Spine, but it cannot translate Hips/root to follow body motion.
+6. Bake uses the same fixed-root rotomation path, so the baked animation inherits the locked Hips.
+7. Export can also strip Hips translation because `includeHipsTranslationInUSDZ` defaults to false.
+
+
+Important files
+---------------
+All paths below are relative to repo root.
+
+- Gravitas RotoMotion/Gravitas RotoMotion/UI/RotoMotionViewModel.swift
+- Gravitas RotoMotion/Gravitas RotoMotion/UI/RotoSceneVideoViewport.swift
+- Gravitas RotoMotion/Gravitas RotoMotion/Services/SkinnedRigRotomationDriver.swift
+- Gravitas RotoMotion/Gravitas RotoMotion/Services/ReferenceRigHipsSpineFitter.swift
+- Gravitas RotoMotion/Gravitas RotoMotion/Services/AnimatedUSDZExport/SolvedAnimationJSONExporter.swift
+- Gravitas RotoMotion/Gravitas RotoMotion/Services/AnimatedUSDZExport/RotoMotionUSDZRetargetPythonScript.swift
+
+
+1. Initial fit writes a fixed display-root position
+--------------------------------------------------
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/Services/ReferenceRigHipsSpineFitter.swift
+
+Relevant code:
+
+    let originalRootPosition = session.displayRootNode.simdPosition
+
+    func placeRootAtHipsTarget(z: Float) -> (rootPosition: SIMD3<Float>, hipsWorld: SIMD3<Float>) {
+        let desiredHips = pointOnRayAtZ(
+            origin: cameraOrigin,
+            direction: hipsRay,
+            z: z
+        )
+
+        let currentHips = hipsBone.simdWorldPosition
+        let delta = desiredHips - currentHips
+        let rootPosition = session.displayRootNode.simdPosition + delta
+
+        return (rootPosition, desiredHips)
+    }
+
+    ...
+
+    session.displayRootNode.simdPosition = best.rootPosition
+
+This is fine as an initial rough placement. The problem is downstream: this root position becomes the repeated static base for every frame.
+
+
+2. ViewModel stores the fitted root as persistent reference placement
+--------------------------------------------------------------------
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/UI/RotoMotionViewModel.swift
+
+Relevant code:
+
+    var correctedPosition = result.finalRootPosition
+    correctedPosition.y += initialReferenceFitYOffsetMeters
+    session.displayRootNode.simdPosition = correctedPosition
+
+    referenceRigX = Double(correctedPosition.x)
+    referenceRigY = Double(correctedPosition.y)
+    referenceRigZ = Double(correctedPosition.z)
+    referenceRigCurrentZ = correctedPosition.z
+
+This captures the initial fit into `referenceRigX/Y/Z`. That is acceptable for initial placement metadata, but those values are later reapplied every viewport update.
+
+
+3. Viewport reapplies the fixed display-root placement every update
+------------------------------------------------------------------
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/UI/RotoSceneVideoViewport.swift
+
+Relevant code:
+
+    applyReferenceRigDisplayPlacement(
+        session: session,
+        x: referenceRigX,
+        y: referenceRigY,
+        z: referenceRigZ
+    )
+
+    session.displayRootNode.isHidden = !visible
+    rigBoundsRoot.isHidden = !visible
+
+    if applySolvedPoseToReferenceRig,
+       let frame,
+       let normalizedFrame {
+        SkinnedRigRotomationDriver.rotomateFrameWithCurvePins(
+            frame,
+            normalizedFrame: normalizedFrame,
+            session: session,
+            cameraOrigin: SIMD3<Float>(0, 0, 0),
+            videoPlaneSize: videoPlaneSize,
+            videoPlaneZ: currentVideoPlaneZ
+        )
+
+The called placement method is:
+
+    private func applyReferenceRigDisplayPlacement(
+        session: SkinnedRigSession,
+        x: Double,
+        y: Double,
+        z: Double
+    ) {
+        session.displayRootNode.simdPosition = SIMD3<Float>(
+            Float(x),
+            Float(y),
+            Float(z)
+        )
+
+        session.displayRootNode.simdScale = SIMD3<Float>(1, 1, 1)
+
+        session.displayRootNode.simdEulerAngles = SIMD3<Float>(
+            -Float.pi / 2.0,
+            Float.pi * 2.0,
+            0
+        )
+
+        session.correctionNode.simdEulerAngles = SIMD3<Float>(0, 0, 0)
+        session.displayRootNode.isHidden = false
+        session.displayRootNode.opacity = 1.0
+        ...
+    }
+
+This is a hard global parent transform reset. It happens before per-frame rotomation. Any per-frame root movement would be erased unless it is applied after this and allowed to persist for the current frame.
+
+
+4. Curve-pinned rotomation removes Hips from the rays
+----------------------------------------------------
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/Services/SkinnedRigRotomationDriver.swift
+
+Relevant code:
+
+    static func rotomateFrameWithCurvePins(
+        _ frame: RotoRayAnimationSolveResult.Frame,
+        normalizedFrame: NormalizedMeshyPoseCapture.Frame,
+        session: SkinnedRigSession,
+        cameraOrigin: SIMD3<Float>,
+        videoPlaneSize: CGSize,
+        videoPlaneZ: Float,
+        settings: CurvePinnedSettings = .default
+    ) {
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = 0
+
+        resetToRest(session: session)
+
+        var rays = JointRayBuilder.buildRays(
+            normalizedFrame: normalizedFrame,
+            cameraOrigin: cameraOrigin,
+            videoPlaneSize: videoPlaneSize,
+            videoPlaneZ: videoPlaneZ
+        )
+        rays.removeValue(forKey: "Hips")
+
+        ...
+    }
+
+This guarantees the per-frame curve-pinned driver does not use the Hips ray. That was intended to avoid hard Hips pinning, but the result is no Hips translation/refinement at all because no replacement root motion solve was added.
+
+
+5. resetToRest resets all bones, but not the display root
+---------------------------------------------------------
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/Services/SkinnedRigRotomationDriver.swift
+
+Relevant code:
+
+    static func resetToRest(session: SkinnedRigSession) {
+        for jointName in session.jointOrder {
+            guard let bone = session.bonesByCanonicalName[jointName],
+                  let restPosition = session.restLocalPositions[jointName],
+                  let restOrientation = session.restLocalOrientations[jointName],
+                  let restScale = session.restLocalScales[jointName] else {
+                continue
+            }
+
+            bone.simdPosition = restPosition
+            bone.simdOrientation = restOrientation
+            bone.simdScale = restScale
+        }
+    }
+
+This means each frame starts from rest local joint transforms under the same global `displayRootNode`. Since `displayRootNode` is not moved by the frame solve, Hips world position is effectively restored to the same base every frame.
+
+
+6. Torso solve rotates Hips but does not move Hips/root
+------------------------------------------------------
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/Services/SkinnedRigRotomationDriver.swift
+
+Relevant code:
+
+    static let torsoChain: [String] = [
+        "Hips",
+        "Spine",
+        "neck",
+        "Head",
+        "headfront"
+    ]
+
+    private static func solveTorsoChain(
+        rays: [String: JointRay],
+        session: SkinnedRigSession
+    ) {
+        for i in 0..<(torsoChain.count - 1) {
+            let parentName = torsoChain[i]
+            let childName = torsoChain[i + 1]
+
+            guard let parentNode = session.bonesByCanonicalName[parentName],
+                  let childNode = session.bonesByCanonicalName[childName],
+                  let childRay = rays[childName] else {
+                continue
+            }
+
+            let parentWorld = parentNode.simdWorldPosition
+            let childWorld = childNode.simdWorldPosition
+            let boneLength = max(
+                simd_length(childWorld - parentWorld),
+                0.0001
+            )
+            let target = pointOnRayAtDistanceFromParent(
+                ray: childRay,
+                parent: parentWorld,
+                distance: boneLength,
+                fallback: childWorld
+            )
+
+            rotateParentToMoveChild(
+                parentNode: parentNode,
+                childNode: childNode,
+                childTarget: target
+            )
+        }
+    }
+
+For the first link, parent is Hips and child is Spine. This rotates the Hips bone so Spine tends toward the Spine ray. It does not translate Hips. So Hips is not "pinned to its ray", but it is still spatially locked because its parent/root never moves.
+
+
+7. Limb solving is anchored to the fixed Hips/root chain
+-------------------------------------------------------
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/Services/SkinnedRigRotomationDriver.swift
+
+Relevant leg code:
+
+    private static func solvePoleLockedLeg(
+        side: String,
+        rays: [String: JointRay],
+        session: SkinnedRigSession,
+        frameIndex: Int
+    ) {
+        let hipName = "\(side)UpLeg"
+        let kneeName = "\(side)Leg"
+        let ankleName = "\(side)Foot"
+        ...
+
+        let hipWorld = hip.simdWorldPosition
+        ...
+
+        let ankleTarget = closestReachablePointOnRay(
+            ray: ankleRay,
+            root: hipWorld,
+            minDistance: abs(upperLength - lowerLength) + 0.0001,
+            maxDistance: upperLength + lowerLength - 0.0001
+        )
+
+        ...
+
+        rotateParentToMoveChild(
+            parentNode: hip,
+            childNode: knee,
+            childTarget: solvedKnee
+        )
+    }
+
+The leg root is `LeftUpLeg` or `RightUpLeg`. Those are children of Hips. Since Hips/root translation is fixed, legs solve from a static pelvis base. Feet can only be reached by rotations under that base, which makes the character feel locked and forces bad inside-out poses.
+
+
+8. Bake uses the same fixed-root solve path
+------------------------------------------
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/UI/RotoMotionViewModel.swift
+
+Relevant code:
+
+    let savedRootPosition = session.displayRootNode.simdPosition
+    let savedRootOrientation = session.displayRootNode.simdOrientation
+    let savedRootScale = session.displayRootNode.simdScale
+    ...
+
+    for solvedFrame in solve.frames {
+        ...
+
+        SkinnedRigRotomationDriver.rotomateFrameWithCurvePins(
+            solvedFrame,
+            normalizedFrame: normalizedFrame,
+            session: session,
+            cameraOrigin: SIMD3<Float>(0, 0, 0),
+            videoPlaneSize: videoPlaneSize,
+            videoPlaneZ: currentVideoPlaneZ
+        )
+
+        applyRotationOverridesToRigForBakeFrame(...)
+
+        frames.append(
+            BakedRigAnimationSampler.sample(...)
+        )
+    }
+
+    defer {
+        session.displayRootNode.simdPosition = savedRootPosition
+        session.displayRootNode.simdOrientation = savedRootOrientation
+        session.displayRootNode.simdScale = savedRootScale
+        ...
+    }
+
+The bake loop does not compute or apply per-frame Hips/root translation before sampling. It samples local bone transforms after the same fixed-root rotomation driver. The saved root restore is not itself the runtime lock, but it confirms the bake treats display root as external static placement, not as animated root motion.
+
+
+9. Old fallback driver still has an explicit base lock
+-----------------------------------------------------
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/Services/SkinnedRigRotomationDriver.swift
+
+Relevant code:
+
+    static func rotomateFrame(
+        _ frame: RotoRayAnimationSolveResult.Frame,
+        session: SkinnedRigSession,
+        cameraOrigin: SIMD3<Float> = SIMD3<Float>(0, 0, 0),
+        iterations: Int = 12
+    ) {
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = 0
+
+        resetToRest(session: session)
+        lockBase(
+            session: session,
+            targets: frame.jointPositions
+        )
+
+        ...
+    }
+
+    private static func lockBase(
+        session: SkinnedRigSession,
+        targets: [String: SIMD3<Float>]
+    ) {
+        guard let hips = session.bonesByCanonicalName["Hips"],
+              let spine = session.bonesByCanonicalName["Spine"],
+              let hipsTarget = targets["Hips"],
+              let spineTarget = targets["Spine"] else {
+            return
+        }
+
+        let current = normalizeSafe(
+            spine.simdWorldPosition - hips.simdWorldPosition,
+            fallback: SIMD3<Float>(0, 1, 0)
+        )
+
+        let target = normalizeSafe(
+            spineTarget - hipsTarget,
+            fallback: current
+        )
+
+        let deltaWorld = simd_quatf(
+            from: current,
+            to: target
+        )
+
+        applyWorldRotationDelta(
+            deltaWorld,
+            to: hips
+        )
+    }
+
+This is not the active curve-pinned path in viewport/bake right now, but it is still a trap if any caller uses `rotomateFrame(...)`. It rotates Hips to align Hips->Spine, but again does not translate Hips/root.
+
+
+10. The ray solve actually has moving Hips data, but the skinned rig bake does not use it as root motion
+------------------------------------------------------------------------------------------------------
+Files:
+Gravitas RotoMotion/Gravitas RotoMotion/Services/RotoRayRigSolver.swift
+Gravitas RotoMotion/Gravitas RotoMotion/Services/RotoRayConstrainedIKSolver.swift
+
+Relevant code:
+
+    if jointName == "Hips" {
+        let hipsPosition: SIMD3<Float>
+
+        if let hipsRay = rays["Hips"] {
+            hipsPosition = closestPointOnRayToPlaneZ(
+                ray: hipsRay,
+                z: videoPlaneZ
+            )
+        } else {
+            hipsPosition = SIMD3<Float>(0, 0, videoPlaneZ)
+        }
+
+        solved[jointName] = .init(
+            name: jointName,
+            parent: nil,
+            worldPosition: hipsPosition,
+            solved: true,
+            note: "Root solved from Hips ray."
+        )
+        continue
+    }
+
+and:
+
+    if let ray = rays["Hips"] {
+        let p = rayPlaneZIntersection(ray: ray, z: targetZ)
+
+        if let previous = previousFramePositions?["Hips"] {
+            jointPositions["Hips"] = mix(previous, p, 0.25)
+        } else {
+            jointPositions["Hips"] = p
+        }
+
+        solved.insert("Hips")
+    }
+
+The upstream ray solve has some Hips positions. The current skinned rig rotomation does not convert those positions into per-frame `displayRootNode` motion or Hips local translation before sampling/export.
+
+
+11. Export can strip Hips translation
+-------------------------------------
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/UI/RotoMotionViewModel.swift
+
+Relevant code:
+
+    @Published var includeHipsTranslationInUSDZ = false {
+        didSet { persist(includeHipsTranslationInUSDZ, AppStorageKeys.includeHipsTranslationInUSDZ) }
+    }
+
+and:
+
+    let exportResult = try RetargetedAnimatedUSDZExporter.exportAnimatedTargetUSDZ(
+        ...
+        includeHipsTranslation: includeHipsTranslationInUSDZ,
+        ...
+    )
+
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/Services/AnimatedUSDZExport/SolvedAnimationJSONExporter.swift
+
+Relevant code:
+
+    if includeHipsTranslation,
+       jointName == "Hips",
+       let hips = frame.jointPositions["Hips"] {
+        translationMeters = (hips - firstHips) / Float(sceneUnitsPerMeter)
+    } else {
+        translationMeters = SIMD3<Float>(0, 0, 0)
+    }
+
+    ...
+
+    if includeHipsTranslation,
+       jointName == "Hips" {
+        key["translation_xyz"] = [...]
+    }
+
+If this legacy solved-animation export path is used and `includeHipsTranslationInUSDZ` is false, Hips translation is deliberately not emitted. The current baked rig animation path stores all local translations, but the live/bake solve has not produced meaningful moving root translation in the first place.
+
+
+What is actually happening
+--------------------------
+This is not "shifting joints one by one" globally. The main lock is the parent/root transform:
+
+    session.displayRootNode.simdPosition
+
+The app sets this from initial fit, stores it as `referenceRigX/Y/Z`, reapplies it every viewport update, and then solves rotations under that fixed root. Hips may rotate, but Hips cannot translate freely through the animation.
+
+That creates the visible failure:
+
+- Hips/root cannot drift with the performer.
+- Feet and hands are forced to reach their rays from the wrong base.
+- The solver compensates with extreme rotations.
+- Inside-out rotomation appears because the root is spatially wrong.
+- Bake/export preserve the same fixed-root solve.
+
+
+Required architectural correction
+---------------------------------
+The initial Hips <-> Spine fit should remain a one-time rough placement only.
+
+After initial fit, per-frame rotomation needs an explicit root/Hips refinement step before limb solving. That step should not hard-pin Hips exactly to a ray, but it must allow root translation. A reasonable V1 shape:
+
+1. Keep initial `ReferenceRigHipsSpineFitter.fit(...)` as startup placement.
+2. In `rotomateFrameWithCurvePins(...)`, after `resetToRest(session:)` and ray building, compute a per-frame desired root offset from the current solved/normalized Hips position.
+3. Move `session.displayRootNode.simdPosition` or Hips local translation by a limited, loose amount.
+4. Then solve torso, arms, legs from that refined root.
+5. Do not let `RotoSceneVideoViewport.applyReferenceRigDisplayPlacement(...)` overwrite per-frame root motion immediately before/after solve.
+6. Bake must run the same per-frame root refinement before sampling.
+7. Export must include the resulting root/Hips local translation if root motion is meant to appear in the final animation.
+
+
+Specific code changes likely needed
+-----------------------------------
+1. Stop treating `referenceRigX/Y/Z` as the animation-time root every frame.
+
+Current code in viewport:
+
+    applyReferenceRigDisplayPlacement(session:x:y:z:)
+    SkinnedRigRotomationDriver.rotomateFrameWithCurvePins(...)
+
+Needed behavior:
+
+    apply initial/reference display transform only when loading/refitting/manual placement changes
+    per frame:
+        reset bones
+        restore initial display root
+        apply frame root refinement
+        solve torso/limbs
+        apply manual overrides
+
+2. Add a per-frame root refinement in `SkinnedRigRotomationDriver.rotomateFrameWithCurvePins`.
+
+It should use Hips data as loose root motion, not hard pinning. Example shape:
+
+    let initialRoot = session.displayRootNode.simdPosition
+    let currentHips = hips.simdWorldPosition
+    let targetHips = looseTargetFromHipsRayOrSolvedFrame(...)
+    let correction = clampLength(targetHips - currentHips, maxStep)
+    session.displayRootNode.simdPosition += correction * pull
+
+This should happen before torso/arms/legs, and bake must call the same path.
+
+3. Keep Hips as root/base but not immobile.
+
+Correct rule:
+
+    Hips is not directly snapped to Vision.
+    Hips is not nailed to the initial fit.
+    Hips/root can translate loosely each frame.
+    Spine remains animatable.
+    Limbs solve from the refined root, not the frozen initial root.
+
+4. Make root looseness explicit in settings.
+
+Possible settings:
+
+    rootPinPull: Float = 0.15 to 0.35
+    maxRootCorrectionPerFrame: Float = 0.03 to 0.08
+    rootDeadZone: Float = 0.02 to 0.05
+
+The user asked for "looser when solving for the other joints." Current `limbPinPull` is 0.65 and `limbPinWiggle` is 0.02, but the limb solve mostly uses exact geometric targets at fixed bone length. It is not really using those settings in the shown chain code. The limb solver should either use the settings or reduce target pull so limbs do not overcorrect from a bad base.
+
+
+Do not fix by
+-------------
+- Moving each joint world position one by one.
+- Snapping Hips exactly to `rays["Hips"]` every frame.
+- Reintroducing hard `lockBase`.
+- Freezing Spine again.
+- Solving limbs before root refinement.
+- Baking from a different root-motion path than viewport playback.
+
+
+One-line bug summary
+--------------------
+The Hips are locked because `displayRootNode` is treated as a static fitted parent transform for the whole animation, while the curve-pinned solver removes the Hips ray and only rotates joints under that fixed parent instead of refining root/Hips translation per frame.
