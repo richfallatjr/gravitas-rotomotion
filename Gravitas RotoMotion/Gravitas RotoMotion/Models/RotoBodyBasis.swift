@@ -1,7 +1,7 @@
 import Foundation
 import simd
 
-struct RotoBodyBasis: Equatable {
+struct RotoBodyBasis: Codable, Equatable {
     let origin: SIMD3<Float>
     let right: SIMD3<Float>
     let up: SIMD3<Float>

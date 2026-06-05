@@ -65,6 +65,28 @@ enum FilePanelHelpers {
         return panel.runModal() == .OK ? panel.url : nil
     }
 
+    static func saveRotoMotionSessionURL(defaultName: String) -> URL? {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "rotomotion")].compactMap { $0 }
+        panel.nameFieldStringValue = defaultName.hasSuffix(".rotomotion")
+            ? defaultName
+            : "\(defaultName).rotomotion"
+        panel.canCreateDirectories = true
+
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    static func openRotoMotionSessionURL() -> URL? {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "rotomotion")].compactMap { $0 }
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.resolvesAliases = true
+
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
     static func saveRawJSONURL(defaultDirectory: URL?) -> URL? {
         saveJSONURL(
             defaultDirectory: defaultDirectory,

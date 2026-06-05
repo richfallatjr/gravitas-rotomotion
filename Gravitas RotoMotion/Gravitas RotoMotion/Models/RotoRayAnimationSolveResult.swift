@@ -1,7 +1,7 @@
 import Foundation
 import simd
 
-struct RotoRayAnimationSolveResult: Equatable {
+struct RotoRayAnimationSolveResult: Codable, Equatable {
     let schema: String
     let rigID: String
     let rigVersion: String
@@ -12,7 +12,7 @@ struct RotoRayAnimationSolveResult: Equatable {
     let frameCount: Int
     let frames: [Frame]
 
-    struct Frame: Equatable, Identifiable {
+    struct Frame: Codable, Equatable, Identifiable {
         var id: Int { frameIndex }
 
         let frameIndex: Int

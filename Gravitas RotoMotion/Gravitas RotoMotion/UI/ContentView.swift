@@ -54,6 +54,23 @@ struct ContentView: View {
 
     private var toolbar: some View {
         HStack(spacing: 12) {
+            Button("Open Session") {
+                openRotoMotionSessionFromContentView()
+            }
+
+            Button("Save Session") {
+                roto.saveRotoMotionSession()
+                uiStatus = roto.status
+            }
+
+            Button("Save Session As") {
+                roto.saveRotoMotionSessionAs()
+                uiStatus = roto.status
+            }
+
+            Divider()
+                .frame(height: 22)
+
             Button("Open Video") {
                 openVideoDirectlyInContentView()
             }
@@ -235,6 +252,8 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
+                sessionFilePanel
+
                 viewportPanel
 
                 GroupBox("Vision Pipeline") {
@@ -314,6 +333,26 @@ struct ContentView: View {
 
             }
             .font(.caption)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var sessionFilePanel: some View {
+        GroupBox("Session File") {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(roto.currentSessionURL?.lastPathComponent ?? "Unsaved RotoMotion session")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Text(roto.sessionIsDirty ? "Unsaved changes" : "Saved")
+                    .font(.caption2)
+                    .foregroundStyle(roto.sessionIsDirty ? .orange : .secondary)
+
+                Text(roto.sessionFileStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -884,6 +923,112 @@ struct ContentView: View {
                       image size: \(String(describing: uiCurrentImage?.size))
                     """
                 )
+            }
+        }
+    }
+
+    private func openRotoMotionSessionFromContentView() {
+        roto.openRotoMotionSession()
+        uiStatus = roto.status
+        pipelineRenderToken += 1
+
+        guard roto.sessionFileStatus.hasPrefix("Loaded RotoMotion session") else {
+            return
+        }
+
+        guard let url = roto.videoURL,
+              FileManager.default.fileExists(atPath: url.path) else {
+            uiStatus = "Session loaded. Saved video path is missing."
+            roto.diagnostics.log(uiStatus)
+            return
+        }
+
+        loadSessionVideoFramesInContentView(
+            url: url,
+            restoredFrameIndex: roto.currentFrameIndex
+        )
+    }
+
+    private func loadSessionVideoFramesInContentView(
+        url: URL,
+        restoredFrameIndex: Int
+    ) {
+        releaseUIVideoAccess()
+
+        let didAccess = url.startAccessingSecurityScopedResource()
+        uiSecurityScopedURL = url
+        uiSecurityScopedAccessActive = didAccess
+        uiVideoURL = url
+
+        uiStatus = "Decoding session video \(url.lastPathComponent)..."
+        uiDecodedFrames = []
+        uiCurrentImage = nil
+        uiCurrentFrameIndex = 0
+        uiRenderToken += 1
+        playbackStartHostTime = nil
+        playbackStartVideoTime = 0
+        pipelineRenderToken += 1
+
+        roto.videoURL = url
+        roto.lastLoadedVideoURL = url
+        if roto.outputDirectoryURL == nil {
+            roto.outputDirectoryURL = RotoMotionProjectStore.defaultOutputDirectory(for: url)
+        }
+        roto.decodedFrames = []
+        roto.currentVideoFrameImage = nil
+        roto.maxFrameIndex = 0
+        roto.videoPlaybackStatus = "Decoding session video frames..."
+        roto.status = uiStatus
+        roto.diagnostics.log("""
+        Session video restore:
+          path: \(url.path)
+          securityScoped: \(didAccess)
+          restoredFrameIndex: \(restoredFrameIndex)
+        """)
+
+        installUIAudioPlayer(for: url)
+
+        Task {
+            let cache = RotoVideoFrameCache()
+
+            await cache.loadSourceFrames(
+                from: url,
+                maxFrames: 0,
+                maximumImageDimension: 1280
+            )
+
+            await MainActor.run {
+                let frames = cache.frames
+                let clamped = frames.isEmpty
+                    ? 0
+                    : max(0, min(frames.count - 1, restoredFrameIndex))
+                let restoredFrame = frames.indices.contains(clamped) ? frames[clamped] : nil
+
+                uiDecodedFrames = frames
+                uiCurrentFrameIndex = clamped
+                uiCurrentImage = restoredFrame?.image
+                uiRenderToken += 1
+                pipelineRenderToken += 1
+
+                let fpsEstimate = RotoVideoFrameCache.estimatedFPS(frames: frames)
+                uiStatus = frames.isEmpty ? cache.status : "Session video frames ready: \(frames.count)"
+
+                roto.decodedFrames = frames
+                roto.maxFrameIndex = max(0, frames.count - 1)
+                roto.currentFrameIndex = clamped
+                roto.currentTimeSeconds = restoredFrame?.timeSeconds ?? roto.currentTimeSeconds
+                roto.currentVideoFrameImage = restoredFrame?.image
+                roto.imageRenderToken += 1
+                roto.videoPlaybackStatus = uiStatus
+                roto.status = "Session video ready: \(frames.count) source frames"
+                roto.diagnostics.log("""
+                Session video decode assigned to active UI:
+                  decodedFrames: \(frames.count)
+                  estimatedFPS: \(String(format: "%.3f", fpsEstimate))
+                  restoredFrame: \(clamped)
+                  restoredTime: \(restoredFrame?.timeSeconds ?? -1)
+                  currentImage: \(uiCurrentImage != nil)
+                """)
             }
         }
     }

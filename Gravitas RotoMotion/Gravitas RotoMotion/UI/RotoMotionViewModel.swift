@@ -110,6 +110,16 @@ final class RotoMotionViewModel: ObservableObject {
     }
     @Published var videoPlaybackStatus = "No video loaded."
 
+    @Published var currentSessionURL: URL? {
+        didSet { persistURL(currentSessionURL, forKey: AppStorageKeys.currentSessionURL) }
+    }
+    @Published var sessionFileStatus = "No RotoMotion session loaded." {
+        didSet { persist(sessionFileStatus, AppStorageKeys.sessionFileStatus) }
+    }
+    @Published var sessionIsDirty = false {
+        didSet { persist(sessionIsDirty, AppStorageKeys.sessionIsDirty) }
+    }
+
     @Published var rawCapture: RawVisionPoseCapture?
     @Published var normalizedCapture: NormalizedMeshyPoseCapture?
     @Published var smoothedCapture: SmoothedMeshyPoseCapture?
@@ -303,8 +313,14 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var cleanRotationKeysEnabled = false {
         didSet {
             rotationEditLayer.cleanKeysEnabled = cleanRotationKeysEnabled
+            if suppressSessionDirtyTracking {
+                persist(cleanRotationKeysEnabled, AppStorageKeys.cleanRotationKeysEnabled)
+                return
+            }
+
             bakedRigAnimation = nil
             bakedRigAnimationStatus = "Rotation edit mode changed. Bake rig animation before export."
+            sessionIsDirty = true
             applyCurrentFrameToLiveRig()
             persist(cleanRotationKeysEnabled, AppStorageKeys.cleanRotationKeysEnabled)
         }
@@ -392,6 +408,7 @@ final class RotoMotionViewModel: ObservableObject {
     private var playbackStartVideoTime = 0.0
     private var audioPlayer: AVPlayer?
     private var audioEndObserver: NSObjectProtocol?
+    private var suppressSessionDirtyTracking = false
 
     init() {
         loadPersistedAppStorageFields()
@@ -416,6 +433,9 @@ final class RotoMotionViewModel: ObservableObject {
 
         static let videoURL = prefix + "videoURL"
         static let outputDirectoryURL = prefix + "outputDirectoryURL"
+        static let currentSessionURL = prefix + "currentSessionURL"
+        static let sessionFileStatus = prefix + "sessionFileStatus"
+        static let sessionIsDirty = prefix + "sessionIsDirty"
         static let framePlaybackFPS = prefix + "framePlaybackFPS"
         static let isVideoLooping = prefix + "isVideoLooping"
         static let sampleFPS = prefix + "sampleFPS"
@@ -584,8 +604,14 @@ final class RotoMotionViewModel: ObservableObject {
     }
 
     private func loadPersistedAppStorageFields() {
+        suppressSessionDirtyTracking = true
+        defer {
+            suppressSessionDirtyTracking = false
+        }
+
         videoURL = storedURL(AppStorageKeys.videoURL)
         outputDirectoryURL = storedURL(AppStorageKeys.outputDirectoryURL)
+        currentSessionURL = storedURL(AppStorageKeys.currentSessionURL)
         sourceCharacterUSDZURL = storedURL(AppStorageKeys.sourceCharacterUSDZURL)
         animatedUSDZSourceURL = storedURL(AppStorageKeys.animatedUSDZSourceURL)
         referenceSolveUSDZURL = storedURL(AppStorageKeys.referenceSolveUSDZURL)
@@ -595,6 +621,8 @@ final class RotoMotionViewModel: ObservableObject {
 
         if let value = storedDouble(AppStorageKeys.framePlaybackFPS) { framePlaybackFPS = value }
         if let value = storedBool(AppStorageKeys.isVideoLooping) { isVideoLooping = value }
+        if let value = storedString(AppStorageKeys.sessionFileStatus) { sessionFileStatus = value }
+        if let value = storedBool(AppStorageKeys.sessionIsDirty) { sessionIsDirty = value }
         if let value = storedDouble(AppStorageKeys.sampleFPS) { sampleFPS = value }
         if let value = storedDouble(AppStorageKeys.visionSampleFPS) { visionSampleFPS = value }
         if let value = storedInt(AppStorageKeys.maxFrames) { maxFrames = value }
@@ -685,8 +713,221 @@ final class RotoMotionViewModel: ObservableObject {
         }
 
         diagnostics.log("Restoring stored reference solve USDZ: \(url.path)")
+        let restoredBakedRigAnimation = bakedRigAnimation
         inspectReferenceUSDZ()
         loadSkinnedRigUSDZFromReference(url)
+
+        if let restoredBakedRigAnimation {
+            bakedRigAnimation = restoredBakedRigAnimation
+            sessionArmaturePoseBuffer = restoredBakedRigAnimation.asSessionArmaturePoseBuffer()
+            bakedRigAnimationStatus = "Restored baked rig animation: \(restoredBakedRigAnimation.frames.count) frames."
+        }
+    }
+
+    func makeSessionDocument() -> RotoMotionSessionDocument {
+        RotoMotionSessionDocument(
+            schema: RotoMotionSessionDocument.currentSchema,
+            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev",
+            savedAt: Date(),
+            clipID: retargetClipID,
+            videoURLPath: videoURL?.path,
+            referenceUSDZPath: referenceSolveUSDZURL?.path,
+            targetUSDZPath: targetCharacterUSDZURL?.path,
+            currentFrameIndex: currentFrameIndex,
+            currentVideoTimeSeconds: currentVideoTimeSeconds,
+            cameraProfileRawValue: cameraProfile.rawValue,
+            cameraFOVDegrees: activeCameraFOVDegrees,
+            imagePlaneDistance: Double(currentVideoPlaneZ),
+            showRawVision: showRawVisionPoints,
+            showNormalizedMeshy: showNormalizedMeshyPoints,
+            showSkinnedRig: showSkinnedRig,
+            showDebugSolvedSkeleton: showDebugSolvedSkeleton,
+            referenceRigX: referenceRigX,
+            referenceRigY: referenceRigY,
+            referenceRigZ: referenceRigZ,
+            referenceRigRotationXDegrees: -90.0,
+            referenceRigRotationYDegrees: 360.0,
+            referenceRigScale: referenceRigScaleMultiplier,
+            rawCapture: rawCapture,
+            normalizedCapture: normalizedCapture,
+            rayAnimationSolveResult: rayAnimationSolveResult,
+            bakedRigAnimation: bakedRigAnimation,
+            rotationEditLayer: rotationEditLayer,
+            selectedRotationJoint: selectedRotationJoint,
+            cleanRotationKeysEnabled: cleanRotationKeysEnabled
+        )
+    }
+
+    func saveRotoMotionSession() {
+        let defaultName = retargetClipID.isEmpty ? "RotoMotionSession" : retargetClipID
+
+        guard let url = currentSessionURL ?? FilePanelHelpers.saveRotoMotionSessionURL(defaultName: defaultName) else {
+            sessionFileStatus = "Save canceled."
+            status = sessionFileStatus
+            diagnostics.log(sessionFileStatus)
+            return
+        }
+
+        do {
+            let document = makeSessionDocument()
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+
+            let data = try encoder.encode(document)
+            try data.write(to: url, options: .atomic)
+
+            currentSessionURL = url
+            sessionIsDirty = false
+            sessionFileStatus = "Saved RotoMotion session: \(url.path)"
+            status = sessionFileStatus
+            diagnostics.log(sessionFileStatus)
+        } catch {
+            sessionFileStatus = "Save failed: \(error.localizedDescription)"
+            status = sessionFileStatus
+            diagnostics.log(sessionFileStatus)
+        }
+    }
+
+    func saveRotoMotionSessionAs() {
+        let defaultName = retargetClipID.isEmpty ? "RotoMotionSession" : retargetClipID
+
+        guard let url = FilePanelHelpers.saveRotoMotionSessionURL(defaultName: defaultName) else {
+            sessionFileStatus = "Save As canceled."
+            status = sessionFileStatus
+            diagnostics.log(sessionFileStatus)
+            return
+        }
+
+        currentSessionURL = url
+        saveRotoMotionSession()
+    }
+
+    func openRotoMotionSession() {
+        guard let url = FilePanelHelpers.openRotoMotionSessionURL() else {
+            sessionFileStatus = "Open session canceled."
+            status = sessionFileStatus
+            diagnostics.log(sessionFileStatus)
+            return
+        }
+
+        loadRotoMotionSession(from: url)
+    }
+
+    func loadRotoMotionSession(from url: URL) {
+        do {
+            let data = try Data(contentsOf: url)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+
+            let document = try decoder.decode(RotoMotionSessionDocument.self, from: data)
+
+            guard document.schema == RotoMotionSessionDocument.currentSchema else {
+                throw NSError(
+                    domain: "GravitasRotoMotion",
+                    code: 15001,
+                    userInfo: [
+                        NSLocalizedDescriptionKey: "Unsupported RotoMotion session schema: \(document.schema)"
+                    ]
+                )
+            }
+
+            applySessionDocument(document)
+
+            currentSessionURL = url
+            sessionIsDirty = false
+            sessionFileStatus = "Loaded RotoMotion session: \(url.path)"
+            status = sessionFileStatus
+            diagnostics.log(sessionFileStatus)
+        } catch {
+            sessionFileStatus = "Load failed: \(error.localizedDescription)"
+            status = sessionFileStatus
+            diagnostics.log(sessionFileStatus)
+        }
+    }
+
+    func applySessionDocument(_ document: RotoMotionSessionDocument) {
+        suppressSessionDirtyTracking = true
+        defer {
+            suppressSessionDirtyTracking = false
+        }
+
+        retargetClipID = document.clipID
+
+        if let path = document.videoURLPath {
+            let url = URL(fileURLWithPath: path)
+            videoURL = url
+            lastLoadedVideoURL = url
+            outputDirectoryURL = RotoMotionProjectStore.defaultOutputDirectory(for: url)
+        } else {
+            videoURL = nil
+            lastLoadedVideoURL = nil
+        }
+
+        targetCharacterUSDZURL = document.targetUSDZPath.map {
+            URL(fileURLWithPath: $0)
+        }
+
+        currentFrameIndex = document.currentFrameIndex
+        currentTimeSeconds = document.currentVideoTimeSeconds
+
+        if let restoredProfile = CameraProfile(rawValue: document.cameraProfileRawValue) {
+            cameraProfile = restoredProfile
+        }
+
+        currentVideoPlaneZ = Float(document.imagePlaneDistance)
+
+        showRawVisionPoints = document.showRawVision
+        showNormalizedMeshyPoints = document.showNormalizedMeshy
+        showSkinnedRig = document.showSkinnedRig
+        showDebugSolvedSkeleton = document.showDebugSolvedSkeleton
+
+        referenceRigX = document.referenceRigX
+        referenceRigY = document.referenceRigY
+        referenceRigZ = document.referenceRigZ
+        referenceRigScaleMultiplier = document.referenceRigScale
+        referenceRigYawDegrees = document.referenceRigRotationYDegrees
+
+        rawCapture = document.rawCapture
+        normalizedCapture = document.normalizedCapture
+        rayAnimationSolveResult = document.rayAnimationSolveResult
+
+        if let path = document.referenceUSDZPath {
+            let url = URL(fileURLWithPath: path)
+            referenceSolveUSDZURL = url
+
+            if FileManager.default.fileExists(atPath: path) {
+                inspectReferenceUSDZ()
+                loadSkinnedRigUSDZFromReference(url)
+            } else {
+                skinnedRigSession = nil
+                skinnedRigStatus = "Reference USDZ path from session no longer exists: \(path)"
+                diagnostics.log(skinnedRigStatus)
+            }
+        } else {
+            referenceSolveUSDZURL = nil
+            skinnedRigSession = nil
+            skinnedRigStatus = "No skinned rig loaded."
+        }
+
+        bakedRigAnimation = document.bakedRigAnimation
+        sessionArmaturePoseBuffer = document.bakedRigAnimation?.asSessionArmaturePoseBuffer()
+        if let bakedRigAnimation {
+            bakedRigAnimationStatus = "Loaded baked rig animation: \(bakedRigAnimation.frames.count) frames."
+            sessionPoseSource = .posedArmatureLocalTransforms
+            sessionPoseStatus = "Loaded baked rig animation from RotoMotion session."
+        } else {
+            bakedRigAnimationStatus = "No baked rig animation in session."
+        }
+
+        rotationEditLayer = document.rotationEditLayer
+        selectedRotationJoint = document.selectedRotationJoint
+        cleanRotationKeysEnabled = document.cleanRotationKeysEnabled
+        rotationEditLayer.selectedJoint = selectedRotationJoint
+        rotationEditLayer.cleanKeysEnabled = cleanRotationKeysEnabled
+        liveRotationDeltaByJoint = [:]
+
+        rotationAuthoringStatus = "Loaded rotation edit layer."
     }
 
     var frameCount: Int {
@@ -2545,6 +2786,7 @@ final class RotoMotionViewModel: ObservableObject {
 
         rotationAuthoringStatus = "Editing \(joint)"
         status = rotationAuthoringStatus
+        sessionIsDirty = true
         bakedRigAnimation = nil
         bakedRigAnimationStatus = "Rotation edits changed. Bake rig animation before export."
         applyCurrentFrameToLiveRig()
@@ -2616,6 +2858,7 @@ final class RotoMotionViewModel: ObservableObject {
 
         status = rotationAuthoringStatus
         liveRotationDeltaByJoint[joint] = nil
+        sessionIsDirty = true
         bakedRigAnimation = nil
         bakedRigAnimationStatus = "Rotation edits changed. Bake rig animation before export."
         diagnostics.log(rotationAuthoringStatus)
@@ -2626,6 +2869,7 @@ final class RotoMotionViewModel: ObservableObject {
         liveRotationDeltaByJoint[selectedRotationJoint] = nil
         rotationAuthoringStatus = "Cleared keys for \(selectedRotationJoint)."
         status = rotationAuthoringStatus
+        sessionIsDirty = true
         bakedRigAnimation = nil
         bakedRigAnimationStatus = "Rotation edits changed. Bake rig animation before export."
         diagnostics.log(rotationAuthoringStatus)
@@ -2649,6 +2893,7 @@ final class RotoMotionViewModel: ObservableObject {
         bakedRigAnimation = nil
         bakedRigAnimationStatus = "Rotation edits changed. Bake rig animation before export."
         status = rotationAuthoringStatus
+        sessionIsDirty = true
         diagnostics.log(rotationAuthoringStatus)
         applyCurrentFrameToLiveRig()
     }
