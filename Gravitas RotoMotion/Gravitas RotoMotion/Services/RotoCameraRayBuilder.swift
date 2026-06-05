@@ -7,7 +7,7 @@ enum RotoCameraRayBuilder {
         normalizedFrame: NormalizedMeshyPoseCapture.Frame,
         cameraOrigin: SIMD3<Float>,
         videoPlaneSize: CGSize,
-        videoPlaneZ: Float = 0
+        videoPlaneZ: Float = -2000
     ) -> [String: RotoCameraRay] {
         var rays: [String: RotoCameraRay] = [:]
 

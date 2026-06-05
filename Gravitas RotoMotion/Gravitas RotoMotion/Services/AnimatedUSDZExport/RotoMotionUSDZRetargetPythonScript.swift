@@ -285,19 +285,29 @@ def load_solved_json(path):
     with open(path, "r") as handle:
         data = json.load(handle)
 
-    if data.get("schema") != "com.gravitas.rotomotion.solved_animation.v1":
+    schema = data.get("schema")
+    direct_local_transforms = schema in [
+        "com.gravitas.rotomotion.session_armature_snapshot.v0",
+        "com.gravitas.rotomotion.session_armature_pose.v0",
+    ]
+
+    if schema not in [
+        "com.gravitas.rotomotion.solved_animation.v1",
+        "com.gravitas.rotomotion.session_armature_snapshot.v0",
+        "com.gravitas.rotomotion.session_armature_pose.v0",
+    ]:
         raise RuntimeError(
-            "Solved animation JSON schema mismatch. "
-            "Expected com.gravitas.rotomotion.solved_animation.v1."
+            "Animation JSON schema mismatch. Expected solved_animation.v1 "
+            "or session armature local-transform schema."
         )
 
     if data.get("rotation_order") != "wxyz":
-        raise RuntimeError("Solved animation JSON must declare rotation_order=wxyz.")
+        raise RuntimeError("Animation JSON must declare rotation_order=wxyz.")
 
     joints = data.get("joints")
 
     if not isinstance(joints, dict):
-        raise RuntimeError("Solved animation JSON missing joints object.")
+        raise RuntimeError("Animation JSON missing joints object.")
 
     cleaned = {}
 
@@ -314,15 +324,23 @@ def load_solved_json(path):
             if not isinstance(key, dict):
                 raise RuntimeError(f"Invalid key for {joint_name}: expected object.")
 
-            rotation = key.get("rotation_wxyz")
+            rotation = key.get("localRotationWXYZ") or key.get("rotation_wxyz")
 
             if not isinstance(rotation, list) or len(rotation) != 4:
-                raise RuntimeError(f"Invalid rotation for {joint_name}: expected rotation_wxyz [w, x, y, z].")
+                raise RuntimeError(f"Invalid rotation for {joint_name}: expected localRotationWXYZ [w, x, y, z].")
 
-            translation = key.get("translation_xyz")
+            translation = key.get("localTranslationXYZ") or key.get("translation_xyz")
+
+            if direct_local_transforms and translation is None:
+                raise RuntimeError(f"Invalid snapshot transform for {joint_name}: missing localTranslationXYZ.")
 
             if translation is not None and (not isinstance(translation, list) or len(translation) != 3):
-                raise RuntimeError(f"Invalid translation for {joint_name}: expected translation_xyz [x, y, z].")
+                raise RuntimeError(f"Invalid translation for {joint_name}: expected localTranslationXYZ [x, y, z].")
+
+            scale = key.get("localScaleXYZ") or key.get("scale_xyz") or [1, 1, 1]
+
+            if not isinstance(scale, list) or len(scale) != 3:
+                raise RuntimeError(f"Invalid scale for {joint_name}: expected localScaleXYZ [x, y, z].")
 
             cleaned_keys.append({
                 "frame": int(key["frame"]),
@@ -338,14 +356,21 @@ def load_solved_json(path):
                     float(translation[1]),
                     float(translation[2]),
                 ] if translation is not None else None,
+                "scale_xyz": [
+                    float(scale[0]),
+                    float(scale[1]),
+                    float(scale[2]),
+                ],
                 "curve": str(key.get("curve", "linear")),
             })
 
         cleaned[joint_name] = sorted(cleaned_keys, key=lambda item: item["frame"])
 
     return {
-        "schema": data["schema"],
+        "schema": schema,
+        "sourceKind": data.get("sourceKind", ""),
         "fps": float(data.get("fps", 24.0)),
+        "directLocalTransforms": direct_local_transforms,
         "joints": cleaned,
     }
 
@@ -495,8 +520,9 @@ def create_animation(
     rest_translations, rest_rotations, rest_scales = rest_local_transforms(skeleton, joint_paths)
     times = build_times(solved)
     meters_per_unit = float(UsdGeom.GetStageMetersPerUnit(stage) or 1.0)
+    direct_local_transforms = bool(solved.get("directLocalTransforms", False))
 
-    anim_path = skeleton.GetPrim().GetParent().GetPath().AppendChild(
+    anim_path = skeleton.GetPrim().GetPath().AppendChild(
         f"RotoMotionAnim_{safe_prim_token(clip_id)}"
     )
 
@@ -518,22 +544,31 @@ def create_animation(
 
         for canonical_name, target_index in joint_map.items():
             key = sample_joint_at_frame(solved_joints[canonical_name], frame)
-            delta_rotation = quatf_from_wxyz(key["rotation_wxyz"])
+            rotation = quatf_from_wxyz(key["rotation_wxyz"])
 
-            # The ray solver produces local rotation deltas from the reference rest pose.
-            # Keep target rest rotation intact and apply the solved delta on top.
-            rotations[target_index] = rest_rotations[target_index] * delta_rotation
+            if direct_local_transforms:
+                translations[target_index] = vec3f(*key["translation_xyz"])
+                rotations[target_index] = rotation
+                scales[target_index] = Gf.Vec3h(
+                    float(key["scale_xyz"][0]),
+                    float(key["scale_xyz"][1]),
+                    float(key["scale_xyz"][2]),
+                )
+            else:
+                # Legacy path: solved rotations are local deltas from the reference rest pose.
+                # Keep target rest rotation intact and apply the solved delta on top.
+                rotations[target_index] = rest_rotations[target_index] * rotation
 
-            if include_hips_translation and canonical_name == "Hips":
-                translation_meters = key.get("translation_xyz")
+                if include_hips_translation and canonical_name == "Hips":
+                    translation_meters = key.get("translation_xyz")
 
-                if translation_meters is not None:
-                    root_delta_stage_units = vec3f(
-                        translation_meters[0] / meters_per_unit,
-                        translation_meters[1] / meters_per_unit,
-                        translation_meters[2] / meters_per_unit,
-                    )
-                    translations[target_index] = translations[target_index] + root_delta_stage_units
+                    if translation_meters is not None:
+                        root_delta_stage_units = vec3f(
+                            translation_meters[0] / meters_per_unit,
+                            translation_meters[1] / meters_per_unit,
+                            translation_meters[2] / meters_per_unit,
+                        )
+                        translations[target_index] = translations[target_index] + root_delta_stage_units
 
         if previous_rotations is not None:
             rotations = [
@@ -543,17 +578,19 @@ def create_animation(
                 for index, rotation in enumerate(rotations)
             ]
 
-        translations_attr.Set(translations, Usd.TimeCode(frame))
-        rotations_attr.Set(rotations, Usd.TimeCode(frame))
-        scales_attr.Set(scales, Usd.TimeCode(frame))
+        usd_frame = int(frame) + 1
+
+        translations_attr.Set(translations, Usd.TimeCode(usd_frame))
+        rotations_attr.Set(rotations, Usd.TimeCode(usd_frame))
+        scales_attr.Set(scales, Usd.TimeCode(usd_frame))
         previous_rotations = list(rotations)
 
     skeleton.GetPrim().CreateRelationship("skel:animationSource").SetTargets([
         anim.GetPrim().GetPath()
     ])
 
-    stage.SetStartTimeCode(min(times))
-    stage.SetEndTimeCode(max(times))
+    stage.SetStartTimeCode(min(times) + 1)
+    stage.SetEndTimeCode(max(times) + 1)
     stage.SetFramesPerSecond(solved["fps"])
     stage.SetTimeCodesPerSecond(solved["fps"])
 
@@ -561,7 +598,8 @@ def create_animation(
     log(f"Created animation: {anim.GetPrim().GetPath()}")
     log(f"Joint order count: {len(joint_paths)}")
     log(f"Matched joints: {len(joint_map)} / {len(solved_joints)}")
-    log(f"Time range: {min(times)} - {max(times)} at {solved['fps']:.3f} fps")
+    log(f"Source transform mode: {'direct local snapshot' if direct_local_transforms else 'legacy rest-delta'}")
+    log(f"Time range: {min(times) + 1} - {max(times) + 1} at {solved['fps']:.3f} fps")
 
     return anim
 

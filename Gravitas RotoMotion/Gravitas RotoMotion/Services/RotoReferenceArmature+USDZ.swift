@@ -7,23 +7,21 @@ extension RotoReferenceArmature {
         sceneUnitsPerMeter: Double,
         fallback: RotoReferenceArmature = .meshy24Default
     ) -> RotoReferenceArmature {
-        let targetHeightMeters = profile.estimatedHeightMeters ?? max(fallback.restHeight / max(sceneUnitsPerMeter, 0.0001), 0.0001)
-        let targetSceneHeight = targetHeightMeters * max(sceneUnitsPerMeter, 0.0001)
-        let fallbackScale = targetSceneHeight / fallback.restHeight
-        let fallbackScaled = fallback.scaled(by: fallbackScale)
-        let fallbackByName = fallbackScaled.jointByName
+        let metersPerRawUnit = max(profile.unitScaleToMeters ?? 1.0, 0.000001)
+        let sceneUnitsPerMeter = max(sceneUnitsPerMeter, 0.0001)
+        let rawToScene = metersPerRawUnit * sceneUnitsPerMeter
 
         return RotoReferenceArmature(
             rigID: fallback.rigID,
             rigVersion: fallback.rigVersion,
             joints: fallback.joints.map { joint in
-                let fallbackJoint = fallbackByName[joint.name] ?? joint
                 let measuredLength = profile.boneLengths[joint.name].map {
-                    max($0 * max(sceneUnitsPerMeter, 0.0001), 0.0)
+                    max($0 * rawToScene, 0.0001)
                 }
-                let length = measuredLength ?? fallbackJoint.boneLengthToParent
+                let fallbackLength = max(joint.boneLengthToParent * sceneUnitsPerMeter, 0.0001)
+                let length = measuredLength ?? fallbackLength
                 let direction = normalizeSafe(
-                    fallbackJoint.restLocalPosition.simdFloat,
+                    joint.restLocalPosition.simdFloat,
                     fallback: fallbackDirection(for: joint.name)
                 )
 

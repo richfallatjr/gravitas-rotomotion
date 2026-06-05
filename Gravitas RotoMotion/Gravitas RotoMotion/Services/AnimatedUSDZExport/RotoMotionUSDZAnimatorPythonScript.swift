@@ -532,7 +532,7 @@ def create_animation(stage, skeleton, keyframes, clip_id):
     if missing:
         log(f"Warning: keyframed joints missing in skeleton and will be ignored: {missing}")
 
-    anim_path = skeleton.GetPrim().GetParent().GetPath().AppendChild(
+    anim_path = skeleton.GetPrim().GetPath().AppendChild(
         f"RotoMotionAnim_{safe_prim_token(clip_id)}"
     )
 

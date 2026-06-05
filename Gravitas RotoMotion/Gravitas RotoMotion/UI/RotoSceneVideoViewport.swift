@@ -14,6 +14,16 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let groundPlane: GroundPlaneController?
     let raySolveResult: RotoRaySolveResult?
     let raySolvedFrame: RotoRayAnimationSolveResult.Frame?
+    let skinnedRigSession: SkinnedRigSession?
+    let cameraFOVDegrees: Double
+    let cameraProfileName: String
+    let currentVideoPlaneZ: Float
+    let referenceRigScaleMultiplier: Double
+    let referenceRigX: Double
+    let referenceRigY: Double
+    let referenceRigZ: Double
+    let referenceRigYawDegrees: Double
+    let applySolvedPoseToReferenceRig: Bool
 
     let showRawVision: Bool
     let showNormalizedMeshy: Bool
@@ -21,7 +31,9 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let showGroundPlane: Bool
     let showVisionRays: Bool
     let showRaySolvedRig: Bool
+    let showSkinnedRig: Bool
     let onVideoPlaneSizeChanged: ((CGSize) -> Void)?
+    let onReferenceRigVisibilityStatusChanged: ((String) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -33,6 +45,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
 
     func updateNSView(_ view: SCNView, context: Context) {
         context.coordinator.onVideoPlaneSizeChanged = onVideoPlaneSizeChanged
+        context.coordinator.onReferenceRigVisibilityStatusChanged = onReferenceRigVisibilityStatusChanged
         context.coordinator.update(
             view: view,
             image: image,
@@ -43,12 +56,23 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             groundPlane: groundPlane,
             raySolveResult: raySolveResult,
             raySolvedFrame: raySolvedFrame,
+            skinnedRigSession: skinnedRigSession,
+            cameraFOVDegrees: cameraFOVDegrees,
+            cameraProfileName: cameraProfileName,
+            currentVideoPlaneZ: currentVideoPlaneZ,
+            referenceRigScaleMultiplier: referenceRigScaleMultiplier,
+            referenceRigX: referenceRigX,
+            referenceRigY: referenceRigY,
+            referenceRigZ: referenceRigZ,
+            referenceRigYawDegrees: referenceRigYawDegrees,
+            applySolvedPoseToReferenceRig: applySolvedPoseToReferenceRig,
             showRawVision: showRawVision,
             showNormalizedMeshy: showNormalizedMeshy,
             showSmoothedMeshy: showSmoothedMeshy,
             showGroundPlane: showGroundPlane,
             showVisionRays: showVisionRays,
-            showRaySolvedRig: showRaySolvedRig
+            showRaySolvedRig: showRaySolvedRig,
+            showSkinnedRig: showSkinnedRig
         )
     }
 
@@ -63,15 +87,28 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private let visionRayRoot = SCNNode()
         private let solvedRigRoot = SCNNode()
         private let solveErrorRoot = SCNNode()
+        private let rigBoundsRoot = SCNNode()
 
         var onVideoPlaneSizeChanged: ((CGSize) -> Void)?
+        var onReferenceRigVisibilityStatusChanged: ((String) -> Void)?
 
         private var lastImageToken = -1
         private var lastImageObjectID: ObjectIdentifier?
+        private var lastVideoImageSize: CGSize = .zero
         private var videoPlaneSize = CGSize(width: 9.0, height: 16.0)
-        private let cameraPadding: CGFloat = 1.02
         private var lastViewBounds: CGRect = .zero
         private var lastVideoPlaneSize: CGSize = .zero
+        private var lastVideoPlaneZ: Float = .nan
+        private var lastAppliedCameraFOVDegrees: Double = -1
+        private var lastVideoPlaneCameraFOVDegrees: Double = -1
+        private var currentVideoPlaneZ: Float = -2000.0
+        private var currentCameraFOVDegrees: Double = 69.4
+        private var currentCameraProfileName = "iPhone 17 Main 1x / 26mm"
+        private var didLogDrawnSolvedRigPoseSource = false
+        private var currentSkinnedRigURL: URL?
+        private var skinnedRigRoot: SCNNode?
+        private var lastRigFitSignature: String?
+        private var lastReferenceRigPlacementSignature: String?
 
         func makeView() -> SCNView {
             let view = SCNView()
@@ -94,22 +131,35 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private func setupScene() {
             scene.background.contents = NSColor.black
 
-            cameraNode.name = "RotoMotionLockedOrthographicCamera"
+            cameraNode.name = "RotoMotioniPhonePerspectiveCamera"
             cameraNode.camera = SCNCamera()
-            cameraNode.camera?.usesOrthographicProjection = true
-            cameraNode.camera?.orthographicScale = 16.0
-            cameraNode.position = SCNVector3(0, 0, 10)
-            cameraNode.look(at: SCNVector3(0, 0, 0))
+            cameraNode.camera?.usesOrthographicProjection = false
+            cameraNode.camera?.fieldOfView = CGFloat(currentCameraFOVDegrees)
+            cameraNode.camera?.projectionDirection = .vertical
+            cameraNode.camera?.zNear = 0.001
+            cameraNode.camera?.zFar = 5000
+            cameraNode.position = SCNVector3(0, 0, 0)
+            cameraNode.look(at: SCNVector3(0, 0, -1))
             scene.rootNode.addChildNode(cameraNode)
+
+            let initialPlaneHeight = perspectiveVideoPlaneHeight(
+                cameraFOVDegrees: currentCameraFOVDegrees
+            )
+            videoPlaneSize = CGSize(
+                width: initialPlaneHeight * 9.0 / 16.0,
+                height: initialPlaneHeight
+            )
 
             videoPlaneNode.name = "RotoMotionVideoUVCard"
             videoPlaneNode.geometry = makeVideoPlaneGeometry(
-                width: 9.0,
-                height: 16.0,
+                width: videoPlaneSize.width,
+                height: videoPlaneSize.height,
                 image: nil
             )
-            videoPlaneNode.position = SCNVector3(0, 0, 0)
+            videoPlaneNode.simdPosition = SIMD3<Float>(0, 0, currentVideoPlaneZ)
             scene.rootNode.addChildNode(videoPlaneNode)
+
+            printCameraImagePlaneInvariant(reason: "setup")
 
             rawOverlayRoot.name = "RawVisionOverlayRoot"
             normalizedOverlayRoot.name = "NormalizedMeshyOverlayRoot"
@@ -118,6 +168,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             visionRayRoot.name = "VisionRayRoot"
             solvedRigRoot.name = "RaySolvedRigRoot"
             solveErrorRoot.name = "RaySolveErrorRoot"
+            rigBoundsRoot.name = "ReferenceRigBoundsRoot"
 
             scene.rootNode.addChildNode(groundRoot)
             scene.rootNode.addChildNode(rawOverlayRoot)
@@ -126,8 +177,34 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             scene.rootNode.addChildNode(visionRayRoot)
             scene.rootNode.addChildNode(solvedRigRoot)
             scene.rootNode.addChildNode(solveErrorRoot)
+            scene.rootNode.addChildNode(rigBoundsRoot)
 
             groundRoot.addChildNode(makeGroundPlaneNode())
+        }
+
+        private func updateVideoPlaneZIfNeeded(_ z: Float) {
+            guard abs(z - currentVideoPlaneZ) > 0.0001 || lastVideoPlaneZ.isNaN else {
+                return
+            }
+
+            currentVideoPlaneZ = z
+            videoPlaneNode.simdPosition = SIMD3<Float>(0, 0, z)
+            lastVideoPlaneZ = z
+            lastVideoPlaneSize = .zero
+            lastVideoPlaneCameraFOVDegrees = -1
+            printCameraImagePlaneInvariant(reason: "plane z changed")
+        }
+
+        private func printCameraImagePlaneInvariant(reason: String) {
+            print(
+                """
+                [RotoSceneVideoViewport] Camera/ImagePlane invariant
+                  reason: \(reason)
+                  cameraZ: 0
+                  imagePlaneZ: \(currentVideoPlaneZ)
+                  expected imagePlaneZ < referenceRigZ < cameraZ
+                """
+            )
         }
 
         func update(
@@ -140,30 +217,56 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             groundPlane: GroundPlaneController?,
             raySolveResult: RotoRaySolveResult?,
             raySolvedFrame: RotoRayAnimationSolveResult.Frame?,
+            skinnedRigSession: SkinnedRigSession?,
+            cameraFOVDegrees: Double,
+            cameraProfileName: String,
+            currentVideoPlaneZ: Float,
+            referenceRigScaleMultiplier: Double,
+            referenceRigX: Double,
+            referenceRigY: Double,
+            referenceRigZ: Double,
+            referenceRigYawDegrees: Double,
+            applySolvedPoseToReferenceRig: Bool,
             showRawVision: Bool,
             showNormalizedMeshy: Bool,
             showSmoothedMeshy: Bool,
             showGroundPlane: Bool,
             showVisionRays: Bool,
-            showRaySolvedRig: Bool
+            showRaySolvedRig: Bool,
+            showSkinnedRig: Bool
         ) {
             view.allowsCameraControl = false
             view.pointOfView = cameraNode
+            updateVideoPlaneZIfNeeded(currentVideoPlaneZ)
+            updatePerspectiveCameraIfNeeded(
+                cameraFOVDegrees: cameraFOVDegrees,
+                cameraProfileName: cameraProfileName
+            )
 
             if let image {
                 updateVideoPlaneIfNeeded(
                     image: image,
-                    frameIndex: frameIndex
+                    frameIndex: frameIndex,
+                    cameraFOVDegrees: cameraFOVDegrees
                 )
             } else {
                 clearVideoPlaneIfNeeded()
             }
-
-            updateCameraToFrameVideoCard(viewBounds: view.bounds)
             updateGroundPlane(groundPlane: groundPlane, visible: showGroundPlane)
             updateRawOverlay(rawFrame, visible: showRawVision)
             updateNormalizedOverlay(normalizedFrame, visible: showNormalizedMeshy)
             updateSmoothedOverlay(smoothedFrame, visible: showSmoothedMeshy)
+            updateSkinnedRig(
+                session: skinnedRigSession,
+                frame: raySolvedFrame,
+                referenceRigScaleMultiplier: referenceRigScaleMultiplier,
+                referenceRigX: referenceRigX,
+                referenceRigY: referenceRigY,
+                referenceRigZ: referenceRigZ,
+                referenceRigYawDegrees: referenceRigYawDegrees,
+                applySolvedPoseToReferenceRig: applySolvedPoseToReferenceRig,
+                visible: showSkinnedRig
+            )
             updateRaySolveDebug(
                 result: raySolveResult,
                 raySolvedFrame: raySolvedFrame,
@@ -174,25 +277,43 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
 
         private func updateVideoPlaneIfNeeded(
             image: NSImage,
-            frameIndex: Int
+            frameIndex: Int,
+            cameraFOVDegrees: Double
         ) {
             let imageObjectID = ObjectIdentifier(image)
 
-            guard frameIndex != lastImageToken || imageObjectID != lastImageObjectID else {
+            let width = max(image.size.width, 1)
+            let height = max(image.size.height, 1)
+            let imageSize = CGSize(width: width, height: height)
+
+            let imageChanged = frameIndex != lastImageToken || imageObjectID != lastImageObjectID
+            let imageSizeChanged =
+                abs(imageSize.width - lastVideoImageSize.width) > 0.5 ||
+                abs(imageSize.height - lastVideoImageSize.height) > 0.5
+            let cameraChanged = abs(cameraFOVDegrees - lastVideoPlaneCameraFOVDegrees) > 0.0001
+
+            guard imageChanged || imageSizeChanged || cameraChanged else {
                 return
             }
 
             lastImageToken = frameIndex
             lastImageObjectID = imageObjectID
+            updateVideoPlaneMaterial(image: image)
 
-            let width = max(image.size.width, 1)
-            let height = max(image.size.height, 1)
+            guard imageSizeChanged || cameraChanged else {
+                return
+            }
+
+            lastVideoImageSize = imageSize
             let aspect = width / height
 
-            let planeHeight: CGFloat = 16.0
+            let planeHeight = perspectiveVideoPlaneHeight(
+                cameraFOVDegrees: cameraFOVDegrees
+            )
             let planeWidth = planeHeight * aspect
 
             videoPlaneSize = CGSize(width: planeWidth, height: planeHeight)
+            lastVideoPlaneCameraFOVDegrees = cameraFOVDegrees
             onVideoPlaneSizeChanged?(videoPlaneSize)
 
             videoPlaneNode.geometry = makeVideoPlaneGeometry(
@@ -205,9 +326,12 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
 
             print(
                 """
-                [RotoSceneVideoViewport] Updated UV video card
+                [RotoSceneVideoViewport] Updated UV video card geometry
                   frame: \(frameIndex)
                   imageSize: \(image.size)
+                  cameraProfile: \(currentCameraProfileName)
+                  verticalFOV: \(String(format: "%.3f", cameraFOVDegrees))
+                  imagePlaneZ: \(currentVideoPlaneZ)
                   planeSize: \(videoPlaneSize)
                 """
             )
@@ -220,7 +344,12 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
 
             lastImageToken = -1
             lastImageObjectID = nil
-            videoPlaneSize = CGSize(width: 9.0, height: 16.0)
+            lastVideoImageSize = .zero
+            let planeHeight = perspectiveVideoPlaneHeight(
+                cameraFOVDegrees: currentCameraFOVDegrees
+            )
+            videoPlaneSize = CGSize(width: planeHeight * 9.0 / 16.0, height: planeHeight)
+            lastVideoPlaneCameraFOVDegrees = currentCameraFOVDegrees
             onVideoPlaneSizeChanged?(videoPlaneSize)
             videoPlaneNode.geometry = makeVideoPlaneGeometry(
                 width: videoPlaneSize.width,
@@ -228,6 +357,14 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 image: nil
             )
             lastVideoPlaneSize = .zero
+        }
+
+        private func updateVideoPlaneMaterial(image: NSImage) {
+            guard let material = videoPlaneNode.geometry?.materials.first else {
+                return
+            }
+
+            material.diffuse.contents = image
         }
 
         private func makeVideoPlaneGeometry(
@@ -251,74 +388,54 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             return plane
         }
 
-        private func updateCameraToFrameVideoCard(viewBounds: CGRect) {
-            let boundsChanged =
-                abs(viewBounds.width - lastViewBounds.width) > 0.5 ||
-                abs(viewBounds.height - lastViewBounds.height) > 0.5
-
-            let planeChanged =
-                abs(videoPlaneSize.width - lastVideoPlaneSize.width) > 0.0001 ||
-                abs(videoPlaneSize.height - lastVideoPlaneSize.height) > 0.0001
-
-            guard boundsChanged || planeChanged else {
-                return
-            }
-
-            lastViewBounds = viewBounds
-            lastVideoPlaneSize = videoPlaneSize
-
-            frameVideoCardToCamera(
-                viewBounds: viewBounds,
-                reason: boundsChanged && planeChanged
-                    ? "bounds+plane changed"
-                    : boundsChanged
-                        ? "bounds changed"
-                        : "plane changed"
-            )
-        }
-
-        private func frameVideoCardToCamera(
-            viewBounds: CGRect,
-            reason: String
+        private func updatePerspectiveCameraIfNeeded(
+            cameraFOVDegrees: Double,
+            cameraProfileName: String
         ) {
             guard let camera = cameraNode.camera else {
                 return
             }
 
-            let viewportWidth = max(viewBounds.width, 1.0)
-            let viewportHeight = max(viewBounds.height, 1.0)
-            let viewportAspect = viewportWidth / viewportHeight
+            let changed =
+                abs(cameraFOVDegrees - lastAppliedCameraFOVDegrees) > 0.0001 ||
+                cameraProfileName != currentCameraProfileName ||
+                camera.usesOrthographicProjection
 
-            let planeWidth = max(videoPlaneSize.width, 0.0001)
-            let planeHeight = max(videoPlaneSize.height, 0.0001)
+            currentCameraFOVDegrees = cameraFOVDegrees
+            currentCameraProfileName = cameraProfileName
 
-            let requiredVerticalForHeight = planeHeight
-            let requiredVerticalForWidth = planeWidth / viewportAspect
+            camera.usesOrthographicProjection = false
+            camera.fieldOfView = CGFloat(cameraFOVDegrees)
+            camera.projectionDirection = .vertical
+            camera.zNear = 0.001
+            camera.zFar = 5000
 
-            let requiredVerticalScale = max(
-                requiredVerticalForHeight,
-                requiredVerticalForWidth
-            ) * cameraPadding
+            cameraNode.position = SCNVector3(0, 0, 0)
+            cameraNode.look(at: SCNVector3(0, 0, -1))
 
-            camera.usesOrthographicProjection = true
-            camera.orthographicScale = requiredVerticalScale
+            guard changed else {
+                return
+            }
 
-            cameraNode.position = SCNVector3(0, 0, 10)
-            cameraNode.look(at: SCNVector3(0, 0, 0))
+            lastAppliedCameraFOVDegrees = cameraFOVDegrees
+            lastVideoPlaneSize = .zero
 
             print(
                 """
-                [RotoSceneVideoViewport] Frame Card
-                  reason: \(reason)
-                  viewBounds: \(Int(viewportWidth))x\(Int(viewportHeight))
-                  viewportAspect: \(String(format: "%.4f", viewportAspect))
-                  planeSize: \(String(format: "%.4f", planeWidth))x\(String(format: "%.4f", planeHeight))
-                  requiredVerticalForHeight: \(String(format: "%.4f", requiredVerticalForHeight))
-                  requiredVerticalForWidth: \(String(format: "%.4f", requiredVerticalForWidth))
-                  padding: \(String(format: "%.3f", cameraPadding))
-                  orthographicScale: \(String(format: "%.4f", requiredVerticalScale))
+                [RotoSceneVideoViewport] Perspective Camera Applied
+                  cameraProfile: \(cameraProfileName)
+                  usesOrthographicProjection: false
+                  fieldOfView: \(String(format: "%.3f", cameraFOVDegrees))
+                  projectionDirection: vertical
+                  imagePlaneZ: \(currentVideoPlaneZ)
                 """
             )
+        }
+
+        private func perspectiveVideoPlaneHeight(cameraFOVDegrees: Double) -> CGFloat {
+            let distance = CGFloat(abs(currentVideoPlaneZ))
+            let fovRadians = CGFloat(cameraFOVDegrees) * .pi / 180.0
+            return 2.0 * distance * tan(fovRadians * 0.5)
         }
 
         private func pointOnVideoPlane(
@@ -332,7 +449,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             return SCNVector3(
                 Float(px),
                 Float(py),
-                zOffset
+                currentVideoPlaneZ + zOffset
             )
         }
 
@@ -491,6 +608,503 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             }
         }
 
+        private func updateSkinnedRig(
+            session: SkinnedRigSession?,
+            frame: RotoRayAnimationSolveResult.Frame?,
+            referenceRigScaleMultiplier: Double,
+            referenceRigX: Double,
+            referenceRigY: Double,
+            referenceRigZ: Double,
+            referenceRigYawDegrees: Double,
+            applySolvedPoseToReferenceRig: Bool,
+            visible: Bool
+        ) {
+            guard let session else {
+                skinnedRigRoot?.removeFromParentNode()
+                skinnedRigRoot = nil
+                currentSkinnedRigURL = nil
+                lastRigFitSignature = nil
+                lastReferenceRigPlacementSignature = nil
+                removeAllChildren(from: rigBoundsRoot)
+                return
+            }
+
+            if currentSkinnedRigURL != session.sourceURL || skinnedRigRoot !== session.displayRootNode {
+                skinnedRigRoot?.removeFromParentNode()
+
+                if session.displayRootNode.parent !== scene.rootNode {
+                    session.displayRootNode.removeFromParentNode()
+                    scene.rootNode.addChildNode(session.displayRootNode)
+                }
+
+                skinnedRigRoot = session.displayRootNode
+                currentSkinnedRigURL = session.sourceURL
+                lastRigFitSignature = nil
+                lastReferenceRigPlacementSignature = nil
+                removeAllChildren(from: rigBoundsRoot)
+
+                print(
+                    """
+                    [RotoMotion Session] Loaded real skinned rig into viewport
+                      url: \(session.sourceURL.path)
+                      matchedBones: \(session.validBoneCount)
+                    """
+                )
+            }
+
+            applyReferenceRigDisplayPlacement(session: session)
+
+            session.displayRootNode.isHidden = !visible
+            rigBoundsRoot.isHidden = !visible
+
+            if applySolvedPoseToReferenceRig, let frame {
+                SkinnedRigPoseDriver.applySolvedFrame(frame, to: session)
+            } else {
+                SkinnedRigPoseDriver.resetToRest(session: session)
+            }
+        }
+
+        private func applyReferenceRigDisplayPlacement(
+            session: SkinnedRigSession
+        ) {
+            session.displayRootNode.simdPosition = SIMD3<Float>(0, -0.75, -2)
+
+            session.displayRootNode.simdScale = SIMD3<Float>(1, 1, 1)
+
+            session.displayRootNode.simdEulerAngles = SIMD3<Float>(
+                -Float.pi / 2.0,
+                Float.pi * 2.0,
+                0
+            )
+
+            session.correctionNode.simdEulerAngles = SIMD3<Float>(0, 0, 0)
+            session.displayRootNode.isHidden = false
+            session.displayRootNode.opacity = 1.0
+
+            forceReferenceRigVisible(session.displayRootNode)
+
+            let signature = [
+                session.sourceURL.path,
+                "fixed-reference-display-transform"
+            ].joined(separator: "|")
+
+            if lastReferenceRigPlacementSignature != signature {
+                lastReferenceRigPlacementSignature = signature
+                let status = """
+                Reference rig viewport transform:
+                  position: \(session.displayRootNode.simdPosition)
+                  scale: \(session.displayRootNode.simdScale)
+                  rotationXDegrees: -90.0
+                  rotationYDegrees: 360.0
+                """
+                print(status)
+                onReferenceRigVisibilityStatusChanged?(status)
+            }
+        }
+
+        private func fitReferenceRigToCamera(
+            session: SkinnedRigSession,
+            referenceFitFrame: NormalizedMeshyPoseCapture.Frame?,
+            view: SCNView,
+            targetZ: Float,
+            yawCorrection: Float,
+            scaleVisualReduction: Float
+        ) {
+            guard let camera = cameraNode.camera else {
+                let message = "[RotoSceneVideoViewport] ERROR: no camera for rig fit"
+                print(message)
+                onReferenceRigVisibilityStatusChanged?("Reference rig fit failed: no camera.")
+                return
+            }
+
+            guard let referenceFitFrame else {
+                let message = "[RotoSceneVideoViewport] ERROR: no normalized frame 0 for Hips<->Spine reference fit"
+                print(message)
+                onReferenceRigVisibilityStatusChanged?("Reference rig fit failed: missing normalized frame 0.")
+                return
+            }
+
+            guard let normalizedHips = referenceFitFrame.joints["Hips"],
+                  let normalizedSpine = referenceFitFrame.joints["Spine"],
+                  !normalizedHips.missing,
+                  !normalizedSpine.missing else {
+                let message = "[RotoSceneVideoViewport] ERROR: normalized frame 0 missing Hips/Spine for reference fit"
+                print(message)
+                onReferenceRigVisibilityStatusChanged?("Reference rig fit failed: normalized frame 0 missing Hips/Spine.")
+                return
+            }
+
+            guard let hipsNode = session.bonesByCanonicalName["Hips"],
+                  let spineNode = session.bonesByCanonicalName["Spine"] else {
+                let message = "[RotoSceneVideoViewport] ERROR: skinned rig missing Hips/Spine bones for reference fit"
+                print(message)
+                onReferenceRigVisibilityStatusChanged?("Reference rig fit failed: skinned rig missing Hips/Spine bones.")
+                return
+            }
+
+            let safeScaleReduction = max(scaleVisualReduction, 0.0001)
+
+            session.displayRootNode.simdPosition = SIMD3<Float>(0, 0, targetZ)
+            session.displayRootNode.simdScale = SIMD3<Float>(repeating: 1.0)
+            session.displayRootNode.simdOrientation = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 0, 1))
+            session.correctionNode.simdEulerAngles = SIMD3<Float>(0, yawCorrection, 0)
+            session.displayRootNode.isHidden = false
+            session.displayRootNode.opacity = 1.0
+            SkinnedRigPoseDriver.resetToRest(session: session)
+            normalizeReferenceRigScreenOrientation(
+                session: session,
+                targetZ: targetZ
+            )
+            forceReferenceRigVisible(session.displayRootNode)
+
+            view.layoutSubtreeIfNeeded()
+
+            let targetHipsWorld = worldPointOnRigDepth(
+                normalizedX: normalizedHips.x,
+                normalizedY: normalizedHips.y,
+                rigZ: targetZ
+            )
+
+            let targetSpineWorld = worldPointOnRigDepth(
+                normalizedX: normalizedSpine.x,
+                normalizedY: normalizedSpine.y,
+                rigZ: targetZ
+            )
+
+            let normalizedTarget2D = distance2D(
+                CGPoint(x: normalizedHips.x, y: normalizedHips.y),
+                CGPoint(x: normalizedSpine.x, y: normalizedSpine.y)
+            )
+
+            let targetHipsScreen = projectedScreenPoint(
+                world: targetHipsWorld,
+                view: view
+            )
+
+            let targetSpineScreen = projectedScreenPoint(
+                world: targetSpineWorld,
+                view: view
+            )
+
+            let targetScreenLength = distance2D(targetHipsScreen, targetSpineScreen)
+
+            let currentHipsWorld = worldPosition(of: hipsNode)
+            let currentSpineWorld = worldPosition(of: spineNode)
+            let currentHipsScreen = projectedScreenPoint(
+                world: currentHipsWorld,
+                view: view
+            )
+
+            let currentSpineScreen = projectedScreenPoint(
+                world: currentSpineWorld,
+                view: view
+            )
+
+            let currentRigProjected2D = distance2D(currentHipsScreen, currentSpineScreen)
+            let fitScale = Float(targetScreenLength / max(currentRigProjected2D, 0.0001))
+            let appliedScale = fitScale * safeScaleReduction
+
+            session.displayRootNode.simdScale = SIMD3<Float>(repeating: appliedScale)
+            view.layoutSubtreeIfNeeded()
+
+            let scaledHipsWorld = worldPosition(of: hipsNode)
+            let hipsDelta = targetHipsWorld - scaledHipsWorld
+            session.displayRootNode.simdPosition.x += hipsDelta.x
+            session.displayRootNode.simdPosition.y += hipsDelta.y
+            session.displayRootNode.simdPosition.z = targetZ
+
+            forceReferenceRigVisible(session.displayRootNode)
+
+            let finalBox = worldBoundingBox(node: session.displayRootNode)
+            updateRigBoundsBox(box: finalBox)
+
+            let finalCenter = finalBox.map { ($0.min + $0.max) * 0.5 } ?? .zero
+            let finalSize = finalBox.map { $0.max - $0.min } ?? .zero
+            let invariant = currentVideoPlaneZ < targetZ && targetZ < 0
+
+            let status = """
+            Reference display fit from Hips<->Spine:
+            target2D \(String(format: "%.3f", normalizedTarget2D))
+            rig2D \(String(format: "%.3f", currentRigProjected2D))
+            fitScale \(String(format: "%.5f", fitScale))
+            appliedScale \(String(format: "%.5f", appliedScale))
+            bbox \(String(format: "%.3f", finalSize.x)) x \(String(format: "%.3f", finalSize.y))
+            center \(String(format: "%.3f", finalCenter.x)), \(String(format: "%.3f", finalCenter.y)), \(String(format: "%.3f", finalCenter.z))
+            scale \(String(format: "%.5f", appliedScale))
+            z \(String(format: "%.3f", session.displayRootNode.simdPosition.z))
+            """
+
+            onReferenceRigVisibilityStatusChanged?(status)
+
+            print(
+                """
+                [RotoSceneVideoViewport] Reference rig fitted to camera
+                  cameraPerspective: \(!camera.usesOrthographicProjection)
+                  viewBounds: \(view.bounds)
+                  targetZ: \(targetZ)
+                  yawCorrection: \(yawCorrection)
+                  scaleVisualReduction: \(safeScaleReduction)
+                  normalizedTarget2D: \(normalizedTarget2D)
+                  targetScreen2D: \(targetScreenLength)
+                  currentRigProjected2D: \(currentRigProjected2D)
+                  fitScale: \(fitScale)
+                  appliedScale: \(appliedScale)
+                  targetHipsWorld: \(targetHipsWorld)
+                  finalPosition: \(session.displayRootNode.simdPosition)
+                  finalBBoxCenter: \(finalCenter)
+                  finalBBoxSize: \(finalSize)
+                  invariantBetweenCameraAndPlane: \(invariant)
+                """
+            )
+        }
+
+        private func normalizeReferenceRigScreenOrientation(
+            session: SkinnedRigSession,
+            targetZ: Float
+        ) {
+            session.displayRootNode.simdPosition = SIMD3<Float>(0, 0, targetZ)
+            session.displayRootNode.simdScale = SIMD3<Float>(repeating: 1.0)
+
+            guard let hips = session.bonesByCanonicalName["Hips"],
+                  let spine = session.bonesByCanonicalName["Spine"] else {
+                print("[RotoSceneVideoViewport] Reference rig screen orientation skipped: missing Hips/Spine bones")
+                return
+            }
+
+            let hipsWorld = worldPosition(of: hips)
+            let spineWorld = worldPosition(of: spine)
+            let torso = spineWorld - hipsWorld
+            let torsoXY = SIMD2<Float>(torso.x, torso.y)
+            let len2 = simd_dot(torsoXY, torsoXY)
+
+            guard len2 > 0.000001 else {
+                print("[RotoSceneVideoViewport] Reference rig screen orientation skipped: Hips->Spine has no screen length")
+                return
+            }
+
+            let currentAngle = atan2(torsoXY.y, torsoXY.x)
+            let targetAngle = Float.pi * 0.5
+            let correction = targetAngle - currentAngle
+
+            session.displayRootNode.simdOrientation = simd_quatf(
+                angle: correction,
+                axis: SIMD3<Float>(0, 0, 1)
+            )
+
+            let correctedHips = worldPosition(of: hips)
+            let correctedSpine = worldPosition(of: spine)
+            let correctedTorso = correctedSpine - correctedHips
+
+            print(
+                """
+                [RotoSceneVideoViewport] Reference rig screen orientation normalized
+                  hipsWorld: \(hipsWorld)
+                  spineWorld: \(spineWorld)
+                  torsoXY: \(torsoXY)
+                  correctionDegrees: \(correction * 180.0 / Float.pi)
+                  correctedTorso: \(correctedTorso)
+                """
+            )
+        }
+
+        private func worldPosition(of node: SCNNode) -> SIMD3<Float> {
+            let position = node.convertPosition(SCNVector3(0, 0, 0), to: nil)
+
+            return SIMD3<Float>(
+                Float(position.x),
+                Float(position.y),
+                Float(position.z)
+            )
+        }
+
+        private func worldPointOnRigDepth(
+            normalizedX: Double,
+            normalizedY: Double,
+            rigZ: Float
+        ) -> SIMD3<Float> {
+            let pointOnPlane = SIMD3<Float>(
+                Float((CGFloat(normalizedX) - 0.5) * videoPlaneSize.width),
+                Float((CGFloat(normalizedY) - 0.5) * videoPlaneSize.height),
+                currentVideoPlaneZ
+            )
+
+            let cameraOrigin = SIMD3<Float>(0, 0, 0)
+            let direction = normalizeSafe(
+                pointOnPlane - cameraOrigin,
+                fallback: SIMD3<Float>(0, 0, -1)
+            )
+
+            guard abs(direction.z) > 0.000001 else {
+                return SIMD3<Float>(pointOnPlane.x, pointOnPlane.y, rigZ)
+            }
+
+            let t = (rigZ - cameraOrigin.z) / direction.z
+            return cameraOrigin + direction * max(t, 0)
+        }
+
+        private func projectedScreenPoint(
+            world: SIMD3<Float>,
+            view: SCNView
+        ) -> CGPoint {
+            let projected = view.projectPoint(
+                SCNVector3(world.x, world.y, world.z)
+            )
+
+            return CGPoint(
+                x: CGFloat(projected.x),
+                y: CGFloat(projected.y)
+            )
+        }
+
+        private func distance2D(
+            _ a: CGPoint,
+            _ b: CGPoint
+        ) -> Double {
+            let dx = Double(a.x - b.x)
+            let dy = Double(a.y - b.y)
+            return sqrt(dx * dx + dy * dy)
+        }
+
+        private func normalizeSafe(
+            _ value: SIMD3<Float>,
+            fallback: SIMD3<Float>
+        ) -> SIMD3<Float> {
+            guard simd_length_squared(value) > 0.0000001 else {
+                return fallback
+            }
+
+            return simd_normalize(value)
+        }
+
+        private func forceReferenceRigVisible(_ root: SCNNode) {
+            visit(root) { node in
+                node.isHidden = false
+                node.opacity = 1.0
+                node.renderingOrder = 0
+
+                guard let geometry = node.geometry else {
+                    return
+                }
+
+                for material in geometry.materials {
+                    material.lightingModel = .constant
+                    material.readsFromDepthBuffer = true
+                    material.writesToDepthBuffer = true
+                    material.isDoubleSided = true
+                }
+            }
+        }
+
+        private func worldBoundingBox(
+            node: SCNNode
+        ) -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
+            var found = false
+
+            var outMin = SIMD3<Float>(
+                Float.greatestFiniteMagnitude,
+                Float.greatestFiniteMagnitude,
+                Float.greatestFiniteMagnitude
+            )
+
+            var outMax = SIMD3<Float>(
+                -Float.greatestFiniteMagnitude,
+                -Float.greatestFiniteMagnitude,
+                -Float.greatestFiniteMagnitude
+            )
+
+            visit(node) { child in
+                guard child.geometry != nil else {
+                    return
+                }
+
+                let box = child.boundingBox
+
+                let corners = [
+                    SCNVector3(box.min.x, box.min.y, box.min.z),
+                    SCNVector3(box.max.x, box.min.y, box.min.z),
+                    SCNVector3(box.min.x, box.max.y, box.min.z),
+                    SCNVector3(box.max.x, box.max.y, box.min.z),
+                    SCNVector3(box.min.x, box.min.y, box.max.z),
+                    SCNVector3(box.max.x, box.min.y, box.max.z),
+                    SCNVector3(box.min.x, box.max.y, box.max.z),
+                    SCNVector3(box.max.x, box.max.y, box.max.z)
+                ]
+
+                for corner in corners {
+                    let w = child.convertPosition(corner, to: nil)
+                    let p = SIMD3<Float>(
+                        Float(w.x),
+                        Float(w.y),
+                        Float(w.z)
+                    )
+
+                    outMin = SIMD3<Float>(
+                        Swift.min(outMin.x, p.x),
+                        Swift.min(outMin.y, p.y),
+                        Swift.min(outMin.z, p.z)
+                    )
+
+                    outMax = SIMD3<Float>(
+                        Swift.max(outMax.x, p.x),
+                        Swift.max(outMax.y, p.y),
+                        Swift.max(outMax.z, p.z)
+                    )
+
+                    found = true
+                }
+            }
+
+            return found ? (outMin, outMax) : nil
+        }
+
+        private func updateRigBoundsBox(box: (min: SIMD3<Float>, max: SIMD3<Float>)?) {
+            removeAllChildren(from: rigBoundsRoot)
+
+            guard let box else {
+                return
+            }
+
+            let min = box.min
+            let max = box.max
+
+            let corners = [
+                SIMD3<Float>(min.x, min.y, min.z),
+                SIMD3<Float>(max.x, min.y, min.z),
+                SIMD3<Float>(min.x, max.y, min.z),
+                SIMD3<Float>(max.x, max.y, min.z),
+                SIMD3<Float>(min.x, min.y, max.z),
+                SIMD3<Float>(max.x, min.y, max.z),
+                SIMD3<Float>(min.x, max.y, max.z),
+                SIMD3<Float>(max.x, max.y, max.z)
+            ]
+
+            let edges = [
+                (0, 1), (0, 2), (1, 3), (2, 3),
+                (4, 5), (4, 6), (5, 7), (6, 7),
+                (0, 4), (1, 5), (2, 6), (3, 7)
+            ]
+
+            for edge in edges {
+                let node = makeLineNode(
+                    from: SCNVector3(corners[edge.0]),
+                    to: SCNVector3(corners[edge.1]),
+                    color: NSColor.systemPink.withAlphaComponent(0.95)
+                )
+                node.renderingOrder = 200
+                rigBoundsRoot.addChildNode(node)
+            }
+
+            rigBoundsRoot.isHidden = false
+        }
+
+        private func visit(_ node: SCNNode, _ body: (SCNNode) -> Void) {
+            body(node)
+
+            for child in node.childNodes {
+                visit(child, body)
+            }
+        }
+
         private func updateRaySolveDebug(
             result: RotoRaySolveResult?,
             raySolvedFrame: RotoRayAnimationSolveResult.Frame?,
@@ -536,6 +1150,11 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         }
 
         private func drawSolvedRig(_ frame: RotoRayAnimationSolveResult.Frame) {
+            if !didLogDrawnSolvedRigPoseSource {
+                didLogDrawnSolvedRigPoseSource = true
+                print("[RotoMotion Session] Solved rig viewport is drawn from jointPositions, not posed armature local transforms.")
+            }
+
             for (a, b) in solvedRigBones {
                 guard let ja = frame.jointPositions[a],
                       let jb = frame.jointPositions[b] else {

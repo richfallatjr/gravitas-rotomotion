@@ -128,26 +128,19 @@ enum RetargetedAnimatedUSDZExporter {
 
         let audit: RotoMotionExportKeyAuditor.Output
 
-        do {
-            audit = try RotoMotionExportKeyAuditor.writeAudit(
-                solve: solve,
-                exportInputURL: exportInputJSON,
-                readbackURL: readbackJSON,
-                textReportURL: auditTextReport,
-                jsonReportURL: auditJSONReport
-            )
-        } catch {
+        if isDirectSessionArmatureTransformInput(exportInputJSON) {
             let message = """
             RotoMotion Export Key Audit
 
-            Audit failed, but the animated USDZ was created:
-            \(outputUSDZ.path)
+            Export input source:
+            \(exportInputJSON.path)
 
-            Error:
-            \(error.localizedDescription)
+            Direct session armature transform export was used.
+            Local joint translations, rotations, and scales were written from the session armature transform JSON.
+            The old rayAnimationSolveResult.localRotationsWXYZ comparison is intentionally skipped for this path.
             """
 
-            try? message.write(
+            try message.write(
                 to: auditTextReport,
                 atomically: true,
                 encoding: .utf8
@@ -155,22 +148,67 @@ enum RetargetedAnimatedUSDZExporter {
 
             let json: [String: Any] = [
                 "schema": "com.gravitas.rotomotion.export_audit.v0",
-                "auditFailed": true,
-                "outputUSDZ": outputUSDZ.path,
-                "error": error.localizedDescription
+                "auditSkipped": true,
+                "reason": "direct_session_armature_transform_export",
+                "exportInput": exportInputJSON.path,
+                "outputUSDZ": outputUSDZ.path
             ]
 
-            if let data = try? JSONSerialization.data(
+            let data = try JSONSerialization.data(
                 withJSONObject: json,
                 options: [.prettyPrinted, .sortedKeys]
-            ) {
-                try? data.write(to: auditJSONReport, options: .atomic)
-            }
+            )
+            try data.write(to: auditJSONReport, options: .atomic)
 
             audit = .init(
-                issueCount: 1,
-                highSeverityCount: 1
+                issueCount: 0,
+                highSeverityCount: 0
             )
+        } else {
+            do {
+                audit = try RotoMotionExportKeyAuditor.writeAudit(
+                    solve: solve,
+                    exportInputURL: exportInputJSON,
+                    readbackURL: readbackJSON,
+                    textReportURL: auditTextReport,
+                    jsonReportURL: auditJSONReport
+                )
+            } catch {
+                let message = """
+                RotoMotion Export Key Audit
+
+                Audit failed, but the animated USDZ was created:
+                \(outputUSDZ.path)
+
+                Error:
+                \(error.localizedDescription)
+                """
+
+                try? message.write(
+                    to: auditTextReport,
+                    atomically: true,
+                    encoding: .utf8
+                )
+
+                let json: [String: Any] = [
+                    "schema": "com.gravitas.rotomotion.export_audit.v0",
+                    "auditFailed": true,
+                    "outputUSDZ": outputUSDZ.path,
+                    "error": error.localizedDescription
+                ]
+
+                if let data = try? JSONSerialization.data(
+                    withJSONObject: json,
+                    options: [.prettyPrinted, .sortedKeys]
+                ) {
+                    try? data.write(to: auditJSONReport, options: .atomic)
+                }
+
+                audit = .init(
+                    issueCount: 1,
+                    highSeverityCount: 1
+                )
+            }
         }
 
         return ExportResult(
@@ -229,6 +267,17 @@ enum RetargetedAnimatedUSDZExporter {
             .replacingOccurrences(of: " ", with: "_")
 
         return sanitized.isEmpty ? "rotomotion_retarget" : sanitized
+    }
+
+    private static func isDirectSessionArmatureTransformInput(_ url: URL) -> Bool {
+        guard let data = try? Data(contentsOf: url),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+
+        let schema = root["schema"] as? String
+        return schema == "com.gravitas.rotomotion.session_armature_snapshot.v0"
+            || schema == "com.gravitas.rotomotion.session_armature_pose.v0"
     }
 
 }

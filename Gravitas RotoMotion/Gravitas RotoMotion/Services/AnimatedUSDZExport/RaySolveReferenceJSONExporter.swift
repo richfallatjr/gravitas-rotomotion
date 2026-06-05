@@ -14,19 +14,11 @@ enum RaySolveReferenceJSONExporter {
                     continue
                 }
 
-                let rotation = frame.localRotationsWXYZ[jointName] ?? SIMD4<Float>(1, 0, 0, 0)
-
                 joints[jointName] = [
                     "worldPosition": [
                         Double(position.x),
                         Double(position.y),
                         Double(position.z)
-                    ],
-                    "localRotationWXYZ": [
-                        Double(rotation.x),
-                        Double(rotation.y),
-                        Double(rotation.z),
-                        Double(rotation.w)
                     ],
                     "solved": frame.solvedJoints.contains(jointName),
                     "missing": frame.missingJoints.contains(jointName),

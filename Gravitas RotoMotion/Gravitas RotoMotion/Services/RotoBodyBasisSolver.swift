@@ -5,6 +5,7 @@ enum RotoBodyBasisSolver {
     static func makeBasis(
         jointPositions: [String: SIMD3<Float>],
         previousBasis: RotoBodyBasis?,
+        forceCameraFacingYaw: Bool,
         flipDotThreshold: Float = 0.15,
         stabilization: Float = 0.35
     ) -> RotoBodyBasis {
@@ -43,6 +44,24 @@ enum RotoBodyBasisSolver {
             fallback: previousBasis?.forward ?? SIMD3<Float>(0, 0, 1)
         )
 
+        if forceCameraFacingYaw {
+            let cameraFacing = SIMD3<Float>(0, 0, 1)
+
+            if simd_dot(forward, cameraFacing) < 0 {
+                forward *= -1
+                right *= -1
+            }
+
+            forward = normalizeSafe(
+                mix(forward, cameraFacing, 0.85),
+                fallback: cameraFacing
+            )
+            right = normalizeSafe(
+                simd_cross(up, forward),
+                fallback: SIMD3<Float>(1, 0, 0)
+            )
+        }
+
         if let previousBasis {
             if simd_dot(forward, previousBasis.forward) < -abs(flipDotThreshold) {
                 forward *= -1
@@ -67,19 +86,69 @@ enum RotoBodyBasisSolver {
                 fallback: forward
             )
 
-            return RotoBodyBasis(
+            return makeOrthonormalBasis(
                 origin: hips,
                 right: stabilizedRight,
                 up: stabilizedUp,
-                forward: stabilizedForward
+                forward: stabilizedForward,
+                forceCameraFacingYaw: forceCameraFacingYaw
             )
         }
 
-        return RotoBodyBasis(
+        return makeOrthonormalBasis(
             origin: hips,
             right: right,
             up: up,
-            forward: forward
+            forward: forward,
+            forceCameraFacingYaw: forceCameraFacingYaw
+        )
+    }
+
+    private static func makeOrthonormalBasis(
+        origin: SIMD3<Float>,
+        right: SIMD3<Float>,
+        up: SIMD3<Float>,
+        forward: SIMD3<Float>,
+        forceCameraFacingYaw: Bool
+    ) -> RotoBodyBasis {
+        let cameraFacing = SIMD3<Float>(0, 0, 1)
+        var finalUp = normalizeSafe(up, fallback: SIMD3<Float>(0, 1, 0))
+        var finalForward = normalizeSafe(
+            forward - finalUp * simd_dot(forward, finalUp),
+            fallback: forceCameraFacingYaw ? cameraFacing : SIMD3<Float>(0, 0, 1)
+        )
+
+        if forceCameraFacingYaw {
+            if simd_dot(finalForward, cameraFacing) < 0 {
+                finalForward *= -1
+            }
+
+            finalForward = normalizeSafe(
+                mix(finalForward, cameraFacing, 0.85),
+                fallback: cameraFacing
+            )
+        }
+
+        var finalRight = normalizeSafe(
+            simd_cross(finalUp, finalForward),
+            fallback: right
+        )
+        finalUp = normalizeSafe(
+            simd_cross(finalForward, finalRight),
+            fallback: finalUp
+        )
+
+        if !forceCameraFacingYaw,
+           simd_dot(finalRight, right) < 0 {
+            finalRight *= -1
+            finalForward *= -1
+        }
+
+        return RotoBodyBasis(
+            origin: origin,
+            right: finalRight,
+            up: finalUp,
+            forward: finalForward
         )
     }
 

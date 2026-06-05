@@ -11,6 +11,7 @@ struct USDZSkeletonProfile: Codable, Equatable {
     let missingCanonicalJoints: [String]
     let estimatedHeightMeters: Double?
     let boneLengths: [String: Double]
+    let unitScaleToMeters: Double?
 
     var validForMeshy24: Bool {
         missingCanonicalJoints.isEmpty

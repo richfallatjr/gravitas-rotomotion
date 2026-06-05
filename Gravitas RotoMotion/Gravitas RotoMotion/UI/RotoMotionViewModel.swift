@@ -2,11 +2,59 @@ import AppKit
 import AVFoundation
 import Combine
 import Foundation
+import SceneKit
 import SwiftUI
 import simd
 
+enum CameraProfile: String, CaseIterable, Identifiable {
+    case iPhone17Main1x
+    case iPhone17ProMain1x
+    case iPhone17UltraWide05x
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .iPhone17Main1x:
+            return "iPhone 17 Main 1x / 26mm"
+        case .iPhone17ProMain1x:
+            return "iPhone 17 Pro Main 1x / 24mm"
+        case .iPhone17UltraWide05x:
+            return "iPhone 17 Ultra Wide 0.5x / 13mm"
+        }
+    }
+
+    var portraitVerticalFOVDegrees: Double {
+        switch self {
+        case .iPhone17Main1x:
+            return 69.4
+        case .iPhone17ProMain1x:
+            return 73.7
+        case .iPhone17UltraWide05x:
+            return 108.4
+        }
+    }
+
+    var portraitHorizontalFOVDegrees: Double {
+        switch self {
+        case .iPhone17Main1x:
+            return 49.6
+        case .iPhone17ProMain1x:
+            return 53.1
+        case .iPhone17UltraWide05x:
+            return 120.0
+        }
+    }
+}
+
 @MainActor
 final class RotoMotionViewModel: ObservableObject {
+    enum SessionPoseSource: String {
+        case none
+        case drawnJointPositions
+        case posedArmatureLocalTransforms
+    }
+
     enum RaySolveMode: String, CaseIterable, Identifiable {
         case spineOnly
         case fullBody
@@ -43,15 +91,23 @@ final class RotoMotionViewModel: ObservableObject {
 
     let objectWillChange = ObservableObjectPublisher()
 
-    @Published var videoURL: URL?
-    @Published var outputDirectoryURL: URL?
+    @Published var videoURL: URL? {
+        didSet { persistURL(videoURL, forKey: AppStorageKeys.videoURL) }
+    }
+    @Published var outputDirectoryURL: URL? {
+        didSet { persistURL(outputDirectoryURL, forKey: AppStorageKeys.outputDirectoryURL) }
+    }
     @Published var project: RotoMotionProject?
     @Published var decodedFrames: [RotoVideoFrameCache.CachedFrame] = []
     @Published var currentVideoFrameImage: NSImage?
     @Published var imageRenderToken = 0
     @Published var isFramePlaybackRunning = false
-    @Published var framePlaybackFPS = 24.0
-    @Published var isVideoLooping = true
+    @Published var framePlaybackFPS = 24.0 {
+        didSet { persist(framePlaybackFPS, AppStorageKeys.framePlaybackFPS) }
+    }
+    @Published var isVideoLooping = true {
+        didSet { persist(isVideoLooping, AppStorageKeys.isVideoLooping) }
+    }
     @Published var videoPlaybackStatus = "No video loaded."
 
     @Published var rawCapture: RawVisionPoseCapture?
@@ -65,67 +121,219 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var currentTimeSeconds = 0.0
     @Published var maxFrameIndex = 0
 
-    @Published var sampleFPS = 24.0
-    @Published var visionSampleFPS = 24.0
-    @Published var maxFrames = 0
+    @Published var sampleFPS = 24.0 {
+        didSet { persist(sampleFPS, AppStorageKeys.sampleFPS) }
+    }
+    @Published var visionSampleFPS = 24.0 {
+        didSet { persist(visionSampleFPS, AppStorageKeys.visionSampleFPS) }
+    }
+    @Published var maxFrames = 0 {
+        didSet { persist(maxFrames, AppStorageKeys.maxFrames) }
+    }
 
-    @Published var showRawVisionPoints = true
-    @Published var showNormalizedMeshyPoints = true
-    @Published var showSmoothedMeshyPoints = true
-    @Published var showSmoothingDeltaVectors = true
-    @Published var showImportedRigModel = true
-    @Published var showImportedRigSkeleton = true
-    @Published var showFittedRig = true
-    @Published var rigOverlayScale = 1.0
-    @Published var rigOverlayOffsetX = 0.0
-    @Published var rigOverlayOffsetY = 0.0
+    @Published var showRawVisionPoints = true {
+        didSet { persist(showRawVisionPoints, AppStorageKeys.showRawVisionPoints) }
+    }
+    @Published var showNormalizedMeshyPoints = true {
+        didSet { persist(showNormalizedMeshyPoints, AppStorageKeys.showNormalizedMeshyPoints) }
+    }
+    @Published var showSmoothedMeshyPoints = true {
+        didSet { persist(showSmoothedMeshyPoints, AppStorageKeys.showSmoothedMeshyPoints) }
+    }
+    @Published var showSmoothingDeltaVectors = true {
+        didSet { persist(showSmoothingDeltaVectors, AppStorageKeys.showSmoothingDeltaVectors) }
+    }
+    @Published var showImportedRigModel = true {
+        didSet { persist(showImportedRigModel, AppStorageKeys.showImportedRigModel) }
+    }
+    @Published var showImportedRigSkeleton = true {
+        didSet { persist(showImportedRigSkeleton, AppStorageKeys.showImportedRigSkeleton) }
+    }
+    @Published var showFittedRig = true {
+        didSet { persist(showFittedRig, AppStorageKeys.showFittedRig) }
+    }
+    @Published var rigOverlayScale = 1.0 {
+        didSet { persist(rigOverlayScale, AppStorageKeys.rigOverlayScale) }
+    }
+    @Published var rigOverlayOffsetX = 0.0 {
+        didSet { persist(rigOverlayOffsetX, AppStorageKeys.rigOverlayOffsetX) }
+    }
+    @Published var rigOverlayOffsetY = 0.0 {
+        didSet { persist(rigOverlayOffsetY, AppStorageKeys.rigOverlayOffsetY) }
+    }
 
-    @Published var groundPlane = GroundPlaneController.default
+    @Published var groundPlane = GroundPlaneController.default {
+        didSet { persistCodable(groundPlane, AppStorageKeys.groundPlane) }
+    }
 
-    @Published var smoothingPreviewEnabled = true
-    @Published var smoothingStrength = 0.85
-    @Published var smoothingWindowRadius = 4
-    @Published var smoothingSettings = SmoothedMeshyPoseCapture.SmoothingSettings.default
-    @Published var fitSettings = RigFitSettings.default
-    @Published var projectionSettings = RigProjectionSettings.default
+    @Published var smoothingPreviewEnabled = true {
+        didSet { persist(smoothingPreviewEnabled, AppStorageKeys.smoothingPreviewEnabled) }
+    }
+    @Published var smoothingStrength = 0.85 {
+        didSet { persist(smoothingStrength, AppStorageKeys.smoothingStrength) }
+    }
+    @Published var smoothingWindowRadius = 4 {
+        didSet { persist(smoothingWindowRadius, AppStorageKeys.smoothingWindowRadius) }
+    }
+    @Published var smoothingSettings = SmoothedMeshyPoseCapture.SmoothingSettings.default {
+        didSet { persistCodable(smoothingSettings, AppStorageKeys.smoothingSettings) }
+    }
+    @Published var fitSettings = RigFitSettings.default {
+        didSet { persistCodable(fitSettings, AppStorageKeys.fitSettings) }
+    }
+    @Published var projectionSettings = RigProjectionSettings.default {
+        didSet { persistCodable(projectionSettings, AppStorageKeys.projectionSettings) }
+    }
 
-    @Published var rigOpacity = 0.5
+    @Published var rigOpacity = 0.5 {
+        didSet { persist(rigOpacity, AppStorageKeys.rigOpacity) }
+    }
     @Published var rigImportStatus = "No USDZ rig loaded."
 
-    @Published var sourceCharacterUSDZURL: URL?
-    @Published var exportClipID = "rotomotion_test_01"
-    @Published var exportDisplayName = "RotoMotion Test 01"
+    @Published var sourceCharacterUSDZURL: URL? {
+        didSet { persistURL(sourceCharacterUSDZURL, forKey: AppStorageKeys.sourceCharacterUSDZURL) }
+    }
+    @Published var exportClipID = "rotomotion_test_01" {
+        didSet { persist(exportClipID, AppStorageKeys.exportClipID) }
+    }
+    @Published var exportDisplayName = "RotoMotion Test 01" {
+        didSet { persist(exportDisplayName, AppStorageKeys.exportDisplayName) }
+    }
     @Published var exportStatus = "No package exported."
-    @Published var animatedUSDZSourceURL: URL?
-    @Published var animatedUSDZClipID = "rotomotion_anim_test_01"
+    @Published var animatedUSDZSourceURL: URL? {
+        didSet { persistURL(animatedUSDZSourceURL, forKey: AppStorageKeys.animatedUSDZSourceURL) }
+    }
+    @Published var animatedUSDZClipID = "rotomotion_anim_test_01" {
+        didSet { persist(animatedUSDZClipID, AppStorageKeys.animatedUSDZClipID) }
+    }
     @Published var animatedUSDZExportStatus = "No animated USDZ exported."
     @Published var openUSDToolStatus: OpenUSDToolStatus?
 
-    @Published var referenceSolveUSDZURL: URL?
-    @Published var targetCharacterUSDZURL: URL?
-    @Published var retargetClipID = "rotomotion_inside_out_01"
-    @Published var includeHipsTranslationInUSDZ = true
+    @Published var referenceSolveUSDZURL: URL? {
+        didSet { persistURL(referenceSolveUSDZURL, forKey: AppStorageKeys.referenceSolveUSDZURL) }
+    }
+    @Published var targetCharacterUSDZURL: URL? {
+        didSet { persistURL(targetCharacterUSDZURL, forKey: AppStorageKeys.targetCharacterUSDZURL) }
+    }
+    @Published var retargetClipID = "rotomotion_inside_out_01" {
+        didSet { persist(retargetClipID, AppStorageKeys.retargetClipID) }
+    }
+    @Published var includeHipsTranslationInUSDZ = false {
+        didSet { persist(includeHipsTranslationInUSDZ, AppStorageKeys.includeHipsTranslationInUSDZ) }
+    }
+    @Published var skinnedRigSession: SkinnedRigSession?
+    @Published var skinnedRigStatus = "No skinned rig loaded."
+    @Published var showSkinnedRig = true {
+        didSet { persist(showSkinnedRig, AppStorageKeys.showSkinnedRig) }
+    }
+    @Published var viewportZoom: Double = 2.0 {
+        didSet { persist(viewportZoom, AppStorageKeys.viewportZoom) }
+    }
+    @Published var cameraProfile: CameraProfile = .iPhone17Main1x {
+        didSet { persist(cameraProfile.rawValue, AppStorageKeys.cameraProfile) }
+    }
+    var activeCameraFOVDegrees: Double {
+        cameraProfile.portraitVerticalFOVDegrees
+    }
+    let cameraZ: Float = 0.0
+    let defaultReferenceRigZ: Float = -9.0
+    let defaultImagePlaneZ: Float = -2000.0
+    let referenceRigYawCorrection: Float = .pi
+    let referenceRigScaleVisualReduction: Float = 1.0 / 3.0
+    @Published var currentVideoPlaneZ: Float = -2000.0 {
+        didSet { persist(currentVideoPlaneZ, AppStorageKeys.currentVideoPlaneZ) }
+    }
+    @Published var referenceRigDefaultZ: Float = -2.0 {
+        didSet { persist(referenceRigDefaultZ, AppStorageKeys.referenceRigDefaultZ) }
+    }
+    @Published var referenceRigCurrentZ: Float = -2.0 {
+        didSet { persist(referenceRigCurrentZ, AppStorageKeys.referenceRigCurrentZ) }
+    }
+    @Published var referenceRigScaleMultiplier: Double = 1.0 {
+        didSet { persist(referenceRigScaleMultiplier, AppStorageKeys.referenceRigScaleMultiplier) }
+    }
+    @Published var referenceRigX: Double = 0.0 {
+        didSet { persist(referenceRigX, AppStorageKeys.referenceRigX) }
+    }
+    @Published var referenceRigY: Double = -0.75 {
+        didSet { persist(referenceRigY, AppStorageKeys.referenceRigY) }
+    }
+    @Published var referenceRigZ: Double = -2.0 {
+        didSet { persist(referenceRigZ, AppStorageKeys.referenceRigZ) }
+    }
+    @Published var referenceRigYawDegrees: Double = 0.0 {
+        didSet { persist(referenceRigYawDegrees, AppStorageKeys.referenceRigYawDegrees) }
+    }
+    @Published var applySolvedPoseToReferenceRig = false {
+        didSet { persist(applySolvedPoseToReferenceRig, AppStorageKeys.applySolvedPoseToReferenceRig) }
+    }
+    @Published var referenceRigVisibleHeightFraction = 0.65 {
+        didSet { persist(referenceRigVisibleHeightFraction, AppStorageKeys.referenceRigVisibleHeightFraction) }
+    }
+    @Published var referenceRigCameraZ = -2.0 {
+        didSet { persist(referenceRigCameraZ, AppStorageKeys.referenceRigCameraZ) }
+    }
+    @Published var referenceRigPlacementStatus = "Reference rig not placed."
+    @Published var referenceRigVisibilityStatus = "Reference rig not fitted."
     @Published var referenceRigProfile: USDZSkeletonProfile?
     @Published var sessionSkeletonPath: String?
     @Published var sessionJointPaths: [String] = []
     @Published var sessionJointLeafNames: [String] = []
     @Published var sessionSkeletonStatus = "No session skeleton captured."
+    @Published var sessionPoseSource: SessionPoseSource = .none
+    @Published var sessionPoseStatus = "No session pose source detected."
     @Published var usdzRetargetStatus = "No animated target USDZ exported."
-    @Published var lastAnimatedUSDZExportURL: URL?
-    @Published var lastAnimatedUSDZExportFolderURL: URL?
+    @Published var lastAnimatedUSDZExportURL: URL? {
+        didSet { persistURL(lastAnimatedUSDZExportURL, forKey: AppStorageKeys.lastAnimatedUSDZExportURL) }
+    }
+    @Published var lastAnimatedUSDZExportFolderURL: URL? {
+        didSet { persistURL(lastAnimatedUSDZExportFolderURL, forKey: AppStorageKeys.lastAnimatedUSDZExportFolderURL) }
+    }
 
-    @Published var showVisionRays = true
-    @Published var showRaySolvedRig = true
-    @Published var rayLength = Double(RotoRayRigSolver.defaultRayLength)
-    @Published var rayTargetHeightMeters = 1.74
-    @Published var raySceneUnitsPerMeter = 5.0
-    @Published var raySolveMode: RaySolveMode = .fullBody
+    @Published var showVisionRays = true {
+        didSet { persist(showVisionRays, AppStorageKeys.showVisionRays) }
+    }
+    @Published var showRaySolvedRig = true {
+        didSet { persist(showRaySolvedRig, AppStorageKeys.showRaySolvedRig) }
+    }
+    @Published var showDebugSolvedSkeleton = false {
+        didSet { persist(showDebugSolvedSkeleton, AppStorageKeys.showDebugSolvedSkeleton) }
+    }
+    @Published var rayLength = Double(RotoRayRigSolver.defaultRayLength) {
+        didSet { persist(rayLength, AppStorageKeys.rayLength) }
+    }
+    @Published var rayTargetHeightMeters = 1.74 {
+        didSet { persist(rayTargetHeightMeters, AppStorageKeys.rayTargetHeightMeters) }
+    }
+    @Published var raySceneUnitsPerMeter = 5.0 {
+        didSet { persist(raySceneUnitsPerMeter, AppStorageKeys.raySceneUnitsPerMeter) }
+    }
+    @Published var useCalibratedRigDepth = false {
+        didSet { persist(useCalibratedRigDepth, AppStorageKeys.useCalibratedRigDepth) }
+    }
+    @Published var calibratedRigDepthZ = 0.0 {
+        didSet { persist(calibratedRigDepthZ, AppStorageKeys.calibratedRigDepthZ) }
+    }
+    @Published var projectionScaleError = 0.0 {
+        didSet { persist(projectionScaleError, AppStorageKeys.projectionScaleError) }
+    }
+    @Published var depthCalibrationStatus = "Depth calibration not run."
+    @Published var forceCameraFacingYaw = true {
+        didSet { persist(forceCameraFacingYaw, AppStorageKeys.forceCameraFacingYaw) }
+    }
+    @Published var raySolveMode: RaySolveMode = .fullBody {
+        didSet { persist(raySolveMode.rawValue, AppStorageKeys.raySolveMode) }
+    }
     @Published var currentVideoPlaneSize: CGSize?
     @Published var currentRaySolveResult: RotoRaySolveResult?
     @Published var raySolveStatus = "Ray solve not run."
     @Published var rayAnimationSolveResult: RotoRayAnimationSolveResult?
+    @Published var sessionArmatureSnapshot: SessionArmatureSnapshot?
+    @Published var sessionArmaturePoseBuffer: SessionArmaturePoseBuffer?
     @Published var rayAnimationSolveStatus = "Ray animation solve not run."
-    @Published var raySolvedUSDZClipID = "rotomotion_ray_solve_01"
+    @Published var raySolvedUSDZClipID = "rotomotion_ray_solve_01" {
+        didSet { persist(raySolvedUSDZClipID, AppStorageKeys.raySolvedUSDZClipID) }
+    }
     @Published var raySolvedUSDZExportStatus = "No ray solve USDZ exported."
 
     @Published var status = "Open a video to begin."
@@ -148,6 +356,11 @@ final class RotoMotionViewModel: ObservableObject {
     private var audioPlayer: AVPlayer?
     private var audioEndObserver: NSObjectProtocol?
 
+    init() {
+        loadPersistedAppStorageFields()
+        restorePersistedReferenceRigIfAvailable()
+    }
+
     deinit {
         playbackTask?.cancel()
 
@@ -159,6 +372,254 @@ final class RotoMotionViewModel: ObservableObject {
            let videoSecurityScopedURL {
             videoSecurityScopedURL.stopAccessingSecurityScopedResource()
         }
+    }
+
+    private enum AppStorageKeys {
+        static let prefix = "com.gravitas.rotomotion."
+
+        static let videoURL = prefix + "videoURL"
+        static let outputDirectoryURL = prefix + "outputDirectoryURL"
+        static let framePlaybackFPS = prefix + "framePlaybackFPS"
+        static let isVideoLooping = prefix + "isVideoLooping"
+        static let sampleFPS = prefix + "sampleFPS"
+        static let visionSampleFPS = prefix + "visionSampleFPS"
+        static let maxFrames = prefix + "maxFrames"
+        static let showRawVisionPoints = prefix + "showRawVisionPoints"
+        static let showNormalizedMeshyPoints = prefix + "showNormalizedMeshyPoints"
+        static let showSmoothedMeshyPoints = prefix + "showSmoothedMeshyPoints"
+        static let showSmoothingDeltaVectors = prefix + "showSmoothingDeltaVectors"
+        static let showImportedRigModel = prefix + "showImportedRigModel"
+        static let showImportedRigSkeleton = prefix + "showImportedRigSkeleton"
+        static let showFittedRig = prefix + "showFittedRig"
+        static let rigOverlayScale = prefix + "rigOverlayScale"
+        static let rigOverlayOffsetX = prefix + "rigOverlayOffsetX"
+        static let rigOverlayOffsetY = prefix + "rigOverlayOffsetY"
+        static let groundPlane = prefix + "groundPlane"
+        static let smoothingPreviewEnabled = prefix + "smoothingPreviewEnabled"
+        static let smoothingStrength = prefix + "smoothingStrength"
+        static let smoothingWindowRadius = prefix + "smoothingWindowRadius"
+        static let smoothingSettings = prefix + "smoothingSettings"
+        static let fitSettings = prefix + "fitSettings"
+        static let projectionSettings = prefix + "projectionSettings"
+        static let rigOpacity = prefix + "rigOpacity"
+        static let sourceCharacterUSDZURL = prefix + "sourceCharacterUSDZURL"
+        static let exportClipID = prefix + "exportClipID"
+        static let exportDisplayName = prefix + "exportDisplayName"
+        static let animatedUSDZSourceURL = prefix + "animatedUSDZSourceURL"
+        static let animatedUSDZClipID = prefix + "animatedUSDZClipID"
+        static let referenceSolveUSDZURL = prefix + "referenceSolveUSDZURL"
+        static let targetCharacterUSDZURL = prefix + "targetCharacterUSDZURL"
+        static let retargetClipID = prefix + "retargetClipID"
+        static let includeHipsTranslationInUSDZ = prefix + "includeHipsTranslationInUSDZ"
+        static let showSkinnedRig = prefix + "showSkinnedRig"
+        static let viewportZoom = prefix + "viewportZoom"
+        static let cameraProfile = prefix + "cameraProfile"
+        static let currentVideoPlaneZ = prefix + "currentVideoPlaneZ"
+        static let referenceRigDefaultZ = prefix + "referenceRigDefaultZ"
+        static let referenceRigCurrentZ = prefix + "referenceRigCurrentZ"
+        static let referenceRigScaleMultiplier = prefix + "referenceRigScaleMultiplier"
+        static let referenceRigX = prefix + "referenceRigX"
+        static let referenceRigY = prefix + "referenceRigY"
+        static let referenceRigZ = prefix + "referenceRigZ"
+        static let referenceRigYawDegrees = prefix + "referenceRigYawDegrees"
+        static let applySolvedPoseToReferenceRig = prefix + "applySolvedPoseToReferenceRig"
+        static let referenceRigVisibleHeightFraction = prefix + "referenceRigVisibleHeightFraction"
+        static let referenceRigCameraZ = prefix + "referenceRigCameraZ"
+        static let lastAnimatedUSDZExportURL = prefix + "lastAnimatedUSDZExportURL"
+        static let lastAnimatedUSDZExportFolderURL = prefix + "lastAnimatedUSDZExportFolderURL"
+        static let showVisionRays = prefix + "showVisionRays"
+        static let showRaySolvedRig = prefix + "showRaySolvedRig"
+        static let showDebugSolvedSkeleton = prefix + "showDebugSolvedSkeleton"
+        static let rayLength = prefix + "rayLength"
+        static let rayTargetHeightMeters = prefix + "rayTargetHeightMeters"
+        static let raySceneUnitsPerMeter = prefix + "raySceneUnitsPerMeter"
+        static let useCalibratedRigDepth = prefix + "useCalibratedRigDepth"
+        static let calibratedRigDepthZ = prefix + "calibratedRigDepthZ"
+        static let projectionScaleError = prefix + "projectionScaleError"
+        static let forceCameraFacingYaw = prefix + "forceCameraFacingYaw"
+        static let raySolveMode = prefix + "raySolveMode"
+        static let raySolvedUSDZClipID = prefix + "raySolvedUSDZClipID"
+    }
+
+    private static let appStorage = UserDefaults.standard
+
+    private func persist(_ value: Bool, _ key: String) {
+        Self.appStorage.set(value, forKey: key)
+    }
+
+    private func persist(_ value: Int, _ key: String) {
+        Self.appStorage.set(value, forKey: key)
+    }
+
+    private func persist(_ value: Double, _ key: String) {
+        Self.appStorage.set(value, forKey: key)
+    }
+
+    private func persist(_ value: Float, _ key: String) {
+        Self.appStorage.set(Double(value), forKey: key)
+    }
+
+    private func persist(_ value: String, _ key: String) {
+        Self.appStorage.set(value, forKey: key)
+    }
+
+    private func persistURL(_ url: URL?, forKey key: String) {
+        guard let url else {
+            Self.appStorage.removeObject(forKey: key)
+            return
+        }
+
+        Self.appStorage.set(url.standardizedFileURL.path, forKey: key)
+    }
+
+    private func persistCodable<T: Encodable>(_ value: T, _ key: String) {
+        do {
+            let data = try JSONEncoder().encode(value)
+            Self.appStorage.set(data, forKey: key)
+        } catch {
+            diagnostics.log("App storage encode failed for \(key): \(error.localizedDescription)")
+        }
+    }
+
+    private func storedBool(_ key: String) -> Bool? {
+        guard Self.appStorage.object(forKey: key) != nil else { return nil }
+        return Self.appStorage.bool(forKey: key)
+    }
+
+    private func storedInt(_ key: String) -> Int? {
+        guard Self.appStorage.object(forKey: key) != nil else { return nil }
+        return Self.appStorage.integer(forKey: key)
+    }
+
+    private func storedDouble(_ key: String) -> Double? {
+        guard Self.appStorage.object(forKey: key) != nil else { return nil }
+        return Self.appStorage.double(forKey: key)
+    }
+
+    private func storedFloat(_ key: String) -> Float? {
+        guard let value = storedDouble(key) else { return nil }
+        return Float(value)
+    }
+
+    private func storedString(_ key: String) -> String? {
+        guard let value = Self.appStorage.string(forKey: key), !value.isEmpty else {
+            return nil
+        }
+
+        return value
+    }
+
+    private func storedURL(_ key: String) -> URL? {
+        guard let path = storedString(key) else {
+            return nil
+        }
+
+        return URL(fileURLWithPath: path)
+    }
+
+    private func storedCodable<T: Decodable>(_ type: T.Type, _ key: String) -> T? {
+        guard let data = Self.appStorage.data(forKey: key) else {
+            return nil
+        }
+
+        do {
+            return try JSONDecoder().decode(type, from: data)
+        } catch {
+            diagnostics.log("App storage decode failed for \(key): \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func loadPersistedAppStorageFields() {
+        videoURL = storedURL(AppStorageKeys.videoURL)
+        outputDirectoryURL = storedURL(AppStorageKeys.outputDirectoryURL)
+        sourceCharacterUSDZURL = storedURL(AppStorageKeys.sourceCharacterUSDZURL)
+        animatedUSDZSourceURL = storedURL(AppStorageKeys.animatedUSDZSourceURL)
+        referenceSolveUSDZURL = storedURL(AppStorageKeys.referenceSolveUSDZURL)
+        targetCharacterUSDZURL = storedURL(AppStorageKeys.targetCharacterUSDZURL)
+        lastAnimatedUSDZExportURL = storedURL(AppStorageKeys.lastAnimatedUSDZExportURL)
+        lastAnimatedUSDZExportFolderURL = storedURL(AppStorageKeys.lastAnimatedUSDZExportFolderURL)
+
+        if let value = storedDouble(AppStorageKeys.framePlaybackFPS) { framePlaybackFPS = value }
+        if let value = storedBool(AppStorageKeys.isVideoLooping) { isVideoLooping = value }
+        if let value = storedDouble(AppStorageKeys.sampleFPS) { sampleFPS = value }
+        if let value = storedDouble(AppStorageKeys.visionSampleFPS) { visionSampleFPS = value }
+        if let value = storedInt(AppStorageKeys.maxFrames) { maxFrames = value }
+
+        if let value = storedBool(AppStorageKeys.showRawVisionPoints) { showRawVisionPoints = value }
+        if let value = storedBool(AppStorageKeys.showNormalizedMeshyPoints) { showNormalizedMeshyPoints = value }
+        if let value = storedBool(AppStorageKeys.showSmoothedMeshyPoints) { showSmoothedMeshyPoints = value }
+        if let value = storedBool(AppStorageKeys.showSmoothingDeltaVectors) { showSmoothingDeltaVectors = value }
+        if let value = storedBool(AppStorageKeys.showImportedRigModel) { showImportedRigModel = value }
+        if let value = storedBool(AppStorageKeys.showImportedRigSkeleton) { showImportedRigSkeleton = value }
+        if let value = storedBool(AppStorageKeys.showFittedRig) { showFittedRig = value }
+        if let value = storedDouble(AppStorageKeys.rigOverlayScale) { rigOverlayScale = value }
+        if let value = storedDouble(AppStorageKeys.rigOverlayOffsetX) { rigOverlayOffsetX = value }
+        if let value = storedDouble(AppStorageKeys.rigOverlayOffsetY) { rigOverlayOffsetY = value }
+        if let value = storedCodable(GroundPlaneController.self, AppStorageKeys.groundPlane) { groundPlane = value }
+
+        if let value = storedBool(AppStorageKeys.smoothingPreviewEnabled) { smoothingPreviewEnabled = value }
+        if let value = storedDouble(AppStorageKeys.smoothingStrength) { smoothingStrength = value }
+        if let value = storedInt(AppStorageKeys.smoothingWindowRadius) { smoothingWindowRadius = value }
+        if let value = storedCodable(SmoothedMeshyPoseCapture.SmoothingSettings.self, AppStorageKeys.smoothingSettings) { smoothingSettings = value }
+        if let value = storedCodable(RigFitSettings.self, AppStorageKeys.fitSettings) { fitSettings = value }
+        if let value = storedCodable(RigProjectionSettings.self, AppStorageKeys.projectionSettings) { projectionSettings = value }
+        if let value = storedDouble(AppStorageKeys.rigOpacity) { rigOpacity = value }
+
+        if let value = storedString(AppStorageKeys.exportClipID) { exportClipID = value }
+        if let value = storedString(AppStorageKeys.exportDisplayName) { exportDisplayName = value }
+        if let value = storedString(AppStorageKeys.animatedUSDZClipID) { animatedUSDZClipID = value }
+        if let value = storedString(AppStorageKeys.retargetClipID) { retargetClipID = value }
+        if let value = storedBool(AppStorageKeys.includeHipsTranslationInUSDZ) { includeHipsTranslationInUSDZ = value }
+
+        if let value = storedBool(AppStorageKeys.showSkinnedRig) { showSkinnedRig = value }
+        if let value = storedDouble(AppStorageKeys.viewportZoom) { viewportZoom = value }
+        if let rawValue = storedString(AppStorageKeys.cameraProfile),
+           let value = CameraProfile(rawValue: rawValue) {
+            cameraProfile = value
+        }
+        if let value = storedFloat(AppStorageKeys.currentVideoPlaneZ) { currentVideoPlaneZ = value }
+        if let value = storedFloat(AppStorageKeys.referenceRigDefaultZ) { referenceRigDefaultZ = value }
+        if let value = storedFloat(AppStorageKeys.referenceRigCurrentZ) { referenceRigCurrentZ = value }
+        if let value = storedDouble(AppStorageKeys.referenceRigVisibleHeightFraction) { referenceRigVisibleHeightFraction = value }
+        if let value = storedDouble(AppStorageKeys.referenceRigCameraZ) { referenceRigCameraZ = value }
+
+        if let value = storedBool(AppStorageKeys.showVisionRays) { showVisionRays = value }
+        if let value = storedBool(AppStorageKeys.showRaySolvedRig) { showRaySolvedRig = value }
+        if let value = storedBool(AppStorageKeys.showDebugSolvedSkeleton) { showDebugSolvedSkeleton = value }
+        if let value = storedDouble(AppStorageKeys.rayLength) { rayLength = value }
+        if let value = storedDouble(AppStorageKeys.rayTargetHeightMeters) { rayTargetHeightMeters = value }
+        if let value = storedDouble(AppStorageKeys.raySceneUnitsPerMeter) { raySceneUnitsPerMeter = value }
+        if let value = storedBool(AppStorageKeys.useCalibratedRigDepth) { useCalibratedRigDepth = value }
+        if let value = storedDouble(AppStorageKeys.calibratedRigDepthZ) { calibratedRigDepthZ = value }
+        if let value = storedDouble(AppStorageKeys.projectionScaleError) { projectionScaleError = value }
+        if let value = storedBool(AppStorageKeys.forceCameraFacingYaw) { forceCameraFacingYaw = value }
+        if let rawValue = storedString(AppStorageKeys.raySolveMode),
+           let value = RaySolveMode(rawValue: rawValue) {
+            raySolveMode = value
+        }
+        if let value = storedString(AppStorageKeys.raySolvedUSDZClipID) { raySolvedUSDZClipID = value }
+
+        if let videoURL {
+            lastLoadedVideoURL = videoURL
+        }
+
+        diagnostics.log("Restored app storage fields.")
+    }
+
+    private func restorePersistedReferenceRigIfAvailable() {
+        guard let url = referenceSolveUSDZURL else {
+            return
+        }
+
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            diagnostics.log("Stored reference USDZ path no longer exists: \(url.path)")
+            return
+        }
+
+        diagnostics.log("Restoring stored reference solve USDZ: \(url.path)")
+        inspectReferenceUSDZ()
+        loadSkinnedRigUSDZFromReference(url)
     }
 
     var frameCount: Int {
@@ -315,7 +776,13 @@ final class RotoMotionViewModel: ObservableObject {
 
     private func calibratedRayReferenceArmature() -> RotoReferenceArmature {
         if let referenceRigProfile {
-            diagnostics.log("Using reference USDZ skeleton profile. Manual height scaling disabled for solve.")
+            diagnostics.log("""
+            Using reference USDZ skeleton profile for solve.
+            Manual height scaling disabled.
+            unitScaleToMeters: \(referenceRigProfile.unitScaleToMeters ?? 1.0)
+            estimatedHeightMeters: \(referenceRigProfile.estimatedHeightMeters ?? -1)
+            sceneUnitsPerMeter: \(raySceneUnitsPerMeter)
+            """)
             return RotoReferenceArmature.fromUSDZProfile(
                 referenceRigProfile,
                 sceneUnitsPerMeter: raySceneUnitsPerMeter
@@ -465,9 +932,9 @@ final class RotoMotionViewModel: ObservableObject {
             frameIndex: currentFrameIndex,
             normalizedFrame: normalizedFrame,
             armature: calibratedRayReferenceArmature(),
-            cameraOrigin: SIMD3<Float>(0, 0, 10),
+            cameraOrigin: SIMD3<Float>(0, 0, cameraZ),
             videoPlaneSize: videoPlaneSize,
-            videoPlaneZ: 0,
+            videoPlaneZ: currentVideoPlaneZ,
             solveMode: raySolveMode.solverMode,
             rayLength: Float(rayLength)
         )
@@ -483,6 +950,88 @@ final class RotoMotionViewModel: ObservableObject {
         """
 
         diagnostics.log(raySolveStatus)
+    }
+
+    private func clampedBetweenCameraAndImagePlane(_ z: Float) -> Float {
+        min(cameraZ - 0.25, max(z, currentVideoPlaneZ + 1.0))
+    }
+
+    private func updateReferenceRigPlacementStatus(
+        rigZ: Float,
+        context: String
+    ) {
+        let invariant = currentVideoPlaneZ < rigZ && rigZ < cameraZ
+        referenceRigPlacementStatus = """
+        Reference Rig Placement:
+        camera \(String(format: "%.1f", cameraZ))
+        rig \(String(format: "%.3f", rigZ))
+        image plane \(String(format: "%.1f", currentVideoPlaneZ))
+        status: between camera and plane \(invariant ? "YES" : "NO")
+        """
+
+        diagnostics.log("""
+        \(context):
+          cameraZ: \(cameraZ)
+          rigZ: \(rigZ)
+          imagePlaneZ: \(currentVideoPlaneZ)
+          invariant: \(invariant)
+        """)
+    }
+
+    func autoCalibrateRigDepth() {
+        guard let frame = currentNormalizedFrame else {
+            depthCalibrationStatus = "Normalize Meshy24 before depth calibration."
+            status = depthCalibrationStatus
+            diagnostics.log(depthCalibrationStatus)
+            return
+        }
+
+        guard let videoPlaneSize = currentVideoPlaneSize else {
+            depthCalibrationStatus = "No video plane size available."
+            status = depthCalibrationStatus
+            diagnostics.log(depthCalibrationStatus)
+            return
+        }
+
+        let referenceArmature = calibratedRayReferenceArmature()
+
+        guard let result = RotoDepthCalibrator.calibrateHipsToSpine(
+            normalizedFrame: frame,
+            armature: referenceArmature,
+            cameraOrigin: SIMD3<Float>(0, 0, cameraZ),
+            videoPlaneSize: videoPlaneSize,
+            videoPlaneZ: currentVideoPlaneZ,
+            nearZ: -0.25,
+            initialFarZ: referenceRigDefaultZ,
+            maxFarZ: currentVideoPlaneZ + 1.0
+        ) else {
+            depthCalibrationStatus = "Depth calibration failed: missing Hips/Spine or reference Hips<->Spine bone."
+            status = depthCalibrationStatus
+            diagnostics.log(depthCalibrationStatus)
+            return
+        }
+
+        let clampedZ = clampedBetweenCameraAndImagePlane(result.depthZ)
+        calibratedRigDepthZ = Double(clampedZ)
+        projectionScaleError = Double(result.error)
+        useCalibratedRigDepth = true
+        referenceRigCurrentZ = clampedZ
+        updateReferenceRigPlacementStatus(
+            rigZ: clampedZ,
+            context: "Depth placement"
+        )
+
+        depthCalibrationStatus = """
+        Depth calibrated from Hips<->Spine:
+        z \(String(format: "%.3f", calibratedRigDepthZ))
+        solvedZ \(String(format: "%.3f", result.depthZ))
+        error \(String(format: "%.5f", projectionScaleError))
+        target2D \(String(format: "%.4f", result.targetBoneLength2D))
+        projected2D \(String(format: "%.4f", result.projectedBoneLength2D))
+        ref3D \(String(format: "%.4f", result.referenceBoneLength3D))
+        """
+        status = depthCalibrationStatus
+        diagnostics.log(depthCalibrationStatus)
     }
 
     func solveFullAnimationWithCameraRays() {
@@ -506,16 +1055,116 @@ final class RotoMotionViewModel: ObservableObject {
             captureCanonicalSessionSkeletonIdentity()
         }
 
+        let referenceArmature = calibratedRayReferenceArmature()
+        var rootDepthZ: Float? = clampedBetweenCameraAndImagePlane(referenceRigDefaultZ)
+        referenceRigCurrentZ = rootDepthZ ?? referenceRigDefaultZ
+        updateReferenceRigPlacementStatus(
+            rigZ: referenceRigCurrentZ,
+            context: "Reference rig default solve placement"
+        )
+
+        if let calibrationFrame = currentNormalizedFrame,
+           let depth = RotoDepthCalibrator.calibrateHipsToSpine(
+               normalizedFrame: calibrationFrame,
+               armature: referenceArmature,
+               cameraOrigin: SIMD3<Float>(0, 0, cameraZ),
+               videoPlaneSize: videoPlaneSize,
+               videoPlaneZ: currentVideoPlaneZ,
+               nearZ: -0.25,
+               initialFarZ: referenceRigDefaultZ,
+               maxFarZ: currentVideoPlaneZ + 1.0
+           ) {
+            let clampedZ = clampedBetweenCameraAndImagePlane(depth.depthZ)
+            calibratedRigDepthZ = Double(clampedZ)
+            projectionScaleError = Double(depth.error)
+            useCalibratedRigDepth = true
+            rootDepthZ = clampedZ
+            referenceRigCurrentZ = clampedZ
+            updateReferenceRigPlacementStatus(
+                rigZ: clampedZ,
+                context: "Depth placement"
+            )
+            depthCalibrationStatus = """
+            Auto depth from Hips<->Spine:
+            z \(String(format: "%.3f", calibratedRigDepthZ))
+            solvedZ \(String(format: "%.3f", depth.depthZ))
+            error \(String(format: "%.5f", projectionScaleError))
+            target2D \(String(format: "%.4f", depth.targetBoneLength2D))
+            projected2D \(String(format: "%.4f", depth.projectedBoneLength2D))
+            ref3D \(String(format: "%.4f", depth.referenceBoneLength3D))
+            """
+        } else {
+            useCalibratedRigDepth = false
+            rootDepthZ = clampedBetweenCameraAndImagePlane(referenceRigDefaultZ)
+            referenceRigCurrentZ = rootDepthZ ?? referenceRigDefaultZ
+            updateReferenceRigPlacementStatus(
+                rigZ: referenceRigCurrentZ,
+                context: "Depth placement fallback"
+            )
+            depthCalibrationStatus = "Auto depth failed: missing Hips/Spine or reference Hips<->Spine bone. Solving at default reference rig depth."
+        }
+
+        diagnostics.log(depthCalibrationStatus)
+
+        var solverSettings = RotoRayConstrainedIKSolver.Settings.default
+        solverSettings.forceCameraFacingYaw = forceCameraFacingYaw
+
         let result = RotoRayAnimationSolver.solveAnimation(
             normalized: normalizedCapture,
             videoPlaneSize: videoPlaneSize,
             mode: raySolveMode.animationSolverMode,
             targetHeightMeters: rayTargetHeightMeters,
             sceneUnitsPerMeter: raySceneUnitsPerMeter,
-            referenceArmature: calibratedRayReferenceArmature()
+            referenceArmature: referenceArmature,
+            rootDepthZ: rootDepthZ,
+            cameraOrigin: SIMD3<Float>(0, 0, cameraZ),
+            videoPlaneZ: currentVideoPlaneZ,
+            settings: solverSettings
         )
 
+        if applySolvedPoseToReferenceRig,
+           let session = skinnedRigSession,
+           let calibrationFrame = currentNormalizedFrame,
+           let rootDepthZ {
+            SkinnedRigPlacementSolver.placeRig(
+                session: session,
+                normalizedFrame: calibrationFrame,
+                rootDepthZ: rootDepthZ,
+                cameraOrigin: SIMD3<Float>(0, 0, cameraZ),
+                videoPlaneSize: videoPlaneSize,
+                videoPlaneZ: currentVideoPlaneZ
+            )
+            referenceRigCurrentZ = session.displayRootNode.simdPosition.z
+            updateReferenceRigPlacementStatus(
+                rigZ: referenceRigCurrentZ,
+                context: "Reference rig placement after solve"
+            )
+        }
+
         rayAnimationSolveResult = result
+        sessionArmatureSnapshot = nil
+        sessionArmaturePoseBuffer = nil
+
+        if skinnedRigSession != nil {
+            sessionPoseSource = .posedArmatureLocalTransforms
+            if applySolvedPoseToReferenceRig {
+                sessionPoseStatus = """
+                Viewport is using real SCNSkinner bone nodes.
+                Current frame is posed from the ray solve; export will bake and sample those bone-node local transforms.
+                """
+            } else {
+                sessionPoseStatus = """
+                Viewport is using real SCNSkinner bone nodes.
+                Reference rig placement is manual; ray solve is not applied to the visible rig.
+                """
+            }
+        } else {
+            sessionPoseSource = .drawnJointPositions
+            sessionPoseStatus = """
+            Viewport solved rig is drawn from rayAnimationSolveResult.frame.jointPositions.
+            It is green debug geometry, not a posed SceneKit/USD armature local-transform stack.
+            """
+        }
         currentRaySolveResult = nil
         raySolveStatus = "Single-frame ray solve cleared."
         rayAnimationSolveStatus = "Solved \(result.frames.count) frames at \(String(format: "%.2f", result.targetHeightMeters)) m."
@@ -528,9 +1177,147 @@ final class RotoMotionViewModel: ObservableObject {
           sceneUnitsPerMeter: \(String(format: "%.3f", result.sceneUnitsPerMeter))
           armatureSceneScale: \(String(format: "%.3f", result.armatureSceneScale))
           referenceUSDZ: \(referenceSolveUSDZURL?.lastPathComponent ?? "none")
+          rootDepthZ: \(rootDepthZ.map { String(format: "%.3f", $0) } ?? "videoPlane")
+          forceCameraFacingYaw: \(forceCameraFacingYaw)
+          sessionPoseSource: \(sessionPoseSource.rawValue)
           videoPlaneSize: \(videoPlaneSize)
           firstSolvedJoints: \(result.frames.first?.solvedJoints.count ?? 0)
+
+        Session pose source:
+          \(sessionPoseSource.rawValue)
+
+        If drawnJointPositions:
+          viewport match does not guarantee skinned USDZ export.
+        If posedArmatureLocalTransforms:
+          export should serialize exact local transforms.
         """)
+    }
+
+    func loadSkinnedRigUSDZ() {
+        guard let url = FilePanelHelpers.openUSDZURL() else {
+            skinnedRigStatus = "Skinned rig selection canceled."
+            status = skinnedRigStatus
+            diagnostics.log(skinnedRigStatus)
+            return
+        }
+
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        do {
+            let unitScale = Float(referenceRigProfile?.unitScaleToMeters ?? 0.01)
+            let session = try SkinnedUSDZRigLoader.load(
+                url: url,
+                unitScaleToMeters: unitScale,
+                sceneUnitsPerMeter: Float(raySceneUnitsPerMeter),
+                yawCorrectionRadians: 0,
+                defaultRigZ: Float(referenceRigZ)
+            )
+
+            skinnedRigSession = session
+            if targetCharacterUSDZURL == nil {
+                targetCharacterUSDZURL = url
+            }
+            sessionArmaturePoseBuffer = nil
+            sessionArmatureSnapshot = nil
+            referenceRigPlacementStatus = """
+            Reference rig loaded.
+            Default placement:
+            position (0.000, -0.750, -2.000)
+            scale (1.000, 1.000, 1.000)
+            rotationX -90.0
+            rotationY 360.0
+            """
+            referenceRigVisibilityStatus = "Reference rig loaded with hardcoded viewport placement."
+
+            skinnedRigStatus = """
+            Loaded skinned rig:
+            \(url.lastPathComponent)
+            matched bones: \(session.validBoneCount)
+            """
+
+            sessionPoseSource = .posedArmatureLocalTransforms
+            sessionPoseStatus = """
+            Viewport is using real SCNSkinner bone nodes.
+            Export will sample these bone-node local transforms after baking.
+            """
+
+            status = skinnedRigStatus
+            diagnostics.log(skinnedRigStatus)
+            diagnostics.log(referenceRigPlacementStatus)
+            diagnostics.log(sessionPoseStatus)
+        } catch {
+            skinnedRigSession = nil
+            sessionArmaturePoseBuffer = nil
+            sessionArmatureSnapshot = nil
+            sessionPoseSource = rayAnimationSolveResult == nil ? .none : .drawnJointPositions
+            sessionPoseStatus = sessionPoseSource == .none
+                ? "No session pose source detected."
+                : "Ray solve viewport is drawn joint positions; skinned rig load failed."
+            skinnedRigStatus = "Skinned rig load failed: \(error.localizedDescription)"
+            status = skinnedRigStatus
+            diagnostics.log(skinnedRigStatus)
+        }
+    }
+
+    func bakeSessionArmaturePoseBuffer() {
+        guard let session = skinnedRigSession else {
+            usdzRetargetStatus = "Load skinned rig before baking session pose buffer."
+            status = usdzRetargetStatus
+            diagnostics.log(usdzRetargetStatus)
+            return
+        }
+
+        guard let solve = rayAnimationSolveResult else {
+            usdzRetargetStatus = "Run ray solve before baking session pose buffer."
+            status = usdzRetargetStatus
+            diagnostics.log(usdzRetargetStatus)
+            return
+        }
+
+        var frames: [SessionArmaturePoseBuffer.Frame] = []
+
+        for solvedFrame in solve.frames {
+            SkinnedRigPoseDriver.applySolvedFrame(solvedFrame, to: session)
+
+            frames.append(
+                SessionArmaturePoseSampler.sample(
+                    session: session,
+                    frameIndex: solvedFrame.frameIndex,
+                    timeSeconds: solvedFrame.timeSeconds
+                )
+            )
+        }
+
+        sessionArmaturePoseBuffer = .init(
+            schema: "com.gravitas.rotomotion.session_armature_pose.v0",
+            clipID: retargetClipID,
+            fps: inferredFPS(solve.frames),
+            frames: frames
+        )
+
+        sessionPoseSource = .posedArmatureLocalTransforms
+        sessionPoseStatus = "Baked real SCNSkinner bone-node local transforms: \(frames.count) frames."
+        usdzRetargetStatus = "Baked session armature pose buffer: \(frames.count) frames."
+        status = usdzRetargetStatus
+        diagnostics.log(usdzRetargetStatus)
+    }
+
+    private func inferredFPS(
+        _ frames: [RotoRayAnimationSolveResult.Frame]
+    ) -> Double {
+        guard let first = frames.first,
+              let last = frames.last,
+              frames.count > 1 else {
+            return 24.0
+        }
+
+        let duration = max(last.timeSeconds - first.timeSeconds, 0.0001)
+        return Double(frames.count - 1) / duration
     }
 
     func openVideo() {
@@ -565,7 +1352,15 @@ final class RotoMotionViewModel: ObservableObject {
         lastSmoothingError = nil
         currentRaySolveResult = nil
         rayAnimationSolveResult = nil
+        sessionArmatureSnapshot = nil
+        sessionArmaturePoseBuffer = nil
+        sessionPoseSource = .none
+        sessionPoseStatus = "No session pose source detected."
         currentVideoPlaneSize = nil
+        useCalibratedRigDepth = false
+        calibratedRigDepthZ = 0
+        projectionScaleError = 0
+        depthCalibrationStatus = "Depth calibration not run."
         raySolveStatus = "Ray solve not run."
         rayAnimationSolveStatus = "Ray animation solve not run."
         raySolvedUSDZExportStatus = "No ray solve USDZ exported."
@@ -891,6 +1686,10 @@ final class RotoMotionViewModel: ObservableObject {
             fitResult = nil
             currentRaySolveResult = nil
             rayAnimationSolveResult = nil
+            sessionArmatureSnapshot = nil
+            sessionArmaturePoseBuffer = nil
+            sessionPoseSource = .none
+            sessionPoseStatus = "No session pose source detected."
             raySolveStatus = "Ray solve not run."
             rayAnimationSolveStatus = "Ray animation solve not run."
             raySolvedUSDZExportStatus = "No ray solve USDZ exported."
@@ -966,6 +1765,10 @@ final class RotoMotionViewModel: ObservableObject {
         fitResult = nil
         currentRaySolveResult = nil
         rayAnimationSolveResult = nil
+        sessionArmatureSnapshot = nil
+        sessionArmaturePoseBuffer = nil
+        sessionPoseSource = .none
+        sessionPoseStatus = "No session pose source detected."
         raySolveStatus = "Ray solve not run."
         rayAnimationSolveStatus = "Ray animation solve not run."
         raySolvedUSDZExportStatus = "No ray solve USDZ exported."
@@ -1037,6 +1840,10 @@ final class RotoMotionViewModel: ObservableObject {
         fitResult = nil
         currentRaySolveResult = nil
         rayAnimationSolveResult = nil
+        sessionArmatureSnapshot = nil
+        sessionArmaturePoseBuffer = nil
+        sessionPoseSource = .none
+        sessionPoseStatus = "No session pose source detected."
         raySolveStatus = "Ray solve not run."
         rayAnimationSolveStatus = "Ray animation solve not run."
         raySolvedUSDZExportStatus = "No ray solve USDZ exported."
@@ -1338,7 +2145,19 @@ final class RotoMotionViewModel: ObservableObject {
         sessionJointPaths = []
         sessionJointLeafNames = []
         sessionSkeletonStatus = "No session skeleton captured."
+        skinnedRigSession = nil
+        skinnedRigStatus = "Reference skinned rig cleared because reference USDZ changed."
+        referenceRigPlacementStatus = "Reference rig not placed."
+        referenceRigVisibilityStatus = "Reference rig not fitted."
+        useCalibratedRigDepth = false
+        calibratedRigDepthZ = 0
+        projectionScaleError = 0
+        depthCalibrationStatus = "Depth calibration cleared because reference USDZ changed."
         rayAnimationSolveResult = nil
+        sessionArmatureSnapshot = nil
+        sessionArmaturePoseBuffer = nil
+        sessionPoseSource = .none
+        sessionPoseStatus = "No session pose source detected."
         rayAnimationSolveStatus = "Ray animation solve cleared because reference USDZ changed."
         lastAnimatedUSDZExportURL = nil
         lastAnimatedUSDZExportFolderURL = nil
@@ -1347,6 +2166,77 @@ final class RotoMotionViewModel: ObservableObject {
         diagnostics.log("Selected reference solve USDZ: \(url.path)")
 
         inspectReferenceUSDZ()
+        loadSkinnedRigUSDZFromReference(url)
+    }
+
+    func loadSkinnedRigUSDZFromReference(_ url: URL) {
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        do {
+            let unitScale = Float(referenceRigProfile?.unitScaleToMeters ?? 0.01)
+            let session = try SkinnedUSDZRigLoader.load(
+                url: url,
+                unitScaleToMeters: unitScale,
+                sceneUnitsPerMeter: Float(raySceneUnitsPerMeter),
+                yawCorrectionRadians: 0,
+                defaultRigZ: -2.0
+            )
+
+            skinnedRigSession = session
+            showSkinnedRig = true
+            if targetCharacterUSDZURL == nil {
+                targetCharacterUSDZURL = url
+            }
+            sessionArmaturePoseBuffer = nil
+            sessionArmatureSnapshot = nil
+            referenceRigPlacementStatus = """
+            Reference rig loaded.
+            Default placement:
+            position (0.000, -0.750, -2.000)
+            scale (1.000, 1.000, 1.000)
+            rotationX -90.0
+            rotationY 360.0
+            """
+            referenceRigVisibilityStatus = "Reference rig loaded with hardcoded viewport placement."
+
+            skinnedRigStatus = """
+            Loaded reference skinned rig:
+            \(url.lastPathComponent)
+            matched bones: \(session.validBoneCount)
+            """
+
+            sessionPoseSource = .posedArmatureLocalTransforms
+            sessionPoseStatus = """
+            Viewport is using real SCNSkinner bone nodes.
+            Solve/export will bake and sample those bone-node local transforms.
+            """
+
+            status = skinnedRigStatus
+            diagnostics.log(skinnedRigStatus)
+            diagnostics.log(referenceRigPlacementStatus)
+            diagnostics.log(sessionPoseStatus)
+        } catch {
+            skinnedRigSession = nil
+            sessionArmaturePoseBuffer = nil
+            sessionArmatureSnapshot = nil
+            skinnedRigStatus = """
+            Reference USDZ loaded for solving, but skinned viewport load failed:
+            \(error.localizedDescription)
+            """
+
+            if rayAnimationSolveResult == nil {
+                sessionPoseSource = .none
+                sessionPoseStatus = "No session pose source detected."
+            }
+
+            status = skinnedRigStatus
+            diagnostics.log(skinnedRigStatus)
+        }
     }
 
     func chooseTargetCharacterUSDZ() {
@@ -1443,6 +2333,7 @@ final class RotoMotionViewModel: ObservableObject {
             Matched: \(profile.canonicalMatchedJoints.count)
             Missing: \(profile.missingCanonicalJoints.isEmpty ? "none" : profile.missingCanonicalJoints.joined(separator: ", "))
             Height: \(profile.estimatedHeightMeters.map { String(format: "%.3f m", $0) } ?? "unknown")
+            unitScaleToMeters: \(String(format: "%.4f", profile.unitScaleToMeters ?? 1.0))
             """
             status = usdzRetargetStatus
             diagnostics.log(usdzRetargetStatus)
@@ -1466,6 +2357,42 @@ final class RotoMotionViewModel: ObservableObject {
         guard let solve = rayAnimationSolveResult,
               !solve.frames.isEmpty else {
             usdzRetargetStatus = "Run full ray animation solve before exporting."
+            status = usdzRetargetStatus
+            diagnostics.log(usdzRetargetStatus)
+            return
+        }
+
+        if sessionPoseSource == .none {
+            sessionPoseSource = .drawnJointPositions
+            sessionPoseStatus = """
+            Ray solve exists, but no posed armature local-transform buffer has been captured.
+            Treating the viewport source as drawn joint positions.
+            """
+        }
+
+        guard sessionPoseSource == .posedArmatureLocalTransforms else {
+            usdzRetargetStatus = """
+            Current viewport is a positional solve display, not a posed armature.
+            Skinned USDZ export requires local joint rotations from a real posed armature transform stack.
+            Load a skinned USDZ rig so the viewport can pose real SCNSkinner bone nodes before exporting.
+
+            Session pose source:
+            \(sessionPoseSource.rawValue)
+            """
+            status = usdzRetargetStatus
+            diagnostics.log(usdzRetargetStatus)
+            return
+        }
+
+        if sessionArmaturePoseBuffer == nil {
+            bakeSessionArmaturePoseBuffer()
+        }
+
+        guard let poseBuffer = sessionArmaturePoseBuffer else {
+            usdzRetargetStatus = """
+            Session pose source is posedArmatureLocalTransforms, but no session armature pose buffer was captured.
+            Cannot export animated target USDZ.
+            """
             status = usdzRetargetStatus
             diagnostics.log(usdzRetargetStatus)
             return
@@ -1550,17 +2477,16 @@ final class RotoMotionViewModel: ObservableObject {
                 withIntermediateDirectories: true
             )
 
-            let solvedJSON = workDir.appendingPathComponent(
-                "\(safeClipID)_solved_animation_v1.json"
+            let sessionPoseJSON = workDir.appendingPathComponent(
+                "session_armature_pose.json"
             )
 
-            try SolvedAnimationJSONExporter.write(
-                solve: solve,
-                includeHipsTranslation: includeHipsTranslationInUSDZ,
-                to: solvedJSON
+            try SessionArmaturePoseBufferJSONExporter.write(
+                buffer: poseBuffer,
+                to: sessionPoseJSON
             )
 
-            diagnostics.log("Wrote solved animation JSON: \(solvedJSON.path)")
+            diagnostics.log("Wrote posed skinned rig armature buffer JSON: \(sessionPoseJSON.path)")
 
             if sessionJointPaths.isEmpty {
                 if let referenceRigProfile {
@@ -1611,7 +2537,7 @@ final class RotoMotionViewModel: ObservableObject {
             let exportResult = try RetargetedAnimatedUSDZExporter.exportAnimatedTargetUSDZ(
                 targetUSDZ: targetURL,
                 sessionSkeletonIdentityJSON: sessionSkeletonJSON,
-                solvedAnimationJSON: solvedJSON,
+                solvedAnimationJSON: sessionPoseJSON,
                 solve: solve,
                 clipID: retargetClipID,
                 includeHipsTranslation: includeHipsTranslationInUSDZ,
@@ -1643,7 +2569,7 @@ final class RotoMotionViewModel: ObservableObject {
               workDir: \(exportResult.workDirectory.path)
               sessionSkeletonIdentity: \(exportResult.sessionSkeletonIdentityJSON.path)
               raySolveReference: \(exportResult.raySolveReferenceJSON.path)
-              exportInput: \(exportResult.exportInputJSON.path)
+              sessionArmaturePoseBuffer: \(exportResult.exportInputJSON.path)
               preflight: \(exportResult.preflightJSON.path)
               readback: \(exportResult.readbackJSON.path)
               auditText: \(exportResult.auditTextReport.path)

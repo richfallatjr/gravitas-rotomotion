@@ -10,12 +10,15 @@ enum RotoRayAnimationSolver {
         targetHeightMeters: Double = 1.74,
         sceneUnitsPerMeter: Double = 5.0,
         referenceArmature: RotoReferenceArmature? = nil,
+        rootDepthZ: Float? = nil,
+        cameraOrigin: SIMD3<Float> = SIMD3<Float>(0, 0, 0),
+        videoPlaneZ: Float = -2000,
         settings: RotoRayConstrainedIKSolver.Settings = .default
     ) -> RotoRayAnimationSolveResult {
         var results: [RotoRayAnimationSolveResult.Frame] = []
         var previousPositions: [String: SIMD3<Float>]?
         var previousBodyBasis: RotoBodyBasis?
-        let cameraOrigin = SIMD3<Float>(0, 0, 10)
+        var previousLocalRotations: [String: SIMD4<Float>]?
         let calibration = scaledArmature(
             targetHeightMeters: targetHeightMeters,
             sceneUnitsPerMeter: sceneUnitsPerMeter,
@@ -28,22 +31,29 @@ enum RotoRayAnimationSolver {
                 armature: calibration.armature,
                 cameraOrigin: cameraOrigin,
                 videoPlaneSize: videoPlaneSize,
-                videoPlaneZ: 0,
+                videoPlaneZ: videoPlaneZ,
                 mode: mode,
                 previousFramePositions: previousPositions,
                 previousBodyBasis: previousBodyBasis,
+                rootDepthZ: rootDepthZ,
                 settings: settings
+            )
+
+            let stableLocalRotations = RotoLocalRotationContinuityFilter.stabilize(
+                solved.localRotationsWXYZ,
+                previous: previousLocalRotations
             )
 
             previousPositions = solved.jointPositions
             previousBodyBasis = solved.bodyBasis
+            previousLocalRotations = stableLocalRotations
 
             results.append(
                 RotoRayAnimationSolveResult.Frame(
                     frameIndex: solved.frameIndex,
                     timeSeconds: solved.timeSeconds,
                     jointPositions: solved.jointPositions,
-                    localRotationsWXYZ: solved.localRotationsWXYZ,
+                    localRotationsWXYZ: stableLocalRotations,
                     projectionErrors: solved.projectionErrors,
                     solvedJoints: solved.solvedJoints,
                     missingJoints: solved.missingJoints,

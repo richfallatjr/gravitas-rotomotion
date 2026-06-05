@@ -12,7 +12,7 @@ struct ContentView: View {
     @State private var uiRenderToken = 0
     @State private var uiStatus = "Open a video to begin."
     @State private var uiIsPlaying = false
-    @State private var uiLoop = true
+    @AppStorage("com.gravitas.rotomotion.uiLoop") private var uiLoop = true
     @State private var playbackTask: Task<Void, Never>?
     @State private var playbackStartHostTime: Date?
     @State private var playbackStartVideoTime = 0.0
@@ -147,15 +147,34 @@ struct ContentView: View {
                 groundPlane: roto.groundPlane,
                 raySolveResult: roto.currentRaySolveResult,
                 raySolvedFrame: roto.currentRaySolvedFrame,
+                skinnedRigSession: roto.skinnedRigSession,
+                cameraFOVDegrees: roto.activeCameraFOVDegrees,
+                cameraProfileName: roto.cameraProfile.displayName,
+                currentVideoPlaneZ: roto.currentVideoPlaneZ,
+                referenceRigScaleMultiplier: roto.referenceRigScaleMultiplier,
+                referenceRigX: roto.referenceRigX,
+                referenceRigY: roto.referenceRigY,
+                referenceRigZ: roto.referenceRigZ,
+                referenceRigYawDegrees: roto.referenceRigYawDegrees,
+                applySolvedPoseToReferenceRig: roto.applySolvedPoseToReferenceRig,
                 showRawVision: roto.showRawVisionPoints,
                 showNormalizedMeshy: roto.showNormalizedMeshyPoints,
                 showSmoothedMeshy: false,
                 showGroundPlane: roto.groundPlane.visible,
                 showVisionRays: roto.showVisionRays,
-                showRaySolvedRig: roto.showRaySolvedRig,
+                showRaySolvedRig: roto.showDebugSolvedSkeleton,
+                showSkinnedRig: roto.showSkinnedRig,
                 onVideoPlaneSizeChanged: { size in
                     DispatchQueue.main.async {
                         roto.currentVideoPlaneSize = size
+                    }
+                },
+                onReferenceRigVisibilityStatusChanged: { status in
+                    DispatchQueue.main.async {
+                        if roto.referenceRigVisibilityStatus != status {
+                            roto.referenceRigVisibilityStatus = status
+                            roto.diagnostics.log(status)
+                        }
                     }
                 }
             )
@@ -213,6 +232,8 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
+                viewportPanel
+
                 GroupBox("Vision Pipeline") {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Raw Vision: \(roto.rawCapture?.frames.count ?? 0) frames")
@@ -257,13 +278,77 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
+                referenceRigPanel
+
                 rayRigSolvePanel
+
+                sessionPoseSourcePanel
 
                 usdzRetargetExportPanel
 
                 diagnosticsPanel
             }
             .padding(10)
+        }
+    }
+
+    private var viewportPanel: some View {
+        GroupBox("Viewport") {
+            VStack(alignment: .leading, spacing: 8) {
+                Picker("Camera", selection: $roto.cameraProfile) {
+                    ForEach(CameraProfile.allCases) { profile in
+                        Text(profile.displayName).tag(profile)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                Text(
+                    "FOV vertical \(String(format: "%.1f", roto.activeCameraFOVDegrees))° / horizontal \(String(format: "%.1f", roto.cameraProfile.portraitHorizontalFOVDegrees))°"
+                )
+                .foregroundStyle(.secondary)
+
+            }
+            .font(.caption)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var referenceRigPanel: some View {
+        GroupBox("Reference Rig") {
+            VStack(alignment: .leading, spacing: 6) {
+                Button("Choose Reference / Solve USDZ") {
+                    roto.chooseReferenceSolveUSDZ()
+                    uiStatus = roto.status
+                    pipelineRenderToken += 1
+                }
+
+                Text(roto.referenceSolveUSDZURL?.lastPathComponent ?? "No reference USDZ selected")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Text(roto.skinnedRigStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(.caption)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var sessionPoseSourcePanel: some View {
+        GroupBox("Session Pose Source") {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(roto.sessionPoseSource.rawValue)
+                    .font(.caption)
+                    .monospaced()
+
+                Text(roto.sessionPoseStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -363,6 +448,10 @@ struct ContentView: View {
             return "Needs: \(needs.joined(separator: ", "))."
         }
 
+        if roto.sessionPoseSource != .posedArmatureLocalTransforms {
+            return "Blocked for skinned USDZ: current pose source is \(roto.sessionPoseSource.rawValue), not posed armature local transforms."
+        }
+
         let frames = roto.rayAnimationSolveResult?.frames.count ?? 0
         let referenceHeight = roto.referenceRigProfile?.estimatedHeightMeters
             .map { String(format: "%.3f m", $0) }
@@ -372,9 +461,9 @@ struct ContentView: View {
     }
 
     private var rayRigSolvePanel: some View {
-        GroupBox("Ray IK Animation Solve") {
+        GroupBox("Reference Rig / Ray Solve") {
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Show Solved Rig", isOn: $roto.showRaySolvedRig)
+                Toggle("Show Debug Position Skeleton", isOn: $roto.showDebugSolvedSkeleton)
 
                 Picker("Mode", selection: $roto.raySolveMode) {
                     ForEach(RotoMotionViewModel.RaySolveMode.allCases) { mode in
@@ -382,45 +471,27 @@ struct ContentView: View {
                     }
                 }
 
-                Button("Choose Reference / Solve USDZ") {
-                    roto.chooseReferenceSolveUSDZ()
-                    uiStatus = roto.status
-                    pipelineRenderToken += 1
-                }
+                Toggle("Force Camera-Facing Yaw", isOn: $roto.forceCameraFacingYaw)
 
-                Text("Defines skeleton path, bone lengths, scale, and joint map.")
+                Text("Assume actor faces camera. Prevents back-facing or mirrored yaw solutions.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text(roto.referenceSolveUSDZURL?.lastPathComponent ?? "No reference USDZ")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Depth Calibration: Auto from Hips <-> Spine")
+                        .font(.caption)
+                        .fontWeight(.semibold)
 
-                HStack {
-                    Text("Target Height")
+                    Text("Solve Full Animation slides Hips along the camera ray using the reference rig Hips<->Spine distance.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
 
-                    TextField(
-                        "Height",
-                        value: $roto.rayTargetHeightMeters,
-                        format: .number.precision(.fractionLength(2))
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 72)
-
-                    Text("m")
-                }
-
-                HStack {
-                    Text("Scene Units / m")
-
-                    TextField(
-                        "Scale",
-                        value: $roto.raySceneUnitsPerMeter,
-                        format: .number.precision(.fractionLength(2))
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 72)
+                    Text(roto.depthCalibrationStatus)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Button("Solve Full Animation") {
@@ -432,6 +503,10 @@ struct ContentView: View {
 
                 Button("Clear Ray Animation") {
                     roto.rayAnimationSolveResult = nil
+                    roto.sessionArmatureSnapshot = nil
+                    roto.sessionArmaturePoseBuffer = nil
+                    roto.sessionPoseSource = .none
+                    roto.sessionPoseStatus = "No session pose source detected."
                     roto.rayAnimationSolveStatus = "Ray animation solve cleared."
                     roto.raySolvedUSDZExportStatus = "No ray solve USDZ exported."
                     roto.usdzRetargetStatus = "No animated target USDZ exported."
@@ -637,6 +712,10 @@ struct ContentView: View {
         roto.fitResult = nil
         roto.currentRaySolveResult = nil
         roto.rayAnimationSolveResult = nil
+        roto.sessionArmatureSnapshot = nil
+        roto.sessionArmaturePoseBuffer = nil
+        roto.sessionPoseSource = .none
+        roto.sessionPoseStatus = "No session pose source detected."
         roto.currentVideoPlaneSize = nil
         roto.raySolveStatus = "Ray solve not run."
         roto.rayAnimationSolveStatus = "Ray animation solve not run."

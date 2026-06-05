@@ -169,14 +169,14 @@ def vec_length(value):
     )
 
 
-def compute_bone_lengths_meters(joint_paths, rest_transforms, meters_per_unit, canonical_to_leaf):
+def compute_bone_lengths_raw(joint_paths, rest_transforms, canonical_to_leaf):
     by_leaf = {}
 
     for index, joint_path in enumerate(joint_paths):
         if index >= len(rest_transforms):
             continue
 
-        by_leaf[leaf(joint_path)] = vec_length(local_translation(rest_transforms[index])) * meters_per_unit
+        by_leaf[leaf(joint_path)] = vec_length(local_translation(rest_transforms[index]))
 
     result = {}
 
@@ -205,7 +205,7 @@ def compute_world_transforms(joint_paths, rest_transforms):
     return world
 
 
-def estimate_height_meters(stage, joint_paths, rest_transforms, meters_per_unit, bone_lengths):
+def estimate_height_raw(stage, joint_paths, rest_transforms, bone_lengths):
     world = compute_world_transforms(joint_paths, rest_transforms)
     up_axis = str(UsdGeom.GetStageUpAxis(stage) or "Y")
     axis_index = 2 if up_axis == "Z" else 1
@@ -213,7 +213,7 @@ def estimate_height_meters(stage, joint_paths, rest_transforms, meters_per_unit,
 
     for matrix in world.values():
         t = matrix.ExtractTranslation()
-        values.append(float(t[axis_index]) * meters_per_unit)
+        values.append(float(t[axis_index]))
 
     if values:
         height = max(values) - min(values)
@@ -230,6 +230,21 @@ def estimate_height_meters(stage, joint_paths, rest_transforms, meters_per_unit,
         return float(chain)
 
     return None
+
+
+def infer_unit_scale_to_meters(raw_height):
+    if raw_height is None or raw_height <= 0:
+        return 1.0
+
+    # Common authoring cases:
+    # 1.7-ish = meters, 167-ish = centimeters, 1670-ish = millimeters.
+    if raw_height > 1000:
+        return 0.001
+
+    if raw_height > 20:
+        return 0.01
+
+    return 1.0
 
 
 def main():
@@ -257,13 +272,27 @@ def main():
     if len(rest) < len(joint_paths):
         raise RuntimeError("Skeleton restTransforms are missing or shorter than joints.")
 
-    meters_per_unit = float(UsdGeom.GetStageMetersPerUnit(stage) or 1.0)
-    bone_lengths = compute_bone_lengths_meters(
+    bone_lengths = compute_bone_lengths_raw(
         joint_paths,
         rest,
-        meters_per_unit,
         canonical_to_leaf,
     )
+    raw_estimated_height = estimate_height_raw(
+        stage,
+        joint_paths,
+        rest,
+        bone_lengths,
+    )
+    unit_scale_to_meters = infer_unit_scale_to_meters(raw_estimated_height)
+    estimated_height_meters = (
+        raw_estimated_height * unit_scale_to_meters
+        if raw_estimated_height is not None
+        else None
+    )
+
+    log(f"raw estimated height = {raw_estimated_height}")
+    log(f"unitScaleToMeters = {unit_scale_to_meters}")
+    log(f"estimatedHeightMeters = {estimated_height_meters}")
 
     profile = {
         "sourcePath": args.source_usdz,
@@ -274,14 +303,9 @@ def main():
         "jointLeafNames": leaf_names,
         "canonicalMatchedJoints": matched,
         "missingCanonicalJoints": missing,
-        "estimatedHeightMeters": estimate_height_meters(
-            stage,
-            joint_paths,
-            rest,
-            meters_per_unit,
-            bone_lengths,
-        ),
+        "estimatedHeightMeters": estimated_height_meters,
         "boneLengths": bone_lengths,
+        "unitScaleToMeters": unit_scale_to_meters,
     }
 
     with open(args.output_json, "w") as handle:

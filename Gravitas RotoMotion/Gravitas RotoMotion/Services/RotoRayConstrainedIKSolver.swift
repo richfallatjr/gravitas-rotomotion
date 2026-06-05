@@ -21,6 +21,7 @@ enum RotoRayConstrainedIKSolver {
         var torsoPreviousFramePull: Float = 0.55
         var limbPreviousFramePull: Float = 0.30
         var preferPreviousRayIntersection = true
+        var forceCameraFacingYaw = true
 
         static let `default` = Settings()
     }
@@ -30,10 +31,11 @@ enum RotoRayConstrainedIKSolver {
         armature: RotoReferenceArmature = .meshy24Default,
         cameraOrigin: SIMD3<Float>,
         videoPlaneSize: CGSize,
-        videoPlaneZ: Float = 0,
+        videoPlaneZ: Float = -2000,
         mode: Mode,
         previousFramePositions: [String: SIMD3<Float>]?,
         previousBodyBasis: RotoBodyBasis?,
+        rootDepthZ: Float? = nil,
         settings: Settings = .default
     ) -> RotoRayIKSolveResult {
         let rays = RotoCameraRayBuilder.buildRays(
@@ -55,7 +57,8 @@ enum RotoRayConstrainedIKSolver {
             jointPositions: &jointPositions,
             solved: &solved,
             missing: &missing,
-            videoPlaneZ: videoPlaneZ
+            videoPlaneZ: videoPlaneZ,
+            rootDepthZ: rootDepthZ
         )
 
         solveSingleRayChain(
@@ -100,6 +103,7 @@ enum RotoRayConstrainedIKSolver {
         let bodyBasis = RotoBodyBasisSolver.makeBasis(
             jointPositions: jointPositions,
             previousBasis: settings.stabilizeBodyFacing ? previousBodyBasis : nil,
+            forceCameraFacingYaw: settings.forceCameraFacingYaw,
             flipDotThreshold: settings.facingFlipDotThreshold
         )
 
@@ -231,10 +235,13 @@ enum RotoRayConstrainedIKSolver {
         jointPositions: inout [String: SIMD3<Float>],
         solved: inout Set<String>,
         missing: inout Set<String>,
-        videoPlaneZ: Float
+        videoPlaneZ: Float,
+        rootDepthZ: Float?
     ) {
+        let targetZ = rootDepthZ ?? videoPlaneZ
+
         if let ray = rays["Hips"] {
-            let p = rayPlaneZIntersection(ray: ray, z: videoPlaneZ)
+            let p = rayPlaneZIntersection(ray: ray, z: targetZ)
 
             if let previous = previousFramePositions?["Hips"] {
                 jointPositions["Hips"] = mix(previous, p, 0.25)
@@ -247,7 +254,7 @@ enum RotoRayConstrainedIKSolver {
             jointPositions["Hips"] = previous
             missing.insert("Hips")
         } else {
-            jointPositions["Hips"] = SIMD3<Float>(0, 0, videoPlaneZ)
+            jointPositions["Hips"] = SIMD3<Float>(0, 0, targetZ)
             missing.insert("Hips")
         }
     }
