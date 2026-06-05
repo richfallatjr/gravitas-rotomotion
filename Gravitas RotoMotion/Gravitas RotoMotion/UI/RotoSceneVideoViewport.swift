@@ -308,6 +308,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             updateSkinnedRig(
                 session: skinnedRigSession,
                 frame: raySolvedFrame,
+                normalizedFrame: normalizedFrame,
                 referenceRigScaleMultiplier: referenceRigScaleMultiplier,
                 referenceRigX: referenceRigX,
                 referenceRigY: referenceRigY,
@@ -701,6 +702,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private func updateSkinnedRig(
             session: SkinnedRigSession?,
             frame: RotoRayAnimationSolveResult.Frame?,
+            normalizedFrame: NormalizedMeshyPoseCapture.Frame?,
             referenceRigScaleMultiplier: Double,
             referenceRigX: Double,
             referenceRigY: Double,
@@ -755,14 +757,19 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             session.displayRootNode.isHidden = !visible
             rigBoundsRoot.isHidden = !visible
 
-            if applySolvedPoseToReferenceRig, let frame {
-                SkinnedRigPoseDriver.applySolvedFrame(
+            if applySolvedPoseToReferenceRig,
+               let frame,
+               let normalizedFrame {
+                SkinnedRigRotomationDriver.rotomateFrameWithCurvePins(
                     frame,
-                    to: session,
-                    mode: rigRotationApplyMode
+                    normalizedFrame: normalizedFrame,
+                    session: session,
+                    cameraOrigin: SIMD3<Float>(0, 0, 0),
+                    videoPlaneSize: videoPlaneSize,
+                    videoPlaneZ: currentVideoPlaneZ
                 )
             } else {
-                SkinnedRigPoseDriver.resetToRest(session: session)
+                SkinnedRigRotomationDriver.resetToRest(session: session)
             }
         }
 
@@ -885,7 +892,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             session.correctionNode.simdEulerAngles = SIMD3<Float>(0, yawCorrection, 0)
             session.displayRootNode.isHidden = false
             session.displayRootNode.opacity = 1.0
-            SkinnedRigPoseDriver.resetToRest(session: session)
+            SkinnedRigRotomationDriver.resetToRest(session: session)
             normalizeReferenceRigScreenOrientation(
                 session: session,
                 targetZ: targetZ

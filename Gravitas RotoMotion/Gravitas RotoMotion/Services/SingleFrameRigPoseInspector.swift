@@ -12,15 +12,14 @@ enum SingleFrameRigPoseInspector {
         session: SkinnedRigSession,
         solvedFrame: RotoRayAnimationSolveResult.Frame,
         normalizedFrame: NormalizedMeshyPoseCapture.Frame?,
-        jointNames: [String],
-        rotationApplyMode: RigRotationApplyMode = .restThenDelta
+        jointNames: [String]
     ) -> SingleFrameRigPoseInspectionReport {
         var lines: [String] = []
 
         lines.append("=== Single Frame Rig Pose Inspector ===")
         lines.append("frameIndex: \(solvedFrame.frameIndex)")
         lines.append("timeSeconds: \(String(format: "%.4f", solvedFrame.timeSeconds))")
-        lines.append("rotationApplyMode: \(rotationApplyMode.rawValue)")
+        lines.append("activeDriver: SkinnedRigRotomationDriver")
         lines.append("session jointOrder count: \(session.jointOrder.count)")
         lines.append("mapped bones count: \(session.bonesByCanonicalName.count)")
         lines.append("")
@@ -30,7 +29,7 @@ enum SingleFrameRigPoseInspector {
         var afterWorld: [String: SIMD3<Float>] = [:]
         var afterLocalRot: [String: SIMD4<Float>] = [:]
 
-        SkinnedRigPoseDriver.resetToRest(session: session)
+        SkinnedRigRotomationDriver.resetToRest(session: session)
 
         for joint in jointNames {
             if let bone = session.bonesByCanonicalName[joint] {
@@ -39,10 +38,9 @@ enum SingleFrameRigPoseInspector {
             }
         }
 
-        SkinnedRigPoseDriver.applySolvedFrame(
+        SkinnedRigRotomationDriver.rotomateFrame(
             solvedFrame,
-            to: session,
-            mode: rotationApplyMode
+            session: session
         )
 
         for joint in jointNames {

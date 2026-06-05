@@ -1144,8 +1144,8 @@ final class RotoMotionViewModel: ObservableObject {
         if skinnedRigSession != nil {
             sessionPoseSource = .posedArmatureLocalTransforms
             sessionPoseStatus = """
-            Viewport is using real SCNSkinner bone nodes.
-            Solve Full Animation is driving the loaded reference rig.
+            The actual skinned rig is rotomated to locked 3D joint positions.
+            Local rotations are sampled from the posed rig after positions are fitted.
             """
         } else {
             sessionPoseSource = .drawnJointPositions
@@ -1159,7 +1159,7 @@ final class RotoMotionViewModel: ObservableObject {
         rayAnimationSolveStatus = "Solved \(result.frames.count) frames at \(String(format: "%.2f", result.targetHeightMeters)) m."
         status = rayAnimationSolveStatus
         diagnostics.log("""
-        Solve Full Animation complete. Live skinned rig driving enabled:
+        Solve Full Animation complete. Actual rig rotomation enabled:
           applySolvedPoseToReferenceRig: \(applySolvedPoseToReferenceRig)
           solvedFrames: \(result.frames.count)
           currentFrame: \(currentFrameIndex)
@@ -1280,10 +1280,15 @@ final class RotoMotionViewModel: ObservableObject {
         var frames: [SessionArmaturePoseBuffer.Frame] = []
 
         for solvedFrame in solve.frames {
-            SkinnedRigPoseDriver.applySolvedFrame(solvedFrame, to: session)
+            applyCurrentReferenceRigDisplayTransform(to: session)
+
+            SkinnedRigRotomationDriver.rotomateFrame(
+                solvedFrame,
+                session: session
+            )
 
             frames.append(
-                SessionArmaturePoseSampler.sample(
+                SkinnedRigLocalTransformSampler.sampleFrame(
                     session: session,
                     frameIndex: solvedFrame.frameIndex,
                     timeSeconds: solvedFrame.timeSeconds
@@ -1299,7 +1304,7 @@ final class RotoMotionViewModel: ObservableObject {
         )
 
         sessionPoseSource = .posedArmatureLocalTransforms
-        sessionPoseStatus = "Baked real SCNSkinner bone-node local transforms: \(frames.count) frames."
+        sessionPoseStatus = "Actual skinned rig was rotomated to locked 3D positions and sampled: \(frames.count) frames."
         usdzRetargetStatus = "Baked session armature pose buffer: \(frames.count) frames."
         status = usdzRetargetStatus
         diagnostics.log(usdzRetargetStatus)
@@ -2398,13 +2403,33 @@ final class RotoMotionViewModel: ObservableObject {
                 "RightUpLeg",
                 "RightLeg",
                 "RightFoot"
-            ],
-            rotationApplyMode: rigRotationApplyMode
+            ]
         )
 
         jointDebugStatus = report.summary
         status = report.summary
         diagnostics.log(report.fullText)
+    }
+
+    func logCurrentPoseChains() {
+        guard let session = skinnedRigSession else {
+            diagnostics.log("Pose chain debug failed: no skinnedRigSession.")
+            return
+        }
+
+        guard let frame = currentRaySolvedFrame else {
+            diagnostics.log("Pose chain debug failed: no currentRaySolvedFrame.")
+            return
+        }
+
+        let report = RigPoseChainDebugger.makeReport(
+            session: session,
+            solvedFrame: frame,
+            normalizedFrame: currentNormalizedFrame,
+            rotationApplyMode: rigRotationApplyMode
+        )
+
+        diagnostics.log(report)
     }
 
     func chooseTargetCharacterUSDZ() {

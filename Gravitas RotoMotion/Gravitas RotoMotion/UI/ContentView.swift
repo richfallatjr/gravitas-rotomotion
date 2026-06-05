@@ -354,6 +354,11 @@ struct ContentView: View {
                 }
                 .disabled(roto.skinnedRigSession == nil || roto.rayAnimationSolveResult == nil)
 
+                Button("Log Current Pose Chains") {
+                    roto.logCurrentPoseChains()
+                }
+                .disabled(roto.skinnedRigSession == nil || roto.currentRaySolvedFrame == nil)
+
                 Text(roto.jointDebugStatus)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
