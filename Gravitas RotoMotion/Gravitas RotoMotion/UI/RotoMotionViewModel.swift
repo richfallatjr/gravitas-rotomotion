@@ -1422,8 +1422,6 @@ final class RotoMotionViewModel: ObservableObject {
             return
         }
 
-        fitReferenceRigHipsSpineIfPossible()
-
         if let referenceRigProfile {
             captureSessionSkeletonIdentity(from: referenceRigProfile)
         } else {

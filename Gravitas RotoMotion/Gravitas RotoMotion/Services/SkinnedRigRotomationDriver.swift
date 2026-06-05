@@ -103,51 +103,62 @@ enum SkinnedRigRotomationDriver {
         SCNTransaction.begin()
         SCNTransaction.animationDuration = 0
 
-        resetToRest(session: session)
+        resetBonesToRestOnly(session: session)
 
-        var rays = JointRayBuilder.buildRays(
+        let rays = JointRayBuilder.buildRays(
             normalizedFrame: normalizedFrame,
             cameraOrigin: cameraOrigin,
             videoPlaneSize: videoPlaneSize,
             videoPlaneZ: videoPlaneZ
         )
-        rays.removeValue(forKey: "Hips")
 
         if frame.frameIndex == 0 {
             print(
                 """
-                [CurvePinnedRotomation] Spine animation enabled:
+                [CurvePinnedRotomation] Ordered ray-pinned solve:
+                  initial Hips-Spine fit reused: false
                   Hips ray pinned: false
-                  Spine solved as child of Hips: true
-                  displayRoot moved: false
+                  Spine static locked: false
+                  pelvis driver: LeftUpLeg + RightUpLeg rays
+                  displayRoot moved by solve: true
                 """
             )
         }
 
-        for _ in 0..<settings.iterations {
-            solveTorsoChain(
-                rays: rays,
-                session: session
-            )
+        solvePelvisFromUpperLegRays(
+            session: session,
+            rays: rays
+        )
 
-            for chain in armChains {
-                solvePinnedLimbOutsideIn(
-                    chain: chain,
-                    rays: rays,
-                    session: session,
-                    iterations: 1
-                )
-            }
+        solvePinnedJointSequence(
+            ["LeftUpLeg", "LeftLeg", "LeftFoot", "LeftToeBase"],
+            rays: rays,
+            session: session
+        )
 
-            for side in legSides {
-                solvePoleLockedLeg(
-                    side: side,
-                    rays: rays,
-                    session: session,
-                    frameIndex: frame.frameIndex
-                )
-            }
-        }
+        solvePinnedJointSequence(
+            ["RightUpLeg", "RightLeg", "RightFoot", "RightToeBase"],
+            rays: rays,
+            session: session
+        )
+
+        solvePinnedJointSequence(
+            ["Hips", "Spine", "neck", "Head", "headfront"],
+            rays: rays,
+            session: session
+        )
+
+        solvePinnedJointSequence(
+            ["LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand"],
+            rays: rays,
+            session: session
+        )
+
+        solvePinnedJointSequence(
+            ["RightShoulder", "RightArm", "RightForeArm", "RightHand"],
+            rays: rays,
+            session: session
+        )
 
         SCNTransaction.commit()
 
@@ -193,6 +204,10 @@ enum SkinnedRigRotomationDriver {
     }
 
     static func resetToRest(session: SkinnedRigSession) {
+        resetBonesToRestOnly(session: session)
+    }
+
+    private static func resetBonesToRestOnly(session: SkinnedRigSession) {
         for jointName in session.jointOrder {
             guard let bone = session.bonesByCanonicalName[jointName],
                   let restPosition = session.restLocalPositions[jointName],
@@ -204,6 +219,95 @@ enum SkinnedRigRotomationDriver {
             bone.simdPosition = restPosition
             bone.simdOrientation = restOrientation
             bone.simdScale = restScale
+        }
+    }
+
+    private static func solvePelvisFromUpperLegRays(
+        session: SkinnedRigSession,
+        rays: [String: JointRay]
+    ) {
+        guard let leftHipNode = session.bonesByCanonicalName["LeftUpLeg"],
+              let rightHipNode = session.bonesByCanonicalName["RightUpLeg"],
+              let hipsNode = session.bonesByCanonicalName["Hips"],
+              let leftRay = rays["LeftUpLeg"],
+              let rightRay = rays["RightUpLeg"] else {
+            return
+        }
+
+        let leftCurrent = leftHipNode.simdWorldPosition
+        let rightCurrent = rightHipNode.simdWorldPosition
+
+        let leftTarget = closestPointOnRay(
+            ray: leftRay,
+            to: leftCurrent
+        )
+        let rightTarget = closestPointOnRay(
+            ray: rightRay,
+            to: rightCurrent
+        )
+
+        let averageDelta = ((leftTarget - leftCurrent) + (rightTarget - rightCurrent)) * 0.5
+        session.displayRootNode.simdPosition += averageDelta
+
+        let currentWidth = rightHipNode.simdWorldPosition - leftHipNode.simdWorldPosition
+        let targetWidth = rightTarget - leftTarget
+
+        guard simd_length(currentWidth) > 0.0001,
+              simd_length(targetWidth) > 0.0001 else {
+            return
+        }
+
+        let deltaWorld = simd_quatf(
+            from: simd_normalize(currentWidth),
+            to: simd_normalize(targetWidth)
+        )
+
+        applyWorldRotationDelta(
+            deltaWorld,
+            to: hipsNode
+        )
+    }
+
+    private static func solvePinnedJointSequence(
+        _ chain: [String],
+        rays: [String: JointRay],
+        session: SkinnedRigSession,
+        passes: Int = 4
+    ) {
+        guard chain.count >= 2 else {
+            return
+        }
+
+        for _ in 0..<passes {
+            for i in 0..<(chain.count - 1) {
+                let parentName = chain[i]
+                let childName = chain[i + 1]
+
+                guard let parentNode = session.bonesByCanonicalName[parentName],
+                      let childNode = session.bonesByCanonicalName[childName],
+                      let childRay = rays[childName] else {
+                    continue
+                }
+
+                let parentWorld = parentNode.simdWorldPosition
+                let childWorld = childNode.simdWorldPosition
+                let boneLength = max(
+                    simd_length(childWorld - parentWorld),
+                    0.0001
+                )
+                let childTarget = pointOnRayAtDistanceFromParent(
+                    ray: childRay,
+                    parent: parentWorld,
+                    distance: boneLength,
+                    currentChild: childWorld
+                )
+
+                rotateParentToMoveChild(
+                    parentNode: parentNode,
+                    childNode: childNode,
+                    childTarget: childTarget
+                )
+            }
         }
     }
 
@@ -568,6 +672,50 @@ enum SkinnedRigRotomationDriver {
         )
 
         return parent + directionToRay * distance
+    }
+
+    private static func pointOnRayAtDistanceFromParent(
+        ray: JointRay,
+        parent: SIMD3<Float>,
+        distance: Float,
+        currentChild: SIMD3<Float>
+    ) -> SIMD3<Float> {
+        let origin = ray.origin
+        let direction = ray.direction
+        let offset = origin - parent
+
+        let a = simd_dot(direction, direction)
+        let b = 2.0 * simd_dot(offset, direction)
+        let c = simd_dot(offset, offset) - distance * distance
+        let discriminant = b * b - 4.0 * a * c
+
+        if discriminant >= 0 {
+            let root = sqrt(discriminant)
+            let t0 = (-b - root) / (2.0 * a)
+            let t1 = (-b + root) / (2.0 * a)
+
+            let candidates = [t0, t1]
+                .filter { $0.isFinite && $0 >= 0 }
+                .map { origin + direction * $0 }
+
+            if let best = candidates.min(by: {
+                simd_length_squared($0 - currentChild) < simd_length_squared($1 - currentChild)
+            }) {
+                return best
+            }
+        }
+
+        let closest = closestPointOnRay(
+            ray: ray,
+            to: currentChild
+        )
+        let childDirection = closest - parent
+
+        guard simd_length(childDirection) > 0.0001 else {
+            return currentChild
+        }
+
+        return parent + simd_normalize(childDirection) * distance
     }
 
     private static func logPinnedFitError(
