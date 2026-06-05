@@ -115,7 +115,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let showRawVision: Bool
     let showNormalizedMeshy: Bool
     let showSmoothedMeshy: Bool
-    let showStereoJointDepth: Bool
+    let showStereo3DSkeleton: Bool
     let showGroundPlane: Bool
     let showVisionRays: Bool
     let showRaySolvedRig: Bool
@@ -174,7 +174,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             showRawVision: showRawVision,
             showNormalizedMeshy: showNormalizedMeshy,
             showSmoothedMeshy: showSmoothedMeshy,
-            showStereoJointDepth: showStereoJointDepth,
+            showStereo3DSkeleton: showStereo3DSkeleton,
             showGroundPlane: showGroundPlane,
             showVisionRays: showVisionRays,
             showRaySolvedRig: showRaySolvedRig,
@@ -382,7 +382,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             showRawVision: Bool,
             showNormalizedMeshy: Bool,
             showSmoothedMeshy: Bool,
-            showStereoJointDepth: Bool,
+            showStereo3DSkeleton: Bool,
             showGroundPlane: Bool,
             showVisionRays: Bool,
             showRaySolvedRig: Bool,
@@ -454,7 +454,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             updateSmoothedOverlay(smoothedFrame, visible: showSmoothedMeshy)
             updateStereoDepthOverlay(
                 stereoJointFrame,
-                visible: showStereoJointDepth,
+                visible: showStereo3DSkeleton,
                 sceneUnitsPerMeter: stereoSceneUnitsPerMeter
             )
             updateRaySolveDebug(
