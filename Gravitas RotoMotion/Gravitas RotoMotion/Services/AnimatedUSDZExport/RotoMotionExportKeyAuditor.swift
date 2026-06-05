@@ -79,16 +79,14 @@ enum RotoMotionExportKeyAuditor {
             )
         }
 
-        let declaredQuaternionOrder =
-            (inputRoot["rotation_order"] as? String)
-            ?? (inputRoot["quaternionOrder"] as? String)
+        let declaredRotationOrder = inputRoot["rotation_order"] as? String
 
-        if declaredQuaternionOrder != "wxyz" {
+        if declaredRotationOrder != "euler_xyz_radians" {
             addIssue(
                 severity: "high",
                 joint: nil,
-                problem: "ambiguous quaternion order",
-                detail: "Export input does not declare rotation_order=wxyz."
+                problem: "ambiguous rotation order",
+                detail: "Export input does not declare rotation_order=euler_xyz_radians."
             )
         }
 
@@ -119,8 +117,12 @@ enum RotoMotionExportKeyAuditor {
             let solveRotations = RotationSeries(
                 frames: solve.frames.map(\.frameIndex),
                 values: solve.frames.map {
-                    let q = $0.localRotationsWXYZ[jointName] ?? SIMD4<Float>(1, 0, 0, 0)
-                    return SIMD4<Double>(Double(q.x), Double(q.y), Double(q.z), Double(q.w))
+                    let euler = $0.localRotationsEulerXYZ[jointName] ?? SIMD3<Float>(0, 0, 0)
+                    return quaternionFromEulerXYZ(
+                        Double(euler.x),
+                        Double(euler.y),
+                        Double(euler.z)
+                    )
                 }
             )
 
@@ -170,8 +172,8 @@ enum RotoMotionExportKeyAuditor {
                 addIssue(
                     severity: "medium",
                     joint: jointName,
-                    problem: "input quaternion sign flip",
-                    detail: "Exporter input has \(inputStats.signFlips) raw quaternion sign flips. This can cause interpolation flips in tools that do not canonicalize signs."
+                    problem: "input rotation sign flip",
+                    detail: "Exporter input converts to \(inputStats.signFlips) raw quaternion sign flips for audit comparison."
                 )
             }
 
@@ -302,17 +304,16 @@ enum RotoMotionExportKeyAuditor {
 
                 for key in keys {
                     guard let frame = intValue(key["frame"] as Any),
-                          let rotation = key["rotation_wxyz"] as? [Any],
-                          rotation.count == 4,
-                          let qw = doubleValue(rotation[0]),
-                          let qx = doubleValue(rotation[1]),
-                          let qy = doubleValue(rotation[2]),
-                          let qz = doubleValue(rotation[3]) else {
+                          let rotation = key["rotation_euler_xyz"] as? [Any],
+                          rotation.count == 3,
+                          let x = doubleValue(rotation[0]),
+                          let y = doubleValue(rotation[1]),
+                          let z = doubleValue(rotation[2]) else {
                         continue
                     }
 
                     frames.append(frame)
-                    values.append(normalizeQuaternion(SIMD4<Double>(qw, qx, qy, qz)))
+                    values.append(quaternionFromEulerXYZ(x, y, z))
                 }
 
                 return RotationSeries(frames: frames, values: values)
@@ -500,6 +501,54 @@ enum RotoMotionExportKeyAuditor {
         }
 
         return value / length
+    }
+
+    private static func quaternionFromEulerXYZ(
+        _ x: Double,
+        _ y: Double,
+        _ z: Double
+    ) -> SIMD4<Double> {
+        let qx = SIMD4<Double>(
+            cos(x * 0.5),
+            sin(x * 0.5),
+            0,
+            0
+        )
+        let qy = SIMD4<Double>(
+            cos(y * 0.5),
+            0,
+            sin(y * 0.5),
+            0
+        )
+        let qz = SIMD4<Double>(
+            cos(z * 0.5),
+            0,
+            0,
+            sin(z * 0.5)
+        )
+
+        return normalizeQuaternion(multiply(multiply(qz, qy), qx))
+    }
+
+    private static func multiply(
+        _ a: SIMD4<Double>,
+        _ b: SIMD4<Double>
+    ) -> SIMD4<Double> {
+        let aw = a.x
+        let ax = a.y
+        let ay = a.z
+        let az = a.w
+        let bw = b.x
+        let bx = b.y
+        let by = b.z
+        let bz = b.w
+
+        return SIMD4<Double>(
+            aw * bw - ax * bx - ay * by - az * bz,
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw
+        )
     }
 
     private static func totalTravel(_ values: [SIMD3<Double>]) -> Double {

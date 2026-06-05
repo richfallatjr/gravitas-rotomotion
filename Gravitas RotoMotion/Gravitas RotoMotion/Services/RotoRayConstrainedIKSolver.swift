@@ -212,7 +212,7 @@ enum RotoRayConstrainedIKSolver {
             )
         }
 
-        let rotations = RotoSolvedPoseRotationBuilder.buildLocalRotationsWXYZ(
+        let rotations = RotoSolvedPoseRotationBuilder.buildLocalRotationsEulerXYZ(
             armature: armature,
             jointPositions: jointPositions
         )
@@ -221,7 +221,7 @@ enum RotoRayConstrainedIKSolver {
             frameIndex: frame.frameIndex,
             timeSeconds: frame.timeSeconds,
             jointPositions: jointPositions,
-            localRotationsWXYZ: rotations,
+            localRotationsEulerXYZ: rotations,
             projectionErrors: errors,
             solvedJoints: solved,
             missingJoints: missing,

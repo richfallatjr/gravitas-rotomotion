@@ -7,7 +7,7 @@ struct SessionJointTransformSample: Equatable {
     let timeSeconds: Double
     let jointName: String
     let localTranslation: SIMD3<Float>
-    let localRotationWXYZ: SIMD4<Float>
+    let localRotationEulerXYZ: SIMD3<Float>
     let localScale: SIMD3<Float>
 }
 
@@ -33,11 +33,10 @@ enum SessionArmaturePoseSampler {
                             Double(sample.localTranslation.y),
                             Double(sample.localTranslation.z)
                         ],
-                        localRotationWXYZ: [
-                            Double(sample.localRotationWXYZ.x),
-                            Double(sample.localRotationWXYZ.y),
-                            Double(sample.localRotationWXYZ.z),
-                            Double(sample.localRotationWXYZ.w)
+                        localRotationEulerXYZ: [
+                            Double(sample.localRotationEulerXYZ.x),
+                            Double(sample.localRotationEulerXYZ.y),
+                            Double(sample.localRotationEulerXYZ.z)
                         ],
                         localScaleXYZ: [
                             Double(sample.localScale.x),
@@ -66,19 +65,12 @@ enum SessionArmaturePoseSampler {
                 return nil
             }
 
-            let q = node.simdOrientation
-
             return SessionJointTransformSample(
                 frameIndex: frameIndex,
                 timeSeconds: timeSeconds,
                 jointName: jointName,
                 localTranslation: node.simdPosition,
-                localRotationWXYZ: SIMD4<Float>(
-                    q.vector.w,
-                    q.vector.x,
-                    q.vector.y,
-                    q.vector.z
-                ),
+                localRotationEulerXYZ: node.simdEulerAngles,
                 localScale: node.simdScale
             )
         }
@@ -101,7 +93,7 @@ enum SessionArmaturePoseSampler {
                         SessionArmatureSnapshot.JointTransform(
                             jointName: sample.jointName,
                             localTranslation: sample.localTranslation,
-                            localRotationWXYZ: sample.localRotationWXYZ,
+                            localRotationEulerXYZ: sample.localRotationEulerXYZ,
                             localScale: sample.localScale
                         )
                     )

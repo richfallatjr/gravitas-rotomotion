@@ -16,7 +16,7 @@ struct RigProfile: Codable {
         let name: String
         let parent: String?
         let restLocalTranslation: SIMD3Codable
-        let restLocalRotationWXYZ: SIMD4Codable
+        let restLocalRotationEulerXYZ: SIMD3Codable
         let boneLengthToParent: Double
     }
 
@@ -51,11 +51,4 @@ struct SIMD3Codable: Codable, Equatable {
     var simdFloat: SIMD3<Float> {
         SIMD3<Float>(Float(x), Float(y), Float(z))
     }
-}
-
-struct SIMD4Codable: Codable, Equatable {
-    let w: Double
-    let x: Double
-    let y: Double
-    let z: Double
 }

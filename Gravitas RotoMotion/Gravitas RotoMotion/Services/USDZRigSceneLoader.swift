@@ -335,8 +335,7 @@ enum USDZRigSceneLoader {
                     y: Double(node.position.y),
                     z: Double(node.position.z)
                 ),
-                restLocalRotationWXYZ: SIMD4Codable(
-                    w: 1.0,
+                restLocalRotationEulerXYZ: SIMD3Codable(
                     x: 0.0,
                     y: 0.0,
                     z: 0.0

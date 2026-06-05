@@ -17,17 +17,17 @@ enum SessionArmatureSnapshotJSONExporter {
                 }
 
                 let translation = vectorArray(transform.localTranslation)
-                let rotation = quaternionArray(transform.localRotationWXYZ)
+                let rotation = vectorArray(transform.localRotationEulerXYZ)
                 let scale = vectorArray(transform.localScale)
 
                 keys.append([
                     "frame": frame.frameIndex,
                     "time": frame.timeSeconds,
                     "localTranslationXYZ": translation,
-                    "localRotationWXYZ": rotation,
+                    "localRotationEulerXYZ": rotation,
                     "localScaleXYZ": scale,
                     "translation_xyz": translation,
-                    "rotation_wxyz": rotation,
+                    "rotation_euler_xyz": rotation,
                     "scale_xyz": scale,
                     "curve": "linear"
                 ])
@@ -46,7 +46,7 @@ enum SessionArmatureSnapshotJSONExporter {
             "frameCount": snapshot.frameCount,
             "fps": snapshot.fps,
             "transform_space": "local_parent",
-            "rotation_order": "wxyz",
+            "rotation_order": "euler_xyz_radians",
             "translation_policy": "all_local",
             "scale_policy": "all_local",
             "joints": joints
@@ -68,12 +68,4 @@ enum SessionArmatureSnapshotJSONExporter {
         ]
     }
 
-    private static func quaternionArray(_ value: SIMD4<Float>) -> [Double] {
-        [
-            Double(value.x),
-            Double(value.y),
-            Double(value.z),
-            Double(value.w)
-        ]
-    }
 }

@@ -24,17 +24,9 @@ enum SolvedAnimationJSONExporter {
 
         for jointName in CanonicalRig.jointNames {
             var keys: [[String: Any]] = []
-            var previousRotation: SIMD4<Float>?
 
             for frame in solve.frames {
-                var rotation = frame.localRotationsWXYZ[jointName] ?? SIMD4<Float>(1, 0, 0, 0)
-
-                if let previousRotation,
-                   dot(previousRotation, rotation) < 0 {
-                    rotation *= -1
-                }
-
-                previousRotation = rotation
+                let rotation = frame.localRotationsEulerXYZ[jointName] ?? SIMD3<Float>(0, 0, 0)
 
                 let translationMeters: SIMD3<Float>
 
@@ -46,19 +38,13 @@ enum SolvedAnimationJSONExporter {
                     translationMeters = SIMD3<Float>(0, 0, 0)
                 }
 
-                let qw = rotation.x
-                let qx = rotation.y
-                let qy = rotation.z
-                let qz = rotation.w
-
                 var key: [String: Any] = [
                     "frame": frame.frameIndex,
                     "time": frame.timeSeconds,
-                    "rotation_wxyz": [
-                        Double(qw),
-                        Double(qx),
-                        Double(qy),
-                        Double(qz)
+                    "rotation_euler_xyz": [
+                        Double(rotation.x),
+                        Double(rotation.y),
+                        Double(rotation.z)
                     ],
                     "curve": "linear"
                 ]
@@ -89,7 +75,7 @@ enum SolvedAnimationJSONExporter {
             "sceneUnitsPerMeter": solve.sceneUnitsPerMeter,
             "frameCount": solve.frameCount,
             "fps": inferredFPS(solve.frames),
-            "rotation_order": "wxyz",
+            "rotation_order": "euler_xyz_radians",
             "translation_policy": includeHipsTranslation ? "hips_only" : "none",
             "joints": joints
         ]
@@ -115,10 +101,4 @@ enum SolvedAnimationJSONExporter {
         return Double(frames.count - 1) / duration
     }
 
-    private static func dot(
-        _ a: SIMD4<Float>,
-        _ b: SIMD4<Float>
-    ) -> Float {
-        a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w
-    }
 }

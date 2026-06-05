@@ -14,7 +14,7 @@ struct SessionArmaturePoseBuffer: Codable {
 
     struct JointTransform: Codable {
         let localTranslationXYZ: [Double]
-        let localRotationWXYZ: [Double]
+        let localRotationEulerXYZ: [Double]
         let localScaleXYZ: [Double]
     }
 }

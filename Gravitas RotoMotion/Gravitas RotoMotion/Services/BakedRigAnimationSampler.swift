@@ -16,8 +16,8 @@ enum BakedRigAnimationSampler {
                 continue
             }
 
-            let q = bone.simdOrientation
             let p = bone.simdPosition
+            let euler = bone.simdEulerAngles
             let s = bone.simdScale
 
             joints[joint] = .init(
@@ -26,11 +26,10 @@ enum BakedRigAnimationSampler {
                     Double(p.y),
                     Double(p.z)
                 ],
-                localRotationWXYZ: [
-                    Double(q.vector.w),
-                    Double(q.vector.x),
-                    Double(q.vector.y),
-                    Double(q.vector.z)
+                localRotationEulerXYZ: [
+                    Double(euler.x),
+                    Double(euler.y),
+                    Double(euler.z)
                 ],
                 localScaleXYZ: [
                     Double(s.x),

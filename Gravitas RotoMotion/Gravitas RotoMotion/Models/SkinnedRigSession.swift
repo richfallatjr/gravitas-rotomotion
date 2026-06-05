@@ -26,6 +26,8 @@ final class SkinnedRigSession: ObservableObject {
     let restLocalPositions: [String: SIMD3<Float>]
     let restLocalOrientations: [String: simd_quatf]
     let restLocalScales: [String: SIMD3<Float>]
+    let restWorldPositions: [String: SIMD3<Float>]
+    let restKneePoles: [String: SIMD3<Float>]
 
     let jointOrder: [String]
 
@@ -51,6 +53,8 @@ final class SkinnedRigSession: ObservableObject {
         restLocalPositions: [String: SIMD3<Float>],
         restLocalOrientations: [String: simd_quatf],
         restLocalScales: [String: SIMD3<Float>],
+        restWorldPositions: [String: SIMD3<Float>],
+        restKneePoles: [String: SIMD3<Float>],
         jointOrder: [String],
         unitScaleMetadata: Float
     ) {
@@ -68,6 +72,8 @@ final class SkinnedRigSession: ObservableObject {
         self.restLocalPositions = restLocalPositions
         self.restLocalOrientations = restLocalOrientations
         self.restLocalScales = restLocalScales
+        self.restWorldPositions = restWorldPositions
+        self.restKneePoles = restKneePoles
         self.jointOrder = jointOrder
         self.unitScaleMetadata = unitScaleMetadata
     }

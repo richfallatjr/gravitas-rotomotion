@@ -118,6 +118,27 @@ enum SkinnedUSDZRigLoader {
         placementNode.simdPosition = SIMD3<Float>(0, 0, defaultRigZ)
         placementNode.simdEulerAngles = SIMD3<Float>(0, 0, 0)
 
+        var restWorldPositions: [String: SIMD3<Float>] = [:]
+
+        for joint in CanonicalRig.jointNames {
+            if let bone = bonesByCanonicalName[joint] {
+                restWorldPositions[joint] = bone.simdWorldPosition
+            }
+        }
+
+        let restKneePoles: [String: SIMD3<Float>] = [
+            "Left": computeRestKneePole(
+                hip: restWorldPositions["LeftUpLeg"],
+                knee: restWorldPositions["LeftLeg"],
+                ankle: restWorldPositions["LeftFoot"]
+            ),
+            "Right": computeRestKneePole(
+                hip: restWorldPositions["RightUpLeg"],
+                knee: restWorldPositions["RightLeg"],
+                ankle: restWorldPositions["RightFoot"]
+            )
+        ].compactMapValues { $0 }
+
         for joint in CanonicalRig.jointNames {
             let boneName = bonesByCanonicalName[joint]?.name ?? "MISSING"
             print("[SkinnedUSDZRigLoader] canonical \(joint) -> SCN bone \(boneName)")
@@ -138,8 +159,34 @@ enum SkinnedUSDZRigLoader {
             restLocalPositions: restLocalPositions,
             restLocalOrientations: restLocalOrientations,
             restLocalScales: restLocalScales,
+            restWorldPositions: restWorldPositions,
+            restKneePoles: restKneePoles,
             jointOrder: CanonicalRig.jointNames.filter { bonesByCanonicalName[$0] != nil },
             unitScaleMetadata: unitScaleMetadata
+        )
+    }
+
+    private static func computeRestKneePole(
+        hip: SIMD3<Float>?,
+        knee: SIMD3<Float>?,
+        ankle: SIMD3<Float>?
+    ) -> SIMD3<Float>? {
+        guard let hip,
+              let knee,
+              let ankle else {
+            return nil
+        }
+
+        let hipToAnkle = normalizeSafe(
+            ankle - hip,
+            fallback: SIMD3<Float>(0, -1, 0)
+        )
+        let projected = hip + hipToAnkle * simd_dot(knee - hip, hipToAnkle)
+        let bend = knee - projected
+
+        return normalizeSafe(
+            bend,
+            fallback: SIMD3<Float>(0, 0, 1)
         )
     }
 
@@ -186,5 +233,17 @@ enum SkinnedUSDZRigLoader {
         result = result.replacingOccurrences(of: "mixamorig:", with: "")
 
         return result
+    }
+
+    private static func normalizeSafe(
+        _ v: SIMD3<Float>,
+        fallback: SIMD3<Float>
+    ) -> SIMD3<Float> {
+        let length = simd_length(v)
+        guard length > 0.000001 else {
+            return fallback
+        }
+
+        return v / length
     }
 }

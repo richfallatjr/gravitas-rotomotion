@@ -21,7 +21,7 @@ struct SessionArmatureSnapshot: Equatable {
     struct JointTransform: Equatable {
         let jointName: String
         let localTranslation: SIMD3<Float>
-        let localRotationWXYZ: SIMD4<Float>
+        let localRotationEulerXYZ: SIMD3<Float>
         let localScale: SIMD3<Float>
     }
 }

@@ -208,7 +208,7 @@ enum AnimatedUSDZExporter {
 
         for jointName in CanonicalRig.jointNames {
             let keys: [[Any]] = fitResult.frames.compactMap { frame in
-                guard let rotation = frame.localRotationsWXYZ[jointName] else {
+                guard let rotation = frame.localRotationsEulerXYZ[jointName] else {
                     return nil
                 }
 
@@ -217,16 +217,10 @@ enum AnimatedUSDZExporter {
                     0.0,
                     0.0,
                     0.0,
-                    0.0,
-                    0.0,
-                    0.0,
-                    "linear",
-                    [
-                        rotation.w,
-                        rotation.x,
-                        rotation.y,
-                        rotation.z
-                    ]
+                    rotation.x,
+                    rotation.y,
+                    rotation.z,
+                    "linear"
                 ]
             }
 

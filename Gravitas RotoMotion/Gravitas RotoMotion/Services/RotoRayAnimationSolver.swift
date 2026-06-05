@@ -18,7 +18,6 @@ enum RotoRayAnimationSolver {
         var results: [RotoRayAnimationSolveResult.Frame] = []
         var previousPositions: [String: SIMD3<Float>]?
         var previousBodyBasis: RotoBodyBasis?
-        var previousLocalRotations: [String: SIMD4<Float>]?
         let calibration = scaledArmature(
             targetHeightMeters: targetHeightMeters,
             sceneUnitsPerMeter: sceneUnitsPerMeter,
@@ -39,21 +38,15 @@ enum RotoRayAnimationSolver {
                 settings: settings
             )
 
-            let stableLocalRotations = RotoLocalRotationContinuityFilter.stabilize(
-                solved.localRotationsWXYZ,
-                previous: previousLocalRotations
-            )
-
             previousPositions = solved.jointPositions
             previousBodyBasis = solved.bodyBasis
-            previousLocalRotations = stableLocalRotations
 
             results.append(
                 RotoRayAnimationSolveResult.Frame(
                     frameIndex: solved.frameIndex,
                     timeSeconds: solved.timeSeconds,
                     jointPositions: solved.jointPositions,
-                    localRotationsWXYZ: stableLocalRotations,
+                    localRotationsEulerXYZ: solved.localRotationsEulerXYZ,
                     projectionErrors: solved.projectionErrors,
                     solvedJoints: solved.solvedJoints,
                     missingJoints: solved.missingJoints,

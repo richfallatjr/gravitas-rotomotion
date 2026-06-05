@@ -13,7 +13,7 @@ struct RigFitResult: Codable {
         let frameIndex: Int
         let timeSeconds: Double
         let jointPositions3D: [String: SIMD3Codable]
-        let localRotationsWXYZ: [String: SIMD4Codable]
+        let localRotationsEulerXYZ: [String: SIMD3Codable]
         let fitErrors: [String: Double]
         let fitScore: Double
         let ignoredTargets: [String]

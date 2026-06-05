@@ -17,10 +17,10 @@ enum SessionArmaturePoseBufferJSONExporter {
                     "frame": frame.frameIndex,
                     "time": frame.timeSeconds,
                     "localTranslationXYZ": transform.localTranslationXYZ,
-                    "localRotationWXYZ": transform.localRotationWXYZ,
+                    "localRotationEulerXYZ": transform.localRotationEulerXYZ,
                     "localScaleXYZ": transform.localScaleXYZ,
                     "translation_xyz": transform.localTranslationXYZ,
-                    "rotation_wxyz": transform.localRotationWXYZ,
+                    "rotation_euler_xyz": transform.localRotationEulerXYZ,
                     "scale_xyz": transform.localScaleXYZ,
                     "curve": "linear"
                 ]
@@ -38,7 +38,7 @@ enum SessionArmaturePoseBufferJSONExporter {
             "fps": buffer.fps,
             "sourceKind": "posed_armature_local_transforms",
             "transform_space": "local_parent",
-            "rotation_order": "wxyz",
+            "rotation_order": "euler_xyz_radians",
             "translation_policy": "all_local",
             "scale_policy": "all_local",
             "joints": joints

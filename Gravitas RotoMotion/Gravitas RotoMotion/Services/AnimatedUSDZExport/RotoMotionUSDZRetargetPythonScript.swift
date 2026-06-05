@@ -4,6 +4,7 @@ enum RotoMotionUSDZRetargetPythonScript {
 
 import argparse
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -301,8 +302,8 @@ def load_solved_json(path):
             "or session armature local-transform schema."
         )
 
-    if data.get("rotation_order") != "wxyz":
-        raise RuntimeError("Animation JSON must declare rotation_order=wxyz.")
+    if data.get("rotation_order") != "euler_xyz_radians":
+        raise RuntimeError("Animation JSON must declare rotation_order=euler_xyz_radians.")
 
     joints = data.get("joints")
 
@@ -324,10 +325,10 @@ def load_solved_json(path):
             if not isinstance(key, dict):
                 raise RuntimeError(f"Invalid key for {joint_name}: expected object.")
 
-            rotation = key.get("localRotationWXYZ") or key.get("rotation_wxyz")
+            rotation = key.get("localRotationEulerXYZ") or key.get("rotation_euler_xyz")
 
-            if not isinstance(rotation, list) or len(rotation) != 4:
-                raise RuntimeError(f"Invalid rotation for {joint_name}: expected localRotationWXYZ [w, x, y, z].")
+            if not isinstance(rotation, list) or len(rotation) != 3:
+                raise RuntimeError(f"Invalid rotation for {joint_name}: expected localRotationEulerXYZ [x, y, z] radians.")
 
             translation = key.get("localTranslationXYZ") or key.get("translation_xyz")
 
@@ -345,11 +346,10 @@ def load_solved_json(path):
             cleaned_keys.append({
                 "frame": int(key["frame"]),
                 "time": float(key.get("time", 0.0)),
-                "rotation_wxyz": [
+                "rotation_euler_xyz": [
                     float(rotation[0]),
                     float(rotation[1]),
                     float(rotation[2]),
-                    float(rotation[3]),
                 ],
                 "translation_xyz": [
                     float(translation[0]),
@@ -404,11 +404,21 @@ def sample_joint_at_frame(keys, frame):
     return previous if previous is not None else keys[0]
 
 
-def quatf_from_wxyz(values):
-    return Gf.Quatf(
-        float(values[0]),
-        Gf.Vec3f(float(values[1]), float(values[2]), float(values[3])),
+def quat_from_euler_xyz(x, y, z):
+    qx = Gf.Quatf(
+        math.cos(float(x) * 0.5),
+        Gf.Vec3f(math.sin(float(x) * 0.5), 0, 0),
     )
+    qy = Gf.Quatf(
+        math.cos(float(y) * 0.5),
+        Gf.Vec3f(0, math.sin(float(y) * 0.5), 0),
+    )
+    qz = Gf.Quatf(
+        math.cos(float(z) * 0.5),
+        Gf.Vec3f(0, 0, math.sin(float(z) * 0.5)),
+    )
+
+    return qz * qy * qx
 
 
 def quat_dot(a, b):
@@ -544,7 +554,7 @@ def create_animation(
 
         for canonical_name, target_index in joint_map.items():
             key = sample_joint_at_frame(solved_joints[canonical_name], frame)
-            rotation = quatf_from_wxyz(key["rotation_wxyz"])
+            rotation = quat_from_euler_xyz(*key["rotation_euler_xyz"])
 
             if direct_local_transforms:
                 translations[target_index] = vec3f(*key["translation_xyz"])

@@ -176,7 +176,7 @@ struct ContentView: View {
                 applySolvedPoseToReferenceRig: roto.applySolvedPoseToReferenceRig,
                 rigRotationApplyMode: roto.rigRotationApplyMode,
                 rotationEditLayer: roto.rotationEditLayer,
-                liveRotationDeltaByJoint: roto.liveRotationDeltaByJoint,
+                liveRotationEulerXYZByJoint: roto.liveRotationEulerXYZByJoint,
                 showRawVision: roto.showRawVisionPoints,
                 showNormalizedMeshy: roto.showNormalizedMeshyPoints,
                 showSmoothedMeshy: false,
@@ -400,12 +400,20 @@ struct ContentView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
 
+                Text("Constraint: \(ManualRotationConstraint.constrainedAxesDescription(for: roto.selectedRotationJoint))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                Text("Euler XYZ only.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
                 RotationOrbiterView(
                     onDragDelta: { dx, dy in
                         roto.applyRotationOrbiterDrag(dx: dx, dy: dy)
                     },
                     onCommit: {
-                        roto.keyCurrentRotationEdit()
+                        roto.endRotationOrbiterDrag()
                     }
                 )
                 .frame(height: 160)
@@ -415,6 +423,15 @@ struct ContentView: View {
                     uiStatus = roto.status
                     pipelineRenderToken += 1
                 }
+
+                Button("Zero Live Rotation") {
+                    roto.zeroLiveRotationDeltaForSelectedJoint()
+                    uiStatus = roto.status
+                    pipelineRenderToken += 1
+                }
+                .disabled(
+                    roto.liveRotationEulerXYZByJoint[roto.selectedRotationJoint] == nil
+                )
 
                 Button("Clear Selected Joint Keys") {
                     roto.clearRotationKeysForSelectedJoint()

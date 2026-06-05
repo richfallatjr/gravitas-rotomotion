@@ -23,11 +23,11 @@ enum JockAnimExporter {
             }
 
             let rotationKeys = fitResult.frames.compactMap { frame -> [String: Any]? in
-                guard let q = frame.localRotationsWXYZ[jointName] else { return nil }
+                guard let euler = frame.localRotationsEulerXYZ[jointName] else { return nil }
 
                 return [
                     "t": frame.timeSeconds,
-                    "value": [q.w, q.x, q.y, q.z]
+                    "value": [euler.x, euler.y, euler.z]
                 ]
             }
 
@@ -39,7 +39,7 @@ enum JockAnimExporter {
 
             tracks.append([
                 "joint": jointName,
-                "channel": "rotation_quat_wxyz_absolute",
+                "channel": "rotation_euler_xyz_radians",
                 "keys": rotationKeys
             ])
         }

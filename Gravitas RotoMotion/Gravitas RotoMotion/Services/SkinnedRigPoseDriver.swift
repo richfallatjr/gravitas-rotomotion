@@ -90,19 +90,12 @@ enum SkinnedRigPoseDriver {
                   let restPosition = session.restLocalPositions[targetBoneName],
                   let restOrientation = session.restLocalOrientations[targetBoneName],
                   let restScale = session.restLocalScales[targetBoneName],
-                  let qWXYZ = frame.localRotationsWXYZ[sourceSolvedJointName] else {
+                  let eulerXYZ = frame.localRotationsEulerXYZ[sourceSolvedJointName] else {
                 missing += 1
                 continue
             }
 
-            let delta = simd_quatf(
-                vector: SIMD4<Float>(
-                    qWXYZ.y,
-                    qWXYZ.z,
-                    qWXYZ.w,
-                    qWXYZ.x
-                )
-            )
+            let delta = JointRotationEditApplier.quaternionFromEulerXYZ(eulerXYZ)
 
             bone.simdPosition = restPosition
 

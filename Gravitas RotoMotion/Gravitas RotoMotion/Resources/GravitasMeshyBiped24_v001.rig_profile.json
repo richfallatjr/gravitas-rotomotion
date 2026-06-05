@@ -5,168 +5,168 @@
       "boneLengthToParent": 0.0,
       "name": "Hips",
       "parent": null,
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": 0.0, "y": 0.0, "z": 0.0 }
     },
     {
       "boneLengthToParent": 0.24,
       "name": "LeftUpLeg",
       "parent": "Hips",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": -0.16, "y": 0.0, "z": -0.18 }
     },
     {
       "boneLengthToParent": 0.32,
       "name": "LeftLeg",
       "parent": "LeftUpLeg",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": 0.0, "y": 0.0, "z": -0.32 }
     },
     {
       "boneLengthToParent": 0.28,
       "name": "LeftFoot",
       "parent": "LeftLeg",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": 0.0, "y": 0.08, "z": -0.26 }
     },
     {
       "boneLengthToParent": 0.1,
       "name": "LeftToeBase",
       "parent": "LeftFoot",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": 0.0, "y": 0.1, "z": 0.0 }
     },
     {
       "boneLengthToParent": 0.24,
       "name": "RightUpLeg",
       "parent": "Hips",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": 0.16, "y": 0.0, "z": -0.18 }
     },
     {
       "boneLengthToParent": 0.32,
       "name": "RightLeg",
       "parent": "RightUpLeg",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": 0.0, "y": 0.0, "z": -0.32 }
     },
     {
       "boneLengthToParent": 0.28,
       "name": "RightFoot",
       "parent": "RightLeg",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": 0.0, "y": 0.08, "z": -0.26 }
     },
     {
       "boneLengthToParent": 0.1,
       "name": "RightToeBase",
       "parent": "RightFoot",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": 0.0, "y": 0.1, "z": 0.0 }
     },
     {
       "boneLengthToParent": 0.16,
       "name": "Spine02",
       "parent": "Hips",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": 0.0, "y": 0.0, "z": 0.16 }
     },
     {
       "boneLengthToParent": 0.14,
       "name": "Spine01",
       "parent": "Spine02",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": 0.0, "y": 0.0, "z": 0.14 }
     },
     {
       "boneLengthToParent": 0.14,
       "name": "Spine",
       "parent": "Spine01",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": 0.0, "y": 0.0, "z": 0.14 }
     },
     {
       "boneLengthToParent": 0.18,
       "name": "LeftShoulder",
       "parent": "Spine",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": -0.18, "y": 0.0, "z": 0.04 }
     },
     {
       "boneLengthToParent": 0.24,
       "name": "LeftArm",
       "parent": "LeftShoulder",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": -0.24, "y": 0.0, "z": 0.0 }
     },
     {
       "boneLengthToParent": 0.22,
       "name": "LeftForeArm",
       "parent": "LeftArm",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": -0.22, "y": 0.0, "z": 0.0 }
     },
     {
       "boneLengthToParent": 0.1,
       "name": "LeftHand",
       "parent": "LeftForeArm",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": -0.1, "y": 0.0, "z": 0.0 }
     },
     {
       "boneLengthToParent": 0.18,
       "name": "RightShoulder",
       "parent": "Spine",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": 0.18, "y": 0.0, "z": 0.04 }
     },
     {
       "boneLengthToParent": 0.24,
       "name": "RightArm",
       "parent": "RightShoulder",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": 0.24, "y": 0.0, "z": 0.0 }
     },
     {
       "boneLengthToParent": 0.22,
       "name": "RightForeArm",
       "parent": "RightArm",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": 0.22, "y": 0.0, "z": 0.0 }
     },
     {
       "boneLengthToParent": 0.1,
       "name": "RightHand",
       "parent": "RightForeArm",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": 0.1, "y": 0.0, "z": 0.0 }
     },
     {
       "boneLengthToParent": 0.1,
       "name": "neck",
       "parent": "Spine",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": 0.0, "y": 0.0, "z": 0.1 }
     },
     {
       "boneLengthToParent": 0.12,
       "name": "Head",
       "parent": "neck",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": 0.0, "y": 0.0, "z": 0.12 }
     },
     {
       "boneLengthToParent": 0.08,
       "name": "head_end",
       "parent": "Head",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": 0.0, "y": 0.0, "z": 0.08 }
     },
     {
       "boneLengthToParent": 0.08,
       "name": "headfront",
       "parent": "Head",
-      "restLocalRotationWXYZ": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+      "restLocalRotationEulerXYZ": { "x": 0.0, "y": 0.0, "z": 0.0 },
       "restLocalTranslation": { "x": 0.0, "y": 0.08, "z": 0.0 }
     }
   ],

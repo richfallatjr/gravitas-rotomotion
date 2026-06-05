@@ -15,7 +15,7 @@ struct BakedRigAnimation: Codable {
 
     struct JointTransform: Codable {
         let localTranslationXYZ: [Double]
-        let localRotationWXYZ: [Double]
+        let localRotationEulerXYZ: [Double]
         let localScaleXYZ: [Double]
     }
 
@@ -31,7 +31,7 @@ struct BakedRigAnimation: Codable {
                     joints: frame.joints.mapValues { joint in
                         .init(
                             localTranslationXYZ: joint.localTranslationXYZ,
-                            localRotationWXYZ: joint.localRotationWXYZ,
+                            localRotationEulerXYZ: joint.localRotationEulerXYZ,
                             localScaleXYZ: joint.localScaleXYZ
                         )
                     }

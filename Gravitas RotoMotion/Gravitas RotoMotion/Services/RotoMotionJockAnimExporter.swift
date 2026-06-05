@@ -154,7 +154,7 @@ enum RotoMotionJockAnimExporter {
             let rotationKeys: [[String: Any]] = frames.map { frame in
                 [
                     "t": frame.timeSeconds,
-                    "value": [1.0, 0.0, 0.0, 0.0]
+                    "value": [0.0, 0.0, 0.0]
                 ]
             }
 
@@ -166,7 +166,7 @@ enum RotoMotionJockAnimExporter {
 
             tracks.append([
                 "joint": jointName,
-                "channel": "rotation_quat_wxyz_absolute",
+                "channel": "rotation_euler_xyz_radians",
                 "keys": rotationKeys
             ])
         }
@@ -199,7 +199,7 @@ enum RotoMotionJockAnimExporter {
             let rotationKeys: [[String: Any]] = frames.map { frame in
                 [
                     "t": frame.timeSeconds,
-                    "value": [1.0, 0.0, 0.0, 0.0]
+                    "value": [0.0, 0.0, 0.0]
                 ]
             }
 
@@ -211,7 +211,7 @@ enum RotoMotionJockAnimExporter {
 
             tracks.append([
                 "joint": jointName,
-                "channel": "rotation_quat_wxyz_absolute",
+                "channel": "rotation_euler_xyz_radians",
                 "keys": rotationKeys
             ])
         }

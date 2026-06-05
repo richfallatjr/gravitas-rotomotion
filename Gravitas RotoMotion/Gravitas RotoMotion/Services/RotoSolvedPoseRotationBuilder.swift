@@ -2,19 +2,19 @@ import Foundation
 import simd
 
 enum RotoSolvedPoseRotationBuilder {
-    static func buildLocalRotationsWXYZ(
+    static func buildLocalRotationsEulerXYZ(
         armature: RotoReferenceArmature,
         jointPositions: [String: SIMD3<Float>]
-    ) -> [String: SIMD4<Float>] {
+    ) -> [String: SIMD3<Float>] {
         let jointByName = armature.jointByName
-        var rotations: [String: SIMD4<Float>] = [:]
+        var rotations: [String: SIMD3<Float>] = [:]
 
         for joint in armature.joints {
             guard let parentName = joint.parent,
                   let parentPosition = jointPositions[parentName],
                   let jointPosition = jointPositions[joint.name],
                   let restJoint = jointByName[joint.name] else {
-                rotations[joint.name] = SIMD4<Float>(1, 0, 0, 0)
+                rotations[joint.name] = SIMD3<Float>(0, 0, 0)
                 continue
             }
 
@@ -31,12 +31,7 @@ enum RotoSolvedPoseRotationBuilder {
                 to: solvedDirection
             )
 
-            rotations[joint.name] = SIMD4<Float>(
-                q.real,
-                q.imag.x,
-                q.imag.y,
-                q.imag.z
-            )
+            rotations[joint.name] = RotationEulerConverter.eulerXYZ(from: q)
         }
 
         return rotations

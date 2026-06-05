@@ -4,7 +4,7 @@ enum CanonicalRig {
     static let rigID = "GravitasMeshyBiped24"
     static let rigVersion = "001"
     static let upAxis = "Z"
-    static let sourceQuaternionOrder = "wxyz"
+    static let sourceRotationOrder = "euler_xyz_radians"
 
     static let jointNames: [String] = [
         "Hips",

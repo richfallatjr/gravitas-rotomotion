@@ -137,7 +137,7 @@ enum RetargetedAnimatedUSDZExporter {
 
             Direct session armature transform export was used.
             Local joint translations, rotations, and scales were written from the session armature transform JSON.
-            The old rayAnimationSolveResult.localRotationsWXYZ comparison is intentionally skipped for this path.
+            The old rayAnimationSolveResult local-rotation comparison is intentionally skipped for this path.
             """
 
             try message.write(

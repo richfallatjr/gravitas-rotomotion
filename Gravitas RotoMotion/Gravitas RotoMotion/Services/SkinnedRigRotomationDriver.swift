@@ -13,6 +13,15 @@ struct JointRay {
     }
 }
 
+struct CurvePinnedSettings {
+    var limbPinWiggle: Float = 0.02
+    var limbPinPull: Float = 0.65
+
+    var iterations: Int = 8
+
+    static let `default` = CurvePinnedSettings()
+}
+
 enum JointRayBuilder {
     static func buildRays(
         normalizedFrame: NormalizedMeshyPoseCapture.Frame,
@@ -56,23 +65,30 @@ enum JointRayBuilder {
 }
 
 enum SkinnedRigRotomationDriver {
-    static let baseChain = ["Hips", "Spine"]
+    static let armChains: [[String]] = [
+        ["LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand"],
+        ["RightShoulder", "RightArm", "RightForeArm", "RightHand"]
+    ]
 
-    static let limbsOutsideIn: [[String]] = [
+    static let headChain: [String] = [
+        "neck",
+        "Head",
+        "headfront"
+    ]
+
+    static let legSides = [
+        "Left",
+        "Right"
+    ]
+
+    static let enableAutomaticHeadSolve = false
+
+    static let solveChains: [[String]] = [
+        ["neck", "Head", "headfront"],
         ["LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand"],
         ["RightShoulder", "RightArm", "RightForeArm", "RightHand"],
         ["LeftUpLeg", "LeftLeg", "LeftFoot", "LeftToeBase"],
         ["RightUpLeg", "RightLeg", "RightFoot", "RightToeBase"]
-    ]
-
-    static let solveChains: [[String]] = [
-        ["Hips", "Spine", "neck", "Head"],
-
-        ["Spine", "LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand"],
-        ["Spine", "RightShoulder", "RightArm", "RightForeArm", "RightHand"],
-
-        ["Hips", "LeftUpLeg", "LeftLeg", "LeftFoot", "LeftToeBase"],
-        ["Hips", "RightUpLeg", "RightLeg", "RightFoot", "RightToeBase"]
     ]
 
     static func rotomateFrameWithCurvePins(
@@ -81,32 +97,62 @@ enum SkinnedRigRotomationDriver {
         session: SkinnedRigSession,
         cameraOrigin: SIMD3<Float>,
         videoPlaneSize: CGSize,
-        videoPlaneZ: Float
+        videoPlaneZ: Float,
+        settings: CurvePinnedSettings = .default
     ) {
         SCNTransaction.begin()
         SCNTransaction.animationDuration = 0
 
         resetToRest(session: session)
 
-        let rays = JointRayBuilder.buildRays(
+        var rays = JointRayBuilder.buildRays(
             normalizedFrame: normalizedFrame,
             cameraOrigin: cameraOrigin,
             videoPlaneSize: videoPlaneSize,
             videoPlaneZ: videoPlaneZ
         )
+        rays.removeValue(forKey: "Hips")
+        rays.removeValue(forKey: "Spine")
 
-        lockBaseHipsSpine(
-            session: session,
-            rays: rays
-        )
-
-        for chain in limbsOutsideIn {
-            solvePinnedLimbOutsideIn(
-                chain: chain,
-                rays: rays,
-                session: session,
-                iterations: 8
+        if frame.frameIndex == 0 {
+            print(
+                """
+                [CurvePinnedRotomation] Base pinning disabled:
+                  Hips ray used: false
+                  Spine ray used: false
+                  displayRoot moved by driver: false
+                  knees: pole-locked rest bend side
+                """
             )
+        }
+
+        for _ in 0..<settings.iterations {
+            if enableAutomaticHeadSolve {
+                solvePinnedLimbOutsideIn(
+                    chain: headChain,
+                    rays: rays,
+                    session: session,
+                    iterations: 1
+                )
+            }
+
+            for chain in armChains {
+                solvePinnedLimbOutsideIn(
+                    chain: chain,
+                    rays: rays,
+                    session: session,
+                    iterations: 1
+                )
+            }
+
+            for side in legSides {
+                solvePoleLockedLeg(
+                    side: side,
+                    rays: rays,
+                    session: session,
+                    frameIndex: frame.frameIndex
+                )
+            }
         }
 
         SCNTransaction.commit()
@@ -175,37 +221,6 @@ enum SkinnedRigRotomationDriver {
             frame: frame,
             session: session,
             force: true
-        )
-    }
-
-    private static func lockBaseHipsSpine(
-        session: SkinnedRigSession,
-        rays: [String: JointRay]
-    ) {
-        guard let hips = session.bonesByCanonicalName["Hips"],
-              let spine = session.bonesByCanonicalName["Spine"],
-              let spineRay = rays["Spine"] else {
-            return
-        }
-
-        let hipsWorld = hips.simdWorldPosition
-        let spineWorld = spine.simdWorldPosition
-        let length = max(
-            simd_length(spineWorld - hipsWorld),
-            0.0001
-        )
-
-        let spineTarget = pointOnRayAtDistanceFromParent(
-            ray: spineRay,
-            parent: hipsWorld,
-            distance: length,
-            fallback: spineWorld
-        )
-
-        rotateParentToMoveChild(
-            parentNode: hips,
-            childNode: spine,
-            childTarget: spineTarget
         )
     }
 
@@ -282,6 +297,163 @@ enum SkinnedRigRotomationDriver {
                 )
             }
         }
+    }
+
+    private static func solvePoleLockedLeg(
+        side: String,
+        rays: [String: JointRay],
+        session: SkinnedRigSession,
+        frameIndex: Int
+    ) {
+        let hipName = "\(side)UpLeg"
+        let kneeName = "\(side)Leg"
+        let ankleName = "\(side)Foot"
+        let toeName = "\(side)ToeBase"
+
+        guard let hip = session.bonesByCanonicalName[hipName],
+              let knee = session.bonesByCanonicalName[kneeName],
+              let ankle = session.bonesByCanonicalName[ankleName],
+              let ankleRay = rays[ankleName] else {
+            return
+        }
+
+        let hipWorld = hip.simdWorldPosition
+        let kneeWorld = knee.simdWorldPosition
+        let ankleWorld = ankle.simdWorldPosition
+
+        let upperLength = max(
+            simd_length(kneeWorld - hipWorld),
+            0.0001
+        )
+        let lowerLength = max(
+            simd_length(ankleWorld - kneeWorld),
+            0.0001
+        )
+        let restPole = session.restKneePoles[side] ?? normalizeSafe(
+            kneeWorld - hipWorld,
+            fallback: SIMD3<Float>(0, 0, 1)
+        )
+
+        let ankleTarget = closestReachablePointOnRay(
+            ray: ankleRay,
+            root: hipWorld,
+            minDistance: abs(upperLength - lowerLength) + 0.0001,
+            maxDistance: upperLength + lowerLength - 0.0001
+        )
+        let solvedKnee = solveKneeWithRestPole(
+            hip: hipWorld,
+            ankle: ankleTarget,
+            upperLength: upperLength,
+            lowerLength: lowerLength,
+            restPole: restPole
+        )
+
+        if frameIndex == 0 {
+            print(
+                """
+                [CurvePinnedRotomation] \(side) knee pole solve
+                  restPole: \(restPole)
+                  hip: \(hipWorld)
+                  ankleTarget: \(ankleTarget)
+                  solvedKnee: \(solvedKnee)
+                """
+            )
+        }
+
+        rotateParentToMoveChild(
+            parentNode: hip,
+            childNode: knee,
+            childTarget: solvedKnee
+        )
+
+        rotateParentToMoveChild(
+            parentNode: knee,
+            childNode: ankle,
+            childTarget: ankleTarget
+        )
+
+        if let toe = session.bonesByCanonicalName[toeName],
+           let toeRay = rays[toeName] {
+            let currentFoot = ankle.simdWorldPosition
+            let currentToe = toe.simdWorldPosition
+            let toeLength = max(
+                simd_length(currentToe - currentFoot),
+                0.0001
+            )
+            let toeTarget = pointOnRayAtDistanceFromParent(
+                ray: toeRay,
+                parent: currentFoot,
+                distance: toeLength,
+                fallback: currentToe
+            )
+
+            rotateParentToMoveChild(
+                parentNode: ankle,
+                childNode: toe,
+                childTarget: toeTarget
+            )
+        }
+    }
+
+    private static func solveKneeWithRestPole(
+        hip: SIMD3<Float>,
+        ankle: SIMD3<Float>,
+        upperLength: Float,
+        lowerLength: Float,
+        restPole: SIMD3<Float>
+    ) -> SIMD3<Float> {
+        let hipToAnkleRaw = ankle - hip
+        let distance = min(
+            max(simd_length(hipToAnkleRaw), abs(upperLength - lowerLength) + 0.0001),
+            upperLength + lowerLength - 0.0001
+        )
+        let direction = normalizeSafe(
+            hipToAnkleRaw,
+            fallback: SIMD3<Float>(0, -1, 0)
+        )
+        let x = (
+            upperLength * upperLength -
+            lowerLength * lowerLength +
+            distance * distance
+        ) / (2.0 * distance)
+        let h = sqrt(max(upperLength * upperLength - x * x, 0.0))
+        var pole = restPole - direction * simd_dot(restPole, direction)
+        pole = normalizeSafe(
+            pole,
+            fallback: restPole
+        )
+
+        return hip + direction * x + pole * h
+    }
+
+    private static func closestReachablePointOnRay(
+        ray: JointRay,
+        root: SIMD3<Float>,
+        minDistance: Float,
+        maxDistance: Float
+    ) -> SIMD3<Float> {
+        let closest = closestPointOnRay(
+            ray: ray,
+            to: root
+        )
+        let raw = closest - root
+        let distance = simd_length(raw)
+
+        if distance > maxDistance {
+            return root + normalizeSafe(
+                raw,
+                fallback: SIMD3<Float>(0, -1, 0)
+            ) * maxDistance
+        }
+
+        if distance < minDistance {
+            return root + normalizeSafe(
+                raw,
+                fallback: SIMD3<Float>(0, -1, 0)
+            ) * minDistance
+        }
+
+        return closest
     }
 
     private static func rotateParentToMoveChild(
@@ -380,6 +552,11 @@ enum SkinnedRigRotomationDriver {
         var count: Float = 0
 
         for jointName in session.jointOrder {
+            guard jointName != "Hips",
+                  jointName != "Spine" else {
+                continue
+            }
+
             guard let bone = session.bonesByCanonicalName[jointName],
                   let ray = rays[jointName] else {
                 continue

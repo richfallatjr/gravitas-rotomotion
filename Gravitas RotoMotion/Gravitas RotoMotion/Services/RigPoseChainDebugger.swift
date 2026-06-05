@@ -112,10 +112,10 @@ enum RigPoseChainDebugger {
     struct BoneSnapshot {
         let nodeName: String
         let localPosition: SIMD3<Float>
-        let localRotationWXYZ: SIMD4<Float>
+        let localRotationEulerXYZ: SIMD3<Float>
         let localScale: SIMD3<Float>
         let worldPosition: SIMD3<Float>
-        let worldRotationWXYZ: SIMD4<Float>
+        let worldRotationEulerXYZ: SIMD3<Float>
     }
 
     private static func snapshot(
@@ -132,10 +132,10 @@ enum RigPoseChainDebugger {
             result[joint] = BoneSnapshot(
                 nodeName: bone.name ?? "nil",
                 localPosition: bone.simdPosition,
-                localRotationWXYZ: wxyz(bone.simdOrientation),
+                localRotationEulerXYZ: bone.simdEulerAngles,
                 localScale: bone.simdScale,
                 worldPosition: bone.simdWorldPosition,
-                worldRotationWXYZ: wxyz(bone.simdWorldOrientation)
+                worldRotationEulerXYZ: RotationEulerConverter.eulerXYZ(from: bone.simdWorldOrientation)
             )
         }
 
@@ -162,7 +162,7 @@ enum RigPoseChainDebugger {
         }
 
         let solvedPosition = solvedFrame.jointPositions[joint]
-        let sourceSolvedRotation = solvedFrame.localRotationsWXYZ[sourceSolvedJoint]
+        let sourceSolvedRotation = solvedFrame.localRotationsEulerXYZ[sourceSolvedJoint]
 
         let worldDelta: String
         if let posedPos = posed?.worldPosition,
@@ -178,15 +178,15 @@ enum RigPoseChainDebugger {
           legacyRotationSourceJointForTargetBone: \(sourceSolvedJoint)
           normalized: \(normalizedText)
           solvedWorld: \(solvedPosition.map(v3) ?? "nil")
-          legacySourceSolvedLocalRotWXYZ: \(sourceSolvedRotation.map(v4) ?? "nil")
+          legacySourceSolvedLocalRotEulerXYZ: \(sourceSolvedRotation.map(v3) ?? "nil")
           rest.localPos: \(rest.map { v3($0.localPosition) } ?? "nil")
-          rest.localRotWXYZ: \(rest.map { v4($0.localRotationWXYZ) } ?? "nil")
+          rest.localRotEulerXYZ: \(rest.map { v3($0.localRotationEulerXYZ) } ?? "nil")
           rest.worldPos: \(rest.map { v3($0.worldPosition) } ?? "nil")
-          rest.worldRotWXYZ: \(rest.map { v4($0.worldRotationWXYZ) } ?? "nil")
+          rest.worldRotEulerXYZ: \(rest.map { v3($0.worldRotationEulerXYZ) } ?? "nil")
           posed.localPos: \(posed.map { v3($0.localPosition) } ?? "nil")
-          posed.localRotWXYZ: \(posed.map { v4($0.localRotationWXYZ) } ?? "nil")
+          posed.localRotEulerXYZ: \(posed.map { v3($0.localRotationEulerXYZ) } ?? "nil")
           posed.worldPos: \(posed.map { v3($0.worldPosition) } ?? "nil")
-          posed.worldRotWXYZ: \(posed.map { v4($0.worldRotationWXYZ) } ?? "nil")
+          posed.worldRotEulerXYZ: \(posed.map { v3($0.worldRotationEulerXYZ) } ?? "nil")
           posed-vs-solved world delta: \(worldDelta)
         """
     }
@@ -220,15 +220,6 @@ enum RigPoseChainDebugger {
         return acos(d) * 180.0 / .pi
     }
 
-    private static func wxyz(_ q: simd_quatf) -> SIMD4<Float> {
-        SIMD4<Float>(
-            q.vector.w,
-            q.vector.x,
-            q.vector.y,
-            q.vector.z
-        )
-    }
-
     private static func orderedUnique(_ values: [String]) -> [String] {
         var seen = Set<String>()
         var output: [String] = []
@@ -253,7 +244,4 @@ enum RigPoseChainDebugger {
         "(\(fmt(v.x)), \(fmt(v.y)), \(fmt(v.z)))"
     }
 
-    private static func v4(_ v: SIMD4<Float>) -> String {
-        "(\(fmt(v.x)), \(fmt(v.y)), \(fmt(v.z)), \(fmt(v.w)))"
-    }
 }

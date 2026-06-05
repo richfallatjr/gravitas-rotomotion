@@ -118,23 +118,8 @@ def load_keyframes(path):
         cleaned_keys = []
 
         for key in keys:
-            if not isinstance(key, list) or len(key) not in (8, 9):
-                raise RuntimeError(f"Invalid key for {joint}: expected array length 8 or 9.")
-
-            rotation_quat = None
-
-            if len(key) == 9:
-                raw_quat = key[8]
-
-                if not isinstance(raw_quat, list) or len(raw_quat) != 4:
-                    raise RuntimeError(f"Invalid quaternion for {joint}: expected [w, x, y, z].")
-
-                rotation_quat = [
-                    float(raw_quat[0]),
-                    float(raw_quat[1]),
-                    float(raw_quat[2]),
-                    float(raw_quat[3]),
-                ]
+            if not isinstance(key, list) or len(key) != 8:
+                raise RuntimeError(f"Invalid key for {joint}: expected Euler array length 8.")
 
             cleaned_keys.append([
                 int(key[0]),
@@ -145,7 +130,6 @@ def load_keyframes(path):
                 float(key[5]),
                 float(key[6]),
                 str(key[7]),
-                rotation_quat,
             ])
 
         cleaned[joint] = sorted(cleaned_keys, key=lambda item: item[0])
@@ -153,10 +137,10 @@ def load_keyframes(path):
     return cleaned
 
 
-def euler_degrees_to_quatf(rx, ry, rz):
-    x = math.radians(rx)
-    y = math.radians(ry)
-    z = math.radians(rz)
+def euler_radians_to_quatf(rx, ry, rz):
+    x = float(rx)
+    y = float(ry)
+    z = float(rz)
 
     qx = Gf.Quatf(math.cos(x * 0.5), Gf.Vec3f(math.sin(x * 0.5), 0, 0))
     qy = Gf.Quatf(math.cos(y * 0.5), Gf.Vec3f(0, math.sin(y * 0.5), 0))
@@ -192,17 +176,6 @@ def sample_joint_at_frame(keys, frame):
             break
 
     return previous if previous is not None else keys[0]
-
-
-def quatf_from_wxyz(values):
-    return Gf.Quatf(
-        float(values[0]),
-        Gf.Vec3f(
-            float(values[1]),
-            float(values[2]),
-            float(values[3]),
-        ),
-    )
 
 
 def vec3f(x, y, z):
@@ -406,10 +379,7 @@ def parent_leaf_by_joint(joint_paths):
 def has_marker_translation_targets(keyframes):
     for keys in keyframes.values():
         for key in keys:
-            _, tx, _ty, tz, rx, ry, rz, _curve, rotation_quat = key
-
-            if rotation_quat is not None:
-                continue
+            _, tx, _ty, tz, rx, ry, rz, _curve = key
 
             if abs(rx) + abs(ry) + abs(rz) > 0.0001:
                 continue
@@ -421,7 +391,7 @@ def has_marker_translation_targets(keyframes):
 
 
 def marker_position_from_key(key):
-    _, tx, _ty, tz, _rx, _ry, _rz, _curve, _rotation_quat = key
+    _, tx, _ty, tz, _rx, _ry, _rz, _curve = key
 
     return vec3f(
         (tx - 0.5) * TARGET_CHARACTER_HEIGHT_SOURCE_UNITS,
@@ -590,12 +560,10 @@ def create_animation(stage, skeleton, keyframes, clip_id):
 
             index = joint_leaf_to_index[joint]
             key = sample_joint_at_frame(keys, frame)
-            _, _tx, _ty, _tz, rx, ry, rz, _curve, rotation_quat = key
+            _, _tx, _ty, _tz, rx, ry, rz, _curve = key
 
-            if rotation_quat is not None:
-                rotations[index] = quatf_from_wxyz(rotation_quat)
-            elif abs(rx) + abs(ry) + abs(rz) > 0.0001:
-                rotations[index] = euler_degrees_to_quatf(rx, ry, rz)
+            if abs(rx) + abs(ry) + abs(rz) > 0.0001:
+                rotations[index] = euler_radians_to_quatf(rx, ry, rz)
 
         translations_attr.Set(translations, Usd.TimeCode(frame))
         rotations_attr.Set(rotations, Usd.TimeCode(frame))

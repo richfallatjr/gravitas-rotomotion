@@ -172,7 +172,7 @@ enum RotoRaySolvedUSDZExporter {
             lines: &lines
         )
         appendQuatTimeSamples(
-            samples: samples.map { ($0.frameIndex, $0.orientationWXYZ) },
+            samples: samples.map { ($0.frameIndex, $0.orientationQuat) },
             indent: "            ",
             lines: &lines
         )
@@ -227,7 +227,7 @@ enum RotoRaySolvedUSDZExporter {
     private struct BoneSample {
         let frameIndex: Int
         let midpoint: SIMD3<Float>
-        let orientationWXYZ: SIMD4<Float>
+        let orientationQuat: SIMD4<Float>
         let length: Float
     }
 
@@ -247,7 +247,7 @@ enum RotoRaySolvedUSDZExporter {
         return BoneSample(
             frameIndex: frameIndex,
             midpoint: parent + vector * 0.5,
-            orientationWXYZ: SIMD4<Float>(
+            orientationQuat: SIMD4<Float>(
                 orientation.real,
                 orientation.imag.x,
                 orientation.imag.y,

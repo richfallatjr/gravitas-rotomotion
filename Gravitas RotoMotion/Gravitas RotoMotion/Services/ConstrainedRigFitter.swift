@@ -72,12 +72,12 @@ enum ConstrainedRigFitter {
                     jointPositions3D: fit.positions.mapValues {
                         SIMD3Codable(x: Double($0.x), y: Double($0.y), z: Double($0.z))
                     },
-                    localRotationsWXYZ: fit.rotations.mapValues {
-                        SIMD4Codable(
-                            w: Double($0.real),
-                            x: Double($0.imag.x),
-                            y: Double($0.imag.y),
-                            z: Double($0.imag.z)
+                    localRotationsEulerXYZ: fit.rotations.mapValues {
+                        let euler = RotationEulerConverter.eulerXYZ(from: $0)
+                        return SIMD3Codable(
+                            x: Double(euler.x),
+                            y: Double(euler.y),
+                            z: Double(euler.z)
                         )
                     },
                     fitErrors: fit.errors,

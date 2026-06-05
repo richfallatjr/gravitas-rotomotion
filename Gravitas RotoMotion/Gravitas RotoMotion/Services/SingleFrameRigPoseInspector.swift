@@ -25,16 +25,16 @@ enum SingleFrameRigPoseInspector {
         lines.append("")
 
         var beforeWorld: [String: SIMD3<Float>] = [:]
-        var beforeLocalRot: [String: SIMD4<Float>] = [:]
+        var beforeLocalRot: [String: SIMD3<Float>] = [:]
         var afterWorld: [String: SIMD3<Float>] = [:]
-        var afterLocalRot: [String: SIMD4<Float>] = [:]
+        var afterLocalRot: [String: SIMD3<Float>] = [:]
 
         SkinnedRigRotomationDriver.resetToRest(session: session)
 
         for joint in jointNames {
             if let bone = session.bonesByCanonicalName[joint] {
                 beforeWorld[joint] = bone.simdWorldPosition
-                beforeLocalRot[joint] = wxyz(bone.simdOrientation)
+                beforeLocalRot[joint] = bone.simdEulerAngles
             }
         }
 
@@ -46,7 +46,7 @@ enum SingleFrameRigPoseInspector {
         for joint in jointNames {
             if let bone = session.bonesByCanonicalName[joint] {
                 afterWorld[joint] = bone.simdWorldPosition
-                afterLocalRot[joint] = wxyz(bone.simdOrientation)
+                afterLocalRot[joint] = bone.simdEulerAngles
             }
         }
 
@@ -81,18 +81,18 @@ enum SingleFrameRigPoseInspector {
                 continue
             }
 
-            let solvedRot = solvedFrame.localRotationsWXYZ[joint]
+            let solvedRot = solvedFrame.localRotationsEulerXYZ[joint]
             let before = beforeWorld[joint]
             let after = afterWorld[joint]
             let beforeQ = beforeLocalRot[joint]
             let afterQ = afterLocalRot[joint]
 
             lines.append("solved world position: \(v3(solvedPos))")
-            lines.append("solved local rot WXYZ: \(solvedRot.map(v4) ?? "nil")")
+            lines.append("solved local rot EulerXYZ: \(solvedRot.map(v3) ?? "nil")")
             lines.append("bone world before: \(before.map(v3) ?? "nil")")
             lines.append("bone world after:  \(after.map(v3) ?? "nil")")
-            lines.append("bone local rot before WXYZ: \(beforeQ.map(v4) ?? "nil")")
-            lines.append("bone local rot after  WXYZ: \(afterQ.map(v4) ?? "nil")")
+            lines.append("bone local rot before EulerXYZ: \(beforeQ.map(v3) ?? "nil")")
+            lines.append("bone local rot after  EulerXYZ: \(afterQ.map(v3) ?? "nil")")
 
             if let after {
                 let error = simd_length(after - solvedPos)
@@ -127,15 +127,6 @@ enum SingleFrameRigPoseInspector {
         )
     }
 
-    private static func wxyz(_ q: simd_quatf) -> SIMD4<Float> {
-        SIMD4<Float>(
-            q.vector.w,
-            q.vector.x,
-            q.vector.y,
-            q.vector.z
-        )
-    }
-
     private static func fmt(_ v: Double) -> String {
         String(format: "%.4f", v)
     }
@@ -144,7 +135,4 @@ enum SingleFrameRigPoseInspector {
         "(\(String(format: "%.4f", v.x)), \(String(format: "%.4f", v.y)), \(String(format: "%.4f", v.z)))"
     }
 
-    private static func v4(_ v: SIMD4<Float>) -> String {
-        "(\(String(format: "%.4f", v.x)), \(String(format: "%.4f", v.y)), \(String(format: "%.4f", v.z)), \(String(format: "%.4f", v.w)))"
-    }
 }
