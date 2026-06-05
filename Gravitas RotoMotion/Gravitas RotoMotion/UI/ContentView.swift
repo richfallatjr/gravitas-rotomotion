@@ -268,7 +268,7 @@ struct ContentView: View {
                 frameCount: uiDecodedFrames.count,
                 keyframes: roto.rotationOverrideLayer.keyframesByJoint[roto.selectedRotationJoint] ?? []
             )
-            .frame(height: 14)
+            .frame(height: 16)
         }
     }
 
@@ -475,6 +475,12 @@ struct ContentView: View {
                 .pickerStyle(.segmented)
 
                 Toggle("Rotation Gizmo", isOn: $roto.showRotationGizmo)
+
+                Toggle("Clean Keys Mode: Replace Keys With One", isOn: $roto.cleanRotationKeysEnabled)
+
+                Text("\(roto.selectedRotationJoint) rotation keys: \(selectedRotationKeyCount)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
 
                 Button("Add Rotation Key") {
                     roto.addRotationKeyForSelectedJoint()
@@ -1486,7 +1492,7 @@ struct RotationKeyTimelineMarkers: View {
 
                     Rectangle()
                         .fill(Color.yellow)
-                        .frame(width: 3, height: 14)
+                        .frame(width: 3, height: 16)
                         .shadow(color: .yellow, radius: 2)
                         .offset(x: x)
                 }

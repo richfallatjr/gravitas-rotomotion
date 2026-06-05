@@ -893,18 +893,11 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                     videoPlaneZ: currentVideoPlaneZ
                 )
 
-                JointRotationOverrideApplier.apply(
-                    to: session,
-                    overrideLayer: rotationOverrideLayer,
-                    heldRotationOverrideEulerXYZByJoint: heldRotationOverrideEulerXYZByJoint,
-                    liveRotationOverrideEulerXYZByJoint: liveRotationOverrideEulerXYZByJoint,
-                    liveOverridesActive: liveRotationOverridesActive,
-                    timeSeconds: frame.timeSeconds
-                )
                 applyViewportRotationOverrides(
                     session: session,
                     overrideLayer: rotationOverrideLayer,
                     liveOverridesActive: liveRotationOverridesActive,
+                    frameIndex: frame.frameIndex,
                     timeSeconds: frame.timeSeconds
                 )
 
@@ -945,6 +938,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             session: SkinnedRigSession,
             overrideLayer: JointRotationOverrideLayer,
             liveOverridesActive: Bool,
+            frameIndex: Int,
             timeSeconds: Double
         ) {
             for joint in CanonicalRig.jointNames {
@@ -952,21 +946,15 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                     continue
                 }
 
-                let overrideValue: SIMD3<Float>?
-                if liveOverridesActive,
-                   let live = liveRotationOverrideEulerXYZByJoint[joint] {
-                    overrideValue = live
-                } else if let keyed = JointRotationOverrideApplier.interpolatedRotationOverrideEuler(
+                guard let overrideValue = JointRotationOverrideApplier.rotationOverrideEuler(
                     joint: joint,
+                    frameIndex: frameIndex,
                     timeSeconds: timeSeconds,
-                    overrideLayer: overrideLayer
-                ) {
-                    overrideValue = keyed
-                } else {
-                    overrideValue = heldRotationOverrideEulerXYZByJoint[joint]
-                }
-
-                guard let overrideValue else {
+                    overrideLayer: overrideLayer,
+                    heldRotationOverrideEulerXYZByJoint: heldRotationOverrideEulerXYZByJoint,
+                    liveRotationOverrideEulerXYZByJoint: liveRotationOverrideEulerXYZByJoint,
+                    liveOverridesActive: liveOverridesActive
+                ) else {
                     continue
                 }
 

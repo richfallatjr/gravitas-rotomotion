@@ -1,0 +1,1088 @@
+RotoMotion Architect Handoff: Rotation Keyframes Visible, But Not Baking
+=======================================================================
+
+Context
+-------
+
+User-visible problem:
+- Rotation keyframe ticks are visible in the timeline/viewport.
+- Therefore the selected-joint rotation key data exists in app state.
+- Bake Animation still does not appear to bake those keyed rotations into the exported animation.
+
+High-level expected flow:
+
+1. User edits selected joint Euler XYZ.
+2. User clicks Add Rotation Key.
+3. Key is stored in rotationOverrideLayer.keyframesByJoint[selectedJoint].
+4. Bake Animation loops all solved frames.
+5. For each solved frame:
+   - rebuild curve-pinned pose
+   - evaluate rotation override for that joint at that frame
+   - replace bone.simdEulerAngles with the override
+   - sample bone local transforms into BakedRigAnimation
+6. Export writes bakedRigAnimation.asSessionArmaturePoseBuffer() to session_armature_pose.json.
+7. Python USD writer reads localRotationEulerXYZ / rotation_euler_xyz from that JSON and converts Euler XYZ to USD quaternions privately.
+
+Important: If the timeline tick is visible, do not debug key creation first. The most likely bug is between bake evaluation, bone application, sampled baked data, and export JSON.
+
+
+Current Key Storage Model
+-------------------------
+
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/Models/JointRotationOverrideLayer.swift
+
+Current code:
+
+```swift
+import Foundation
+
+struct JointRotationOverrideLayer: Codable {
+    let schema: String
+    var selectedJoint: String
+    var cleanKeysEnabled: Bool
+    var keyframesByJoint: [String: [Keyframe]]
+
+    struct Keyframe: Codable, Identifiable {
+        var id: String { "\(frameIndex)" }
+
+        let frameIndex: Int
+        let timeSeconds: Double
+
+        /// Absolute replacement local Euler XYZ radians.
+        var eulerXYZ: [Double]
+
+        enum CodingKeys: String, CodingKey {
+            case frameIndex
+            case timeSeconds
+            case eulerXYZ
+            case axisValuesXYZ
+        }
+
+        init(
+            frameIndex: Int,
+            timeSeconds: Double,
+            eulerXYZ: [Double]
+        ) {
+            self.frameIndex = frameIndex
+            self.timeSeconds = timeSeconds
+            self.eulerXYZ = eulerXYZ
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+
+            frameIndex = try container.decode(Int.self, forKey: .frameIndex)
+            timeSeconds = try container.decode(Double.self, forKey: .timeSeconds)
+
+            if let euler = try container.decodeIfPresent([Double].self, forKey: .eulerXYZ),
+               euler.count == 3 {
+                eulerXYZ = euler
+            } else if let legacyAxis = try container.decodeIfPresent([Double].self, forKey: .axisValuesXYZ),
+                      legacyAxis.count == 3 {
+                eulerXYZ = legacyAxis
+            } else {
+                eulerXYZ = [0, 0, 0]
+            }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(frameIndex, forKey: .frameIndex)
+            try container.encode(timeSeconds, forKey: .timeSeconds)
+            try container.encode(eulerXYZ, forKey: .eulerXYZ)
+        }
+    }
+
+    static let `default` = JointRotationOverrideLayer(
+        schema: "com.gravitas.rotomotion.rotation_override_layer.v0",
+        selectedJoint: "Head",
+        cleanKeysEnabled: false,
+        keyframesByJoint: [:]
+    )
+}
+```
+
+
+UI Hook Points
+--------------
+
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/UI/ContentView.swift
+
+Relevant UI calls:
+
+```swift
+Button("Add Rotation Key") {
+    roto.addRotationKeyForSelectedJoint()
+    uiStatus = roto.status
+    pipelineRenderToken += 1
+}
+
+Button("Bake Rig Animation For Export") {
+    roto.bakeLiveRigAnimationForExport()
+    uiStatus = roto.status
+    pipelineRenderToken += 1
+}
+
+Button("Export Animated Target USDZ") {
+    roto.exportAnimatedTargetUSDZFromRaySolve()
+    uiStatus = roto.status
+    pipelineRenderToken += 1
+}
+
+RotationKeyTimelineMarkers(
+    frameCount: uiDecodedFrames.count,
+    keyframes: roto.rotationOverrideLayer.keyframesByJoint[roto.selectedRotationJoint] ?? []
+)
+```
+
+Implication:
+- Timeline ticks read directly from rotationOverrideLayer.keyframesByJoint[selectedRotationJoint].
+- If ticks are visible, the in-memory key list exists.
+
+
+Key Creation Path
+-----------------
+
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/UI/RotoMotionViewModel.swift
+
+Relevant current code:
+
+```swift
+func addRotationKeyForSelectedJoint() {
+    let joint = selectedRotationJoint
+
+    var eulerRadians = SIMD3<Float>(
+        Float(selectedJointEulerDegreesX * degreesToRadians),
+        Float(selectedJointEulerDegreesY * degreesToRadians),
+        Float(selectedJointEulerDegreesZ * degreesToRadians)
+    )
+
+    eulerRadians = ManualRotationConstraint.clampedEulerXYZ(
+        joint: joint,
+        values: eulerRadians
+    )
+
+    let key = JointRotationOverrideLayer.Keyframe(
+        frameIndex: currentFrameIndex,
+        timeSeconds: currentVideoTimeSeconds,
+        eulerXYZ: [
+            Double(eulerRadians.x),
+            Double(eulerRadians.y),
+            Double(eulerRadians.z)
+        ]
+    )
+
+    if cleanRotationKeysEnabled {
+        rotationOverrideLayer.keyframesByJoint[joint] = [key]
+        rotationAuthoringStatus = "Clean-keyed \(joint): replaced all keys with one key at frame \(currentFrameIndex)."
+    } else {
+        var keys = rotationOverrideLayer.keyframesByJoint[joint] ?? []
+        keys.removeAll { $0.frameIndex == currentFrameIndex }
+        keys.append(key)
+        keys.sort { $0.frameIndex < $1.frameIndex }
+        rotationOverrideLayer.keyframesByJoint[joint] = keys
+        rotationAuthoringStatus = "Added rotation key for \(joint) at frame \(currentFrameIndex). Total keys: \(keys.count)."
+    }
+
+    heldRotationOverrideEulerXYZByJoint[joint] = eulerRadians
+    liveRotationOverrideEulerXYZByJoint[joint] = eulerRadians
+    isRotationGizmoDragging = false
+    rotationOverrideRevision += 1
+
+    status = rotationAuthoringStatus
+    sessionIsDirty = true
+    bakedRigAnimation = nil
+    bakedRigAnimationStatus = "Bake is stale. Re-bake animation."
+    diagnostics.log("""
+    Rotation key added:
+      joint: \(joint)
+      frame: \(currentFrameIndex)
+      time: \(String(format: "%.4f", currentVideoTimeSeconds))
+      cleanKeysEnabled: \(cleanRotationKeysEnabled)
+      keyCount: \(rotationOverrideLayer.keyframesByJoint[joint]?.count ?? 0)
+    """)
+    applyCurrentFrameToLiveRig()
+    refreshSelectedJointEulerFields()
+}
+```
+
+Current behavior:
+- Clean Keys Mode replaces the selected joint key list.
+- Otherwise keys are appended and de-duped only by exact frameIndex.
+- Any key add sets bakedRigAnimation = nil.
+
+Architect verification:
+- Confirm cleanRotationKeysEnabled is false when user adds multiple keys.
+- Confirm diagnostics show keyCount > 1.
+- Confirm key frameIndex values match the frameIndex values used by rayAnimationSolveResult.frames.
+
+
+Manual Edit Invalidation
+------------------------
+
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/UI/RotoMotionViewModel.swift
+
+These methods currently nil the old bake:
+
+```swift
+setSelectedJointEulerDegrees(...)
+setViewportRotationOverride(...)
+addRotationKeyForSelectedJoint()
+clearRotationKeysForSelectedJoint()
+clearAllRotationOverrideForSelectedJoint()
+```
+
+Representative code:
+
+```swift
+sessionIsDirty = true
+bakedRigAnimation = nil
+bakedRigAnimationStatus = "Bake is stale. Re-bake animation."
+```
+
+Export guard:
+
+```swift
+guard let bakedRigAnimation else {
+    usdzRetargetStatus = "Bake animation before export. Current rotation keys are not baked."
+    status = usdzRetargetStatus
+    diagnostics.log(usdzRetargetStatus)
+    return
+}
+```
+
+Architect verification:
+- Confirm the user is actually rebaking after adding keys.
+- Confirm export refuses if old bake was invalidated.
+- If export still runs after key edits without rebake, bakedRigAnimation is not being nilled somewhere or stale data is restored.
+
+
+Canonical Override Evaluator Currently In ViewModel
+---------------------------------------------------
+
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/UI/RotoMotionViewModel.swift
+
+Current code:
+
+```swift
+func rotationOverrideEulerForFrame(
+    joint: String,
+    frameIndex: Int,
+    timeSeconds: Double
+) -> SIMD3<Float>? {
+    _ = timeSeconds
+
+    let keys = (rotationOverrideLayer.keyframesByJoint[joint] ?? [])
+        .sorted { $0.frameIndex < $1.frameIndex }
+
+    if !keys.isEmpty {
+        if let exact = keys.first(where: { $0.frameIndex == frameIndex }) {
+            return eulerFromRotationKey(joint: joint, key: exact)
+        }
+
+        if let previous = keys.last(where: { $0.frameIndex <= frameIndex }) {
+            return eulerFromRotationKey(joint: joint, key: previous)
+        }
+
+        return eulerFromRotationKey(joint: joint, key: keys[0])
+    }
+
+    if let live = liveRotationOverrideEulerXYZByJoint[joint] {
+        return ManualRotationConstraint.clampedEulerXYZ(
+            joint: joint,
+            values: live
+        )
+    }
+
+    if let held = heldRotationOverrideEulerXYZByJoint[joint] {
+        return ManualRotationConstraint.clampedEulerXYZ(
+            joint: joint,
+            values: held
+        )
+    }
+
+    return nil
+}
+
+private func eulerFromRotationKey(
+    joint: String,
+    key: JointRotationOverrideLayer.Keyframe
+) -> SIMD3<Float>? {
+    guard key.eulerXYZ.count == 3 else {
+        return nil
+    }
+
+    return ManualRotationConstraint.clampedEulerXYZ(
+        joint: joint,
+        values: SIMD3<Float>(
+            Float(key.eulerXYZ[0]),
+            Float(key.eulerXYZ[1]),
+            Float(key.eulerXYZ[2])
+        )
+    )
+}
+```
+
+Rules:
+- If keys exist for a joint, keys drive that joint.
+- If no keys exist, live/held override drives that joint.
+- Evaluation is frameIndex based. timeSeconds is ignored.
+
+Possible failure point:
+- UI key frameIndex might not match solve frameIndex.
+- Previous-key fallback should still produce stepped animation if solve frameIndex increases through the same index domain.
+- If solve frameIndex values do not overlap UI currentFrameIndex values at all, all bake frames may use first key only.
+
+
+Live ViewModel Application
+--------------------------
+
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/UI/RotoMotionViewModel.swift
+
+Current code:
+
+```swift
+func applyCurrentFrameToLiveRig() {
+    guard let session = skinnedRigSession,
+          let solvedFrame = currentRaySolvedFrame,
+          let normalizedFrame = currentNormalizedFrame,
+          let videoPlaneSize = currentVideoPlaneSize else {
+        return
+    }
+
+    SkinnedRigRotomationDriver.rotomateFrameWithCurvePins(
+        solvedFrame,
+        normalizedFrame: normalizedFrame,
+        session: session,
+        cameraOrigin: SIMD3<Float>(0, 0, 0),
+        videoPlaneSize: videoPlaneSize,
+        videoPlaneZ: currentVideoPlaneZ
+    )
+
+    applyRotationOverridesToLiveRig()
+}
+
+func applyRotationOverridesToLiveRig() {
+    guard let session = skinnedRigSession else {
+        return
+    }
+
+    for joint in CanonicalRig.jointNames {
+        guard let bone = session.bonesByCanonicalName[joint],
+              let euler = rotationOverrideEulerForFrame(
+                joint: joint,
+                frameIndex: currentFrameIndex,
+                timeSeconds: currentVideoTimeSeconds
+              ) else {
+            continue
+        }
+
+        bone.simdEulerAngles = euler
+    }
+}
+```
+
+Possible failure point:
+- This applies to skinnedRigSession in the ViewModel.
+- The SceneKit viewport Coordinator also has its own override evaluator path, shown below.
+- There are still two evaluators in the codebase, which is a design risk.
+
+
+Viewport Coordinator Override Application
+-----------------------------------------
+
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/UI/RotoSceneVideoViewport.swift
+
+Current code:
+
+```swift
+private func applyViewportRotationOverrides(
+    session: SkinnedRigSession,
+    overrideLayer: JointRotationOverrideLayer,
+    liveOverridesActive: Bool,
+    frameIndex: Int,
+    timeSeconds: Double
+) {
+    for joint in CanonicalRig.jointNames {
+        guard let bone = session.bonesByCanonicalName[joint] else {
+            continue
+        }
+
+        guard let overrideValue = JointRotationOverrideApplier.rotationOverrideEuler(
+            joint: joint,
+            frameIndex: frameIndex,
+            timeSeconds: timeSeconds,
+            overrideLayer: overrideLayer,
+            heldRotationOverrideEulerXYZByJoint: heldRotationOverrideEulerXYZByJoint,
+            liveRotationOverrideEulerXYZByJoint: liveRotationOverrideEulerXYZByJoint,
+            liveOverridesActive: liveOverridesActive
+        ) else {
+            continue
+        }
+
+        let clamped = ManualRotationConstraint.clampedEulerXYZ(
+            joint: joint,
+            values: overrideValue
+        )
+
+        bone.simdEulerAngles = clamped
+        logRotationOverrideIfNeeded(joint: joint, euler: clamped)
+    }
+}
+```
+
+Service evaluator:
+
+```swift
+static func rotationOverrideEuler(
+    joint: String,
+    frameIndex: Int?,
+    timeSeconds: Double,
+    overrideLayer: JointRotationOverrideLayer,
+    heldRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
+    liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
+    liveOverridesActive: Bool
+) -> SIMD3<Float>? {
+    _ = timeSeconds
+    _ = liveOverridesActive
+
+    let keys = (overrideLayer.keyframesByJoint[joint] ?? [])
+        .sorted { $0.frameIndex < $1.frameIndex }
+
+    if !keys.isEmpty {
+        if let frameIndex,
+           let exact = keys.first(where: { $0.frameIndex == frameIndex }) {
+            return eulerFromKey(joint: joint, key: exact)
+        }
+
+        if let frameIndex,
+           let previous = keys.last(where: { $0.frameIndex <= frameIndex }) {
+            return eulerFromKey(joint: joint, key: previous)
+        }
+
+        return eulerFromKey(joint: joint, key: keys[0])
+    }
+
+    if let live = liveRotationOverrideEulerXYZByJoint[joint] {
+        return ManualRotationConstraint.clampedEulerXYZ(
+            joint: joint,
+            values: live
+        )
+    }
+
+    if let held = heldRotationOverrideEulerXYZByJoint[joint] {
+        return ManualRotationConstraint.clampedEulerXYZ(
+            joint: joint,
+            values: held
+        )
+    }
+
+    return nil
+}
+```
+
+Architect note:
+- User sees timeline ticks and viewport behavior, but bake is still wrong.
+- The viewport path is not proof that bake path works, because bake uses the ViewModel evaluator, while viewport uses JointRotationOverrideApplier.
+- These should be collapsed to one shared evaluator owned outside ViewModel, or bake should use the exact same service used by viewport.
+
+
+Bake Path
+---------
+
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/UI/RotoMotionViewModel.swift
+
+Current bake loop:
+
+```swift
+func bakeLiveRigAnimationForExport() {
+    guard let session = skinnedRigSession else { ... }
+    guard let solve = rayAnimationSolveResult else { ... }
+    guard let videoPlaneSize = currentVideoPlaneSize else { ... }
+
+    let savedRootPosition = session.displayRootNode.simdPosition
+    let savedRootOrientation = session.displayRootNode.simdOrientation
+    let savedRootScale = session.displayRootNode.simdScale
+    let savedBoneTransforms = session.jointOrder.reduce(into: [String: simd_float4x4]()) { result, joint in
+        if let bone = session.bonesByCanonicalName[joint] {
+            result[joint] = bone.simdTransform
+        }
+    }
+
+    defer {
+        session.displayRootNode.simdPosition = savedRootPosition
+        session.displayRootNode.simdOrientation = savedRootOrientation
+        session.displayRootNode.simdScale = savedRootScale
+
+        for (joint, transform) in savedBoneTransforms {
+            session.bonesByCanonicalName[joint]?.simdTransform = transform
+        }
+    }
+
+    diagnostics.log("""
+    Bake rotation key input:
+      keyed joints: ...
+      held override joints: ...
+    """)
+
+    diagnostics.log("""
+    Bake selected joint key check:
+      joint: \(selectedRotationJoint)
+      keyCount: \(selectedKeys.count)
+      keyFrames: ...
+    """)
+
+    var frames: [BakedRigAnimation.Frame] = []
+
+    for solvedFrame in solve.frames {
+        guard let normalizedFrame = normalizedFrameClosestTo(
+            timeSeconds: solvedFrame.timeSeconds
+        ) else {
+            continue
+        }
+
+        SkinnedRigRotomationDriver.rotomateFrameWithCurvePins(
+            solvedFrame,
+            normalizedFrame: normalizedFrame,
+            session: session,
+            cameraOrigin: SIMD3<Float>(0, 0, 0),
+            videoPlaneSize: videoPlaneSize,
+            videoPlaneZ: currentVideoPlaneZ
+        )
+
+        applyRotationOverridesToRigForBakeFrame(
+            session: session,
+            frameIndex: solvedFrame.frameIndex,
+            timeSeconds: solvedFrame.timeSeconds
+        )
+
+        frames.append(
+            BakedRigAnimationSampler.sample(
+                session: session,
+                frameIndex: solvedFrame.frameIndex,
+                timeSeconds: solvedFrame.timeSeconds,
+                jointNames: session.jointOrder
+            )
+        )
+    }
+
+    let baked = BakedRigAnimation(
+        schema: "com.gravitas.rotomotion.baked_rig_animation.v0",
+        clipID: retargetClipID,
+        fps: inferredFPS(solve.frames),
+        jointNames: session.jointOrder,
+        frames: frames
+    )
+
+    bakedRigAnimation = baked
+    sessionArmaturePoseBuffer = baked.asSessionArmaturePoseBuffer()
+    sessionPoseSource = .posedArmatureLocalTransforms
+    bakedRigAnimationStatus = "Baked \(frames.count) frames with rotation override keys."
+}
+```
+
+Bake override application:
+
+```swift
+func applyRotationOverridesToRigForBakeFrame(
+    session: SkinnedRigSession,
+    frameIndex: Int,
+    timeSeconds: Double
+) {
+    for joint in CanonicalRig.jointNames {
+        guard let bone = session.bonesByCanonicalName[joint],
+              let euler = rotationOverrideEulerForFrame(
+                joint: joint,
+                frameIndex: frameIndex,
+                timeSeconds: timeSeconds
+              ) else {
+            continue
+        }
+
+        bone.simdEulerAngles = euler
+    }
+}
+```
+
+Likely failure points in this path:
+
+1. Joint name mismatch:
+   - Key list can contain selectedJoint, but bake only applies if session.bonesByCanonicalName[joint] exists.
+   - If selectedRotationJoint is not a key in bonesByCanonicalName, bake silently skips it.
+   - If selected joint is not in session.jointOrder, BakedRigAnimationSampler also will not sample it.
+
+2. Frame index mismatch:
+   - Keys are saved using currentFrameIndex.
+   - Bake evaluates using solvedFrame.frameIndex.
+   - If those index domains differ, exact matching fails.
+   - Previous-key fallback should produce stepped behavior only if solvedFrame.frameIndex is monotonically in the same range.
+
+3. The override is applied, but sample does not prove it:
+   - Need log the selected joint before override, evaluator output, after override bone.simdEulerAngles, and sampled BakedRigAnimation value.
+
+4. Stale exported JSON:
+   - Export writes from bakedRigAnimation. If user does not rebake after edits, export refuses only if bakedRigAnimation was nilled.
+   - Confirm bakedRigAnimation is nil after every edit in the actual running build.
+
+5. SceneKit Euler normalization:
+   - bone.simdEulerAngles may normalize or represent rotations differently after assignment.
+   - Still, if euler assignment changes visual pose, the sampled Euler should differ.
+
+
+Baked Transform Sampler
+-----------------------
+
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/Services/BakedRigAnimationSampler.swift
+
+Current code:
+
+```swift
+enum BakedRigAnimationSampler {
+    static func sample(
+        session: SkinnedRigSession,
+        frameIndex: Int,
+        timeSeconds: Double,
+        jointNames: [String]
+    ) -> BakedRigAnimation.Frame {
+        var joints: [String: BakedRigAnimation.JointTransform] = [:]
+
+        for joint in jointNames {
+            guard let bone = session.bonesByCanonicalName[joint] else {
+                continue
+            }
+
+            let p = bone.simdPosition
+            let euler = bone.simdEulerAngles
+            let s = bone.simdScale
+
+            joints[joint] = .init(
+                localTranslationXYZ: [
+                    Double(p.x),
+                    Double(p.y),
+                    Double(p.z)
+                ],
+                localRotationEulerXYZ: [
+                    Double(euler.x),
+                    Double(euler.y),
+                    Double(euler.z)
+                ],
+                localScaleXYZ: [
+                    Double(s.x),
+                    Double(s.y),
+                    Double(s.z)
+                ]
+            )
+        }
+
+        return .init(
+            frameIndex: frameIndex,
+            timeSeconds: timeSeconds,
+            joints: joints
+        )
+    }
+}
+```
+
+Architect verification:
+- Inspect bakedRigAnimation.frames for the selected joint after bake.
+- Compare localRotationEulerXYZ at the exact key frames to the key's eulerXYZ.
+- If they do not match, failure is before or inside sampler.
+- If they match, failure is export/Python/USD side.
+
+
+Baked Data Model And Export Buffer
+----------------------------------
+
+Files:
+Gravitas RotoMotion/Gravitas RotoMotion/Models/BakedRigAnimation.swift
+Gravitas RotoMotion/Gravitas RotoMotion/Models/SessionArmaturePoseBuffer.swift
+
+Current code:
+
+```swift
+struct BakedRigAnimation: Codable {
+    let schema: String
+    let clipID: String
+    let fps: Double
+    let jointNames: [String]
+    let frames: [Frame]
+
+    struct Frame: Codable {
+        let frameIndex: Int
+        let timeSeconds: Double
+        let joints: [String: JointTransform]
+    }
+
+    struct JointTransform: Codable {
+        let localTranslationXYZ: [Double]
+        let localRotationEulerXYZ: [Double]
+        let localScaleXYZ: [Double]
+    }
+
+    func asSessionArmaturePoseBuffer() -> SessionArmaturePoseBuffer {
+        .init(
+            schema: "com.gravitas.rotomotion.session_armature_pose.v0",
+            clipID: clipID,
+            fps: fps,
+            frames: frames.map { frame in
+                .init(
+                    frameIndex: frame.frameIndex,
+                    timeSeconds: frame.timeSeconds,
+                    joints: frame.joints.mapValues { joint in
+                        .init(
+                            localTranslationXYZ: joint.localTranslationXYZ,
+                            localRotationEulerXYZ: joint.localRotationEulerXYZ,
+                            localScaleXYZ: joint.localScaleXYZ
+                        )
+                    }
+                )
+            }
+        )
+    }
+}
+```
+
+
+Export Path
+-----------
+
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/UI/RotoMotionViewModel.swift
+
+Current code:
+
+```swift
+func exportAnimatedTargetUSDZFromRaySolve() {
+    guard let solve = rayAnimationSolveResult,
+          !solve.frames.isEmpty else {
+        usdzRetargetStatus = "Run full ray animation solve before exporting."
+        return
+    }
+
+    guard sessionPoseSource == .posedArmatureLocalTransforms else {
+        usdzRetargetStatus = """
+        Current viewport is a positional solve display, not a posed armature.
+        Skinned USDZ export requires local joint rotations from a real posed armature transform stack.
+        Load a skinned USDZ rig so the viewport can pose real SCNSkinner bone nodes before exporting.
+        """
+        return
+    }
+
+    guard let bakedRigAnimation else {
+        usdzRetargetStatus = "Bake animation before export. Current rotation keys are not baked."
+        diagnostics.log(usdzRetargetStatus)
+        return
+    }
+
+    let poseBuffer = bakedRigAnimation.asSessionArmaturePoseBuffer()
+
+    let sessionPoseJSON = workDir.appendingPathComponent(
+        "session_armature_pose.json"
+    )
+
+    try SessionArmaturePoseBufferJSONExporter.write(
+        buffer: poseBuffer,
+        to: sessionPoseJSON
+    )
+
+    let exportResult = try RetargetedAnimatedUSDZExporter.exportAnimatedTargetUSDZ(
+        targetUSDZ: targetURL,
+        sessionSkeletonIdentityJSON: sessionSkeletonJSON,
+        solvedAnimationJSON: sessionPoseJSON,
+        solve: solve,
+        clipID: retargetClipID,
+        includeHipsTranslation: includeHipsTranslationInUSDZ,
+        pythonExecutablePath: pythonExecutablePath,
+        outputDirectory: outputDir
+    )
+}
+```
+
+Architect verification:
+- Open the generated work directory after export.
+- Inspect session_armature_pose.json.
+- Find selected joint.
+- Check the key frames and nearby frames.
+- If session_armature_pose.json does not contain keyed Euler changes, the failure is in Swift bake.
+- If session_armature_pose.json does contain keyed Euler changes, the failure is Python/USD authoring or skeleton joint mapping.
+
+
+Session Armature JSON Writer
+----------------------------
+
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/Services/AnimatedUSDZExport/SessionArmaturePoseBufferJSONExporter.swift
+
+Current code:
+
+```swift
+enum SessionArmaturePoseBufferJSONExporter {
+    static func write(
+        buffer: SessionArmaturePoseBuffer,
+        to url: URL
+    ) throws {
+        var joints: [String: [[String: Any]]] = [:]
+
+        for jointName in CanonicalRig.jointNames {
+            let keys = buffer.frames.compactMap { frame -> [String: Any]? in
+                guard let transform = frame.joints[jointName] else {
+                    return nil
+                }
+
+                return [
+                    "frame": frame.frameIndex,
+                    "time": frame.timeSeconds,
+                    "localTranslationXYZ": transform.localTranslationXYZ,
+                    "localRotationEulerXYZ": transform.localRotationEulerXYZ,
+                    "localScaleXYZ": transform.localScaleXYZ,
+                    "translation_xyz": transform.localTranslationXYZ,
+                    "rotation_euler_xyz": transform.localRotationEulerXYZ,
+                    "scale_xyz": transform.localScaleXYZ,
+                    "curve": "linear"
+                ]
+            }
+
+            if !keys.isEmpty {
+                joints[jointName] = keys
+            }
+        }
+
+        let root: [String: Any] = [
+            "schema": buffer.schema,
+            "clipID": buffer.clipID,
+            "frameCount": buffer.frames.count,
+            "fps": buffer.fps,
+            "sourceKind": "posed_armature_local_transforms",
+            "transform_space": "local_parent",
+            "rotation_order": "euler_xyz_radians",
+            "translation_policy": "all_local",
+            "scale_policy": "all_local",
+            "joints": joints
+        ]
+    }
+}
+```
+
+Important:
+- The export JSON is dense per frame, not sparse keyframes.
+- Therefore after bake, every frame should contain the selected joint's baked Euler.
+
+
+Python USD Writer Consumption
+-----------------------------
+
+File:
+Gravitas RotoMotion/Gravitas RotoMotion/Services/AnimatedUSDZExport/RotoMotionUSDZRetargetPythonScript.swift
+
+Swift string contains Python. Relevant Python excerpts:
+
+```python
+for joint_name, keys in joints.items():
+    cleaned_keys = []
+
+    for key in keys:
+        rotation = key.get("localRotationEulerXYZ") or key.get("rotation_euler_xyz")
+
+        if not isinstance(rotation, list) or len(rotation) != 3:
+            raise RuntimeError(f"Invalid rotation for {joint_name}: expected localRotationEulerXYZ [x, y, z] radians.")
+
+        translation = key.get("localTranslationXYZ") or key.get("translation_xyz")
+        scale = key.get("localScaleXYZ") or key.get("scale_xyz") or [1, 1, 1]
+
+        cleaned_keys.append({
+            "frame": int(key["frame"]),
+            "time": float(key.get("time", 0.0)),
+            "rotation_euler_xyz": [
+                float(rotation[0]),
+                float(rotation[1]),
+                float(rotation[2]),
+            ],
+            "translation_xyz": [
+                float(translation[0]),
+                float(translation[1]),
+                float(translation[2]),
+            ] if translation is not None else None,
+            "scale_xyz": [...]
+        })
+```
+
+Authoring loop:
+
+```python
+for frame in times:
+    translations = list(rest_translations)
+    rotations = list(rest_rotations)
+    scales = list(rest_scales)
+
+    for canonical_name, target_index in joint_map.items():
+        key = sample_joint_at_frame(solved_joints[canonical_name], frame)
+        rotation = quat_from_euler_xyz(*key["rotation_euler_xyz"])
+
+        if direct_local_transforms:
+            translations[target_index] = vec3f(*key["translation_xyz"])
+            rotations[target_index] = rotation
+            scales[target_index] = Gf.Vec3h(...)
+        else:
+            rotations[target_index] = rest_rotations[target_index] * rotation
+```
+
+Direct transform mode detection:
+
+```swift
+private static func isDirectSessionArmatureTransformInput(_ url: URL) -> Bool {
+    guard let data = try? Data(contentsOf: url),
+          let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        return false
+    }
+
+    let schema = root["schema"] as? String
+    return schema == "com.gravitas.rotomotion.session_armature_snapshot.v0"
+        || schema == "com.gravitas.rotomotion.session_armature_pose.v0"
+}
+```
+
+Architect verification:
+- Confirm session_armature_pose.json schema is com.gravitas.rotomotion.session_armature_pose.v0.
+- That should use direct_local_transforms.
+- In direct_local_transforms, Python replaces target local rotations with quat_from_euler_xyz(baked Euler).
+
+
+Critical Diagnostics To Add Next
+--------------------------------
+
+Add this inside bakeLiveRigAnimationForExport(), inside the solvedFrame loop, immediately before and after applyRotationOverridesToRigForBakeFrame for selectedRotationJoint:
+
+```swift
+if solvedFrame.frameIndex == selectedKeyFrame || selectedKeys.contains(where: { $0.frameIndex == solvedFrame.frameIndex }) {
+    let joint = selectedRotationJoint
+    let before = session.bonesByCanonicalName[joint]?.simdEulerAngles
+    let eval = rotationOverrideEulerForFrame(
+        joint: joint,
+        frameIndex: solvedFrame.frameIndex,
+        timeSeconds: solvedFrame.timeSeconds
+    )
+
+    diagnostics.log("""
+    Bake selected joint override probe BEFORE:
+      frame: \(solvedFrame.frameIndex)
+      time: \(String(format: "%.4f", solvedFrame.timeSeconds))
+      joint: \(joint)
+      hasBone: \(session.bonesByCanonicalName[joint] != nil)
+      inJointOrder: \(session.jointOrder.contains(joint))
+      eval: \(String(describing: eval))
+      boneBefore: \(String(describing: before))
+    """)
+}
+
+applyRotationOverridesToRigForBakeFrame(...)
+
+if selectedKeys.contains(where: { $0.frameIndex == solvedFrame.frameIndex }) {
+    let joint = selectedRotationJoint
+    let after = session.bonesByCanonicalName[joint]?.simdEulerAngles
+    diagnostics.log("""
+    Bake selected joint override probe AFTER:
+      frame: \(solvedFrame.frameIndex)
+      joint: \(joint)
+      boneAfter: \(String(describing: after))
+    """)
+}
+```
+
+After appending the sampled frame:
+
+```swift
+if selectedKeys.contains(where: { $0.frameIndex == solvedFrame.frameIndex }),
+   let sampled = frames.last?.joints[selectedRotationJoint]?.localRotationEulerXYZ {
+    diagnostics.log("""
+    Bake selected joint sampled result:
+      frame: \(solvedFrame.frameIndex)
+      joint: \(selectedRotationJoint)
+      sampledEuler: \(sampled)
+    """)
+}
+```
+
+This will immediately identify which stage is failing:
+- eval nil means evaluator/key frame mismatch.
+- hasBone false means joint name mismatch.
+- inJointOrder false means sampler/export will omit the joint.
+- boneAfter not equal eval means assignment is not sticking.
+- sampledEuler not equal boneAfter means sampler issue.
+- session_armature_pose.json not equal sampledEuler means export-buffer issue.
+
+
+Most Likely Root Causes
+-----------------------
+
+Based on the current code, the likely causes are:
+
+1. Frame index domain mismatch:
+   - UI stores keys at currentFrameIndex.
+   - Bake evaluates using solvedFrame.frameIndex.
+   - Need prove these are the same timeline index.
+
+2. Joint name mismatch:
+   - Timeline uses selectedRotationJoint.
+   - Bake only applies/samples if bonesByCanonicalName[selectedRotationJoint] exists and jointOrder includes it.
+
+3. The wrong bake/export artifact is being inspected:
+   - Export uses bakedRigAnimation only.
+   - The generated session_armature_pose.json is the source of truth to inspect.
+
+4. Duplicate evaluator design:
+   - Viewport uses JointRotationOverrideApplier.
+   - Bake uses RotoMotionViewModel.rotationOverrideEulerForFrame.
+   - These should be unified before further debugging.
+
+5. Stale bake restoration:
+   - bakedRigAnimation is persisted and loaded.
+   - Edits should nil it, but verify in the running app that the status changes to "Bake is stale. Re-bake animation." after every key/edit.
+
+
+Recommended Architect Fix Direction
+-----------------------------------
+
+1. Create one shared service:
+
+```swift
+enum RotationOverrideEvaluator {
+    static func eulerForFrame(
+        joint: String,
+        frameIndex: Int,
+        timeSeconds: Double,
+        overrideLayer: JointRotationOverrideLayer,
+        held: [String: SIMD3<Float>],
+        live: [String: SIMD3<Float>]
+    ) -> SIMD3<Float>?
+}
+```
+
+2. Make viewport, ViewModel live preview, and bake all call that same function.
+
+3. During bake, hard-fail or loud-log if selectedRotationJoint has keys but:
+   - no bone exists for selectedRotationJoint
+   - selectedRotationJoint is not in session.jointOrder
+   - no solve frame overlaps key frame indices
+
+4. Add a post-bake verification step:
+
+```swift
+for key in rotationOverrideLayer.keyframesByJoint[selectedRotationJoint] ?? [] {
+    let bakedFrame = bakedRigAnimation.frames.first { $0.frameIndex == key.frameIndex }
+    let bakedEuler = bakedFrame?.joints[selectedRotationJoint]?.localRotationEulerXYZ
+    diagnostics.log("Post-bake key check frame \(key.frameIndex): key \(key.eulerXYZ), baked \(String(describing: bakedEuler))")
+}
+```
+
+5. Export should also log selected joint baked values from session_armature_pose.json before invoking Python.
+
+The fastest way to localize the current bug is to inspect session_armature_pose.json after export. If selected joint keyed frame values are not there, fix Swift bake. If they are there, fix Python/USD writing or skeleton joint mapping.
