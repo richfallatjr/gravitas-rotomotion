@@ -6,13 +6,17 @@ enum JointRotationOverrideApplier {
     static func apply(
         to session: SkinnedRigSession,
         overrideLayer: JointRotationOverrideLayer,
-        liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
+        heldRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
+        liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>] = [:],
+        liveOverridesActive: Bool = false,
         timeSeconds: Double
     ) {
         applyRotationOverrides(
             to: session,
             overrideLayer: overrideLayer,
+            heldRotationOverrideEulerXYZByJoint: heldRotationOverrideEulerXYZByJoint,
             liveRotationOverrideEulerXYZByJoint: liveRotationOverrideEulerXYZByJoint,
+            liveOverridesActive: liveOverridesActive,
             timeSeconds: timeSeconds
         )
     }
@@ -20,7 +24,9 @@ enum JointRotationOverrideApplier {
     static func applyRotationOverrides(
         to session: SkinnedRigSession,
         overrideLayer: JointRotationOverrideLayer,
+        heldRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
         liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
+        liveOverridesActive: Bool,
         timeSeconds: Double
     ) {
         for joint in CanonicalRig.jointNames {
@@ -28,7 +34,8 @@ enum JointRotationOverrideApplier {
                 continue
             }
 
-            if let live = liveRotationOverrideEulerXYZByJoint[joint] {
+            if liveOverridesActive,
+               let live = liveRotationOverrideEulerXYZByJoint[joint] {
                 bone.simdEulerAngles = ManualRotationConstraint.clampedEulerXYZ(
                     joint: joint,
                     values: live
@@ -36,15 +43,21 @@ enum JointRotationOverrideApplier {
                 continue
             }
 
-            guard let euler = interpolatedRotationOverrideEuler(
+            if let keyed = interpolatedRotationOverrideEuler(
                 joint: joint,
                 timeSeconds: timeSeconds,
                 overrideLayer: overrideLayer
-            ) else {
+            ) {
+                bone.simdEulerAngles = keyed
                 continue
             }
 
-            bone.simdEulerAngles = euler
+            if let held = heldRotationOverrideEulerXYZByJoint[joint] {
+                bone.simdEulerAngles = ManualRotationConstraint.clampedEulerXYZ(
+                    joint: joint,
+                    values: held
+                )
+            }
         }
     }
 
@@ -58,13 +71,7 @@ enum JointRotationOverrideApplier {
             return nil
         }
 
-        let key: JointRotationOverrideLayer.Keyframe?
-
-        if overrideLayer.cleanKeysEnabled {
-            key = keys.first
-        } else {
-            key = keys.last { $0.timeSeconds <= timeSeconds } ?? keys.first
-        }
+        let key = keys.last { $0.timeSeconds <= timeSeconds } ?? keys.first
 
         guard let key else {
             return nil

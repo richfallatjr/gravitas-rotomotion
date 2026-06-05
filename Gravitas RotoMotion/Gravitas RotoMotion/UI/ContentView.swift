@@ -176,7 +176,9 @@ struct ContentView: View {
                 applySolvedPoseToReferenceRig: roto.applySolvedPoseToReferenceRig,
                 rigRotationApplyMode: roto.rigRotationApplyMode,
                 rotationOverrideLayer: roto.rotationOverrideLayer,
+                heldRotationOverrideEulerXYZByJoint: roto.heldRotationOverrideEulerXYZByJoint,
                 liveRotationOverrideEulerXYZByJoint: roto.liveRotationOverrideEulerXYZByJoint,
+                liveRotationOverridesActive: roto.isRotationGizmoDragging,
                 showRawVision: roto.showRawVisionPoints,
                 showNormalizedMeshy: roto.showNormalizedMeshyPoints,
                 showSmoothedMeshy: false,
@@ -184,6 +186,25 @@ struct ContentView: View {
                 showVisionRays: roto.showVisionRays,
                 showRaySolvedRig: roto.showDebugSolvedSkeleton,
                 showSkinnedRig: roto.showSkinnedRig,
+                showRotationGizmo: roto.showRotationGizmo,
+                selectedRotationJoint: roto.selectedRotationJoint,
+                onRotationGizmoEulerChanged: { joint, euler in
+                    DispatchQueue.main.async {
+                        roto.setViewportRotationOverride(joint: joint, eulerXYZ: euler)
+                        uiStatus = roto.status
+                    }
+                },
+                onRotationGizmoStatus: { status in
+                    DispatchQueue.main.async {
+                        roto.rotationGizmoStatus = status
+                    }
+                },
+                onRotationGizmoDragEnded: {
+                    DispatchQueue.main.async {
+                        roto.endViewportRotationGizmoDrag()
+                        uiStatus = roto.status
+                    }
+                },
                 onVideoPlaneSizeChanged: { size in
                     DispatchQueue.main.async {
                         roto.currentVideoPlaneSize = size
@@ -207,33 +228,41 @@ struct ContentView: View {
     }
 
     private var timelineControls: some View {
-        HStack {
-            Button("◀︎") {
-                pauseUIDirect()
-                setUIDirectFrame(uiCurrentFrameIndex - 1)
-            }
-            .disabled(uiDecodedFrames.isEmpty)
+        VStack(spacing: 4) {
+            HStack {
+                Button("◀︎") {
+                    pauseUIDirect()
+                    setUIDirectFrame(uiCurrentFrameIndex - 1)
+                }
+                .disabled(uiDecodedFrames.isEmpty)
 
-            Slider(
-                value: Binding(
-                    get: {
-                        Double(uiCurrentFrameIndex)
-                    },
-                    set: { value in
-                        pauseUIDirect()
-                        setUIDirectFrame(Int(value.rounded()))
-                    }
-                ),
-                in: 0...Double(max(uiDecodedFrames.count - 1, 1)),
-                step: 1
+                Slider(
+                    value: Binding(
+                        get: {
+                            Double(uiCurrentFrameIndex)
+                        },
+                        set: { value in
+                            pauseUIDirect()
+                            setUIDirectFrame(Int(value.rounded()))
+                        }
+                    ),
+                    in: 0...Double(max(uiDecodedFrames.count - 1, 1)),
+                    step: 1
+                )
+                .disabled(uiDecodedFrames.isEmpty)
+
+                Button("▶︎") {
+                    pauseUIDirect()
+                    setUIDirectFrame(uiCurrentFrameIndex + 1)
+                }
+                .disabled(uiDecodedFrames.isEmpty)
+            }
+
+            RotationKeyTimelineMarkers(
+                frameCount: uiDecodedFrames.count,
+                keyframes: roto.rotationOverrideLayer.keyframesByJoint[roto.selectedRotationJoint] ?? []
             )
-            .disabled(uiDecodedFrames.isEmpty)
-
-            Button("▶︎") {
-                pauseUIDirect()
-                setUIDirectFrame(uiCurrentFrameIndex + 1)
-            }
-            .disabled(uiDecodedFrames.isEmpty)
+            .frame(height: 14)
         }
     }
 
@@ -370,6 +399,8 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
+                Toggle("Reference Visible", isOn: $roto.showSkinnedRig)
+
                 Text(roto.skinnedRigStatus)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -394,48 +425,39 @@ struct ContentView: View {
                 }
                 .pickerStyle(.menu)
 
-                Toggle("Clean Keys Mode", isOn: $roto.cleanRotationKeysEnabled)
+                Toggle("Show Viewport Rotation Gizmo", isOn: $roto.showRotationGizmo)
 
-                Text("Rotation override keys on \(roto.selectedRotationJoint): \(selectedRotationKeyCount)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-
-                Text("Constraint: \(ManualRotationConstraint.constrainedAxesDescription(for: roto.selectedRotationJoint))")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-
-                Text("Euler XYZ only.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-
-                RotationOrbiterView(
-                    onDragDelta: { dx, dy in
-                        roto.applyRotationOrbiterDrag(dx: dx, dy: dy)
-                    },
-                    onCommit: {
-                        roto.endRotationOrbiterDrag()
-                    }
-                )
-                .frame(height: 160)
-
-                Button("Key Current Rotation") {
-                    roto.keyCurrentRotationOverride()
+                Button("Add Rotation Key") {
+                    roto.addRotationKeyForSelectedJoint()
                     uiStatus = roto.status
                     pipelineRenderToken += 1
                 }
 
-                Button("Clear Rotation Override For Joint") {
-                    roto.clearRotationOverrideForSelectedJoint()
+                Button("Clear Rotation Keys For Joint") {
+                    roto.clearRotationKeysForSelectedJoint()
+                    uiStatus = roto.status
+                    pipelineRenderToken += 1
+                }
+                .disabled(selectedRotationKeyCount == 0)
+
+                Button("Clear All Rotation Override For Joint") {
+                    roto.clearAllRotationOverrideForSelectedJoint()
                     uiStatus = roto.status
                     pipelineRenderToken += 1
                 }
                 .disabled(
                     selectedRotationKeyCount == 0 &&
+                        roto.heldRotationOverrideEulerXYZByJoint[roto.selectedRotationJoint] == nil &&
                         roto.liveRotationOverrideEulerXYZByJoint[roto.selectedRotationJoint] == nil
                 )
 
                 Text(roto.rotationAuthoringStatus)
                     .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(roto.rotationGizmoStatus)
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -859,6 +881,7 @@ struct ContentView: View {
         roto.rayAnimationSolveResult = nil
         roto.sessionArmatureSnapshot = nil
         roto.sessionArmaturePoseBuffer = nil
+        roto.resetRotationAuthoringForNewSession()
         roto.bakedRigAnimation = nil
         roto.bakedRigAnimationStatus = "Video changed. Bake rig animation before export."
         roto.sessionPoseSource = .none
@@ -1286,4 +1309,29 @@ struct ContentView: View {
         uiSecurityScopedAccessActive = false
     }
 
+}
+
+struct RotationKeyTimelineMarkers: View {
+    let frameCount: Int
+    let keyframes: [JointRotationOverrideLayer.Keyframe]
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Rectangle()
+                    .fill(Color.clear)
+
+                ForEach(keyframes) { key in
+                    let denom = CGFloat(max(frameCount - 1, 1))
+                    let x = CGFloat(key.frameIndex) / denom * geo.size.width
+
+                    Rectangle()
+                        .fill(Color.yellow)
+                        .frame(width: 3, height: 14)
+                        .shadow(color: .yellow, radius: 2)
+                        .offset(x: x)
+                }
+            }
+        }
+    }
 }

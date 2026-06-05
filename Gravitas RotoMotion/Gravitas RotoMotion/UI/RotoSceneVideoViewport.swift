@@ -3,6 +3,38 @@ import SceneKit
 import SwiftUI
 import simd
 
+final class RotoSCNView: SCNView {
+    var onMouseDownInView: ((NSEvent, RotoSCNView) -> Bool)?
+    var onMouseDraggedInView: ((NSEvent, RotoSCNView) -> Void)?
+    var onMouseUpInView: ((NSEvent, RotoSCNView) -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        if onMouseDownInView?(event, self) == true {
+            return
+        }
+
+        super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        if let onMouseDraggedInView {
+            onMouseDraggedInView(event, self)
+            return
+        }
+
+        super.mouseDragged(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if let onMouseUpInView {
+            onMouseUpInView(event, self)
+            return
+        }
+
+        super.mouseUp(with: event)
+    }
+}
+
 private enum ReferenceRigMaterialOverlay {
     private static let materialNamePrefix = "RotoMotionReferenceOverlay"
 
@@ -74,7 +106,9 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let applySolvedPoseToReferenceRig: Bool
     let rigRotationApplyMode: RigRotationApplyMode
     let rotationOverrideLayer: JointRotationOverrideLayer
+    let heldRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>]
     let liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>]
+    let liveRotationOverridesActive: Bool
 
     let showRawVision: Bool
     let showNormalizedMeshy: Bool
@@ -83,6 +117,11 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let showVisionRays: Bool
     let showRaySolvedRig: Bool
     let showSkinnedRig: Bool
+    let showRotationGizmo: Bool
+    let selectedRotationJoint: String
+    let onRotationGizmoEulerChanged: (_ joint: String, _ eulerXYZ: SIMD3<Float>) -> Void
+    let onRotationGizmoStatus: (_ status: String) -> Void
+    let onRotationGizmoDragEnded: (() -> Void)?
     let onVideoPlaneSizeChanged: ((CGSize) -> Void)?
     let onReferenceRigVisibilityStatusChanged: ((String) -> Void)?
 
@@ -95,6 +134,9 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     }
 
     func updateNSView(_ view: SCNView, context: Context) {
+        context.coordinator.onRotationGizmoEulerChanged = onRotationGizmoEulerChanged
+        context.coordinator.onRotationGizmoStatus = onRotationGizmoStatus
+        context.coordinator.onRotationGizmoDragEnded = onRotationGizmoDragEnded
         context.coordinator.onVideoPlaneSizeChanged = onVideoPlaneSizeChanged
         context.coordinator.onReferenceRigVisibilityStatusChanged = onReferenceRigVisibilityStatusChanged
         context.coordinator.update(
@@ -119,14 +161,18 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             applySolvedPoseToReferenceRig: applySolvedPoseToReferenceRig,
             rigRotationApplyMode: rigRotationApplyMode,
             rotationOverrideLayer: rotationOverrideLayer,
+            heldRotationOverrideEulerXYZByJoint: heldRotationOverrideEulerXYZByJoint,
             liveRotationOverrideEulerXYZByJoint: liveRotationOverrideEulerXYZByJoint,
+            liveRotationOverridesActive: liveRotationOverridesActive,
             showRawVision: showRawVision,
             showNormalizedMeshy: showNormalizedMeshy,
             showSmoothedMeshy: showSmoothedMeshy,
             showGroundPlane: showGroundPlane,
             showVisionRays: showVisionRays,
             showRaySolvedRig: showRaySolvedRig,
-            showSkinnedRig: showSkinnedRig
+            showSkinnedRig: showSkinnedRig,
+            showRotationGizmo: showRotationGizmo,
+            selectedRotationJoint: selectedRotationJoint
         )
     }
 
@@ -142,7 +188,11 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private let solvedRigRoot = SCNNode()
         private let solveErrorRoot = SCNNode()
         private let rigBoundsRoot = SCNNode()
+        private let rotationGizmo = ViewportRotationGizmo()
 
+        var onRotationGizmoEulerChanged: ((String, SIMD3<Float>) -> Void)?
+        var onRotationGizmoStatus: ((String) -> Void)?
+        var onRotationGizmoDragEnded: (() -> Void)?
         var onVideoPlaneSizeChanged: ((CGSize) -> Void)?
         var onReferenceRigVisibilityStatusChanged: ((String) -> Void)?
 
@@ -165,9 +215,17 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private var lastReferenceRigPlacementSignature: String?
         private var lastReferenceRigOverlaySignature: String?
         private var lastCurvePinnedPlaybackLogFrame: Int?
+        private var selectedRotationJoint = "Head"
+        private var currentSkinnedRigSession: SkinnedRigSession?
+        private var heldRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>] = [:]
+        private var liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>] = [:]
+        private var activeGizmoAxis: ViewportRotationGizmo.Axis?
+        private var activeGizmoJoint: String?
+        private var activeGizmoStartPoint: CGPoint?
+        private var activeGizmoStartEuler: SIMD3<Float>?
 
         func makeView() -> SCNView {
-            let view = SCNView()
+            let view = RotoSCNView()
 
             view.scene = scene
             view.backgroundColor = .black
@@ -178,6 +236,18 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             view.isPlaying = true
 
             setupScene()
+
+            view.onMouseDownInView = { [weak self] event, view in
+                self?.handleMouseDown(event: event, view: view) ?? false
+            }
+
+            view.onMouseDraggedInView = { [weak self] event, view in
+                self?.handleMouseDragged(event: event, view: view)
+            }
+
+            view.onMouseUpInView = { [weak self] event, view in
+                self?.handleMouseUp(event: event, view: view)
+            }
 
             print("[RotoSceneVideoViewport] makeView created real SCNView viewport")
 
@@ -234,6 +304,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             scene.rootNode.addChildNode(solvedRigRoot)
             scene.rootNode.addChildNode(solveErrorRoot)
             scene.rootNode.addChildNode(rigBoundsRoot)
+            scene.rootNode.addChildNode(rotationGizmo.root)
 
             groundRoot.addChildNode(makeGroundPlaneNode())
         }
@@ -285,15 +356,24 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             applySolvedPoseToReferenceRig: Bool,
             rigRotationApplyMode: RigRotationApplyMode,
             rotationOverrideLayer: JointRotationOverrideLayer,
+            heldRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
             liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
+            liveRotationOverridesActive: Bool,
             showRawVision: Bool,
             showNormalizedMeshy: Bool,
             showSmoothedMeshy: Bool,
             showGroundPlane: Bool,
             showVisionRays: Bool,
             showRaySolvedRig: Bool,
-            showSkinnedRig: Bool
+            showSkinnedRig: Bool,
+            showRotationGizmo: Bool,
+            selectedRotationJoint: String
         ) {
+            self.selectedRotationJoint = selectedRotationJoint
+            self.currentSkinnedRigSession = skinnedRigSession
+            self.heldRotationOverrideEulerXYZByJoint = heldRotationOverrideEulerXYZByJoint
+            self.liveRotationOverrideEulerXYZByJoint = liveRotationOverrideEulerXYZByJoint
+
             view.allowsCameraControl = false
             view.pointOfView = cameraNode
             updateVideoPlaneZIfNeeded(currentVideoPlaneZ)
@@ -325,8 +405,16 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 applySolvedPoseToReferenceRig: applySolvedPoseToReferenceRig,
                 rigRotationApplyMode: rigRotationApplyMode,
                 rotationOverrideLayer: rotationOverrideLayer,
+                heldRotationOverrideEulerXYZByJoint: heldRotationOverrideEulerXYZByJoint,
                 liveRotationOverrideEulerXYZByJoint: liveRotationOverrideEulerXYZByJoint,
+                liveRotationOverridesActive: liveRotationOverridesActive,
                 visible: showSkinnedRig
+            )
+            updateRotationGizmo(
+                session: skinnedRigSession,
+                selectedJoint: selectedRotationJoint,
+                visible: showRotationGizmo,
+                view: view
             )
             updateRawOverlay(rawFrame, visible: showRawVision)
             updateNormalizedOverlay(normalizedFrame, visible: showNormalizedMeshy)
@@ -722,7 +810,9 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             applySolvedPoseToReferenceRig: Bool,
             rigRotationApplyMode: RigRotationApplyMode,
             rotationOverrideLayer: JointRotationOverrideLayer,
+            heldRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
             liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
+            liveRotationOverridesActive: Bool,
             visible: Bool
         ) {
             guard let session else {
@@ -785,7 +875,9 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 JointRotationOverrideApplier.apply(
                     to: session,
                     overrideLayer: rotationOverrideLayer,
+                    heldRotationOverrideEulerXYZByJoint: heldRotationOverrideEulerXYZByJoint,
                     liveRotationOverrideEulerXYZByJoint: liveRotationOverrideEulerXYZByJoint,
+                    liveOverridesActive: liveRotationOverridesActive,
                     timeSeconds: frame.timeSeconds
                 )
 
@@ -797,6 +889,112 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             } else {
                 SkinnedRigRotomationDriver.resetToRest(session: session)
             }
+        }
+
+        private func updateRotationGizmo(
+            session: SkinnedRigSession?,
+            selectedJoint: String,
+            visible: Bool,
+            view: SCNView
+        ) {
+            guard visible,
+                  let session,
+                  let bone = session.bonesByCanonicalName[selectedJoint] else {
+                rotationGizmo.setVisible(false)
+                return
+            }
+
+            rotationGizmo.update(
+                selectedJointWorldPosition: bone.simdWorldPosition,
+                cameraNode: cameraNode,
+                view: view
+            )
+        }
+
+        func handleMouseDown(
+            event: NSEvent,
+            view: RotoSCNView
+        ) -> Bool {
+            let point = view.convert(event.locationInWindow, from: nil)
+            let hits = view.hitTest(
+                point,
+                options: [
+                    SCNHitTestOption.boundingBoxOnly: false,
+                    SCNHitTestOption.searchMode: SCNHitTestSearchMode.all.rawValue
+                ]
+            )
+
+            for hit in hits {
+                if let axis = rotationGizmo.axisFromHitNode(hit.node) {
+                    activeGizmoAxis = axis
+                    activeGizmoJoint = selectedRotationJoint
+                    activeGizmoStartPoint = point
+                    activeGizmoStartEuler = currentEulerForSelectedJoint()
+                    onRotationGizmoStatus?("Started \(axis.rawValue) rotation for \(selectedRotationJoint)")
+                    return true
+                }
+            }
+
+            return false
+        }
+
+        func handleMouseDragged(
+            event: NSEvent,
+            view: RotoSCNView
+        ) {
+            guard let axis = activeGizmoAxis,
+                  let joint = activeGizmoJoint,
+                  let startPoint = activeGizmoStartPoint,
+                  var euler = activeGizmoStartEuler else {
+                return
+            }
+
+            let point = view.convert(event.locationInWindow, from: nil)
+            let dx = Float(point.x - startPoint.x)
+            let dy = Float(point.y - startPoint.y)
+
+            let sensitivity: Float = 0.0025
+
+            switch axis {
+            case .x:
+                euler.x += -dy * sensitivity
+            case .y:
+                euler.y += dx * sensitivity
+            case .z:
+                euler.z += dx * sensitivity
+            case .screen:
+                euler.z += dx * sensitivity
+            }
+
+            euler = ManualRotationConstraint.clampedEulerXYZ(
+                joint: joint,
+                values: euler
+            )
+
+            onRotationGizmoEulerChanged?(joint, euler)
+        }
+
+        func handleMouseUp(
+            event: NSEvent,
+            view: RotoSCNView
+        ) {
+            let endedJoint = activeGizmoJoint
+            activeGizmoAxis = nil
+            activeGizmoJoint = nil
+            activeGizmoStartPoint = nil
+            activeGizmoStartEuler = nil
+
+            if let endedJoint {
+                onRotationGizmoStatus?("Ended rotation for \(endedJoint)")
+                onRotationGizmoDragEnded?()
+            }
+        }
+
+        private func currentEulerForSelectedJoint() -> SIMD3<Float> {
+            liveRotationOverrideEulerXYZByJoint[selectedRotationJoint]
+                ?? heldRotationOverrideEulerXYZByJoint[selectedRotationJoint]
+                ?? currentSkinnedRigSession?.bonesByCanonicalName[selectedRotationJoint]?.simdEulerAngles
+                ?? SIMD3<Float>(0, 0, 0)
         }
 
         private func applyReferenceRigDisplayPlacement(
