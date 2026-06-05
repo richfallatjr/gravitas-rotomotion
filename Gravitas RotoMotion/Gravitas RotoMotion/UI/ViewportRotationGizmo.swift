@@ -2,46 +2,60 @@ import AppKit
 import SceneKit
 import simd
 
-final class ViewportRotationGizmo {
+final class ViewportJointRotationGizmo {
     enum Axis: String {
         case x
         case y
         case z
-        case screen
     }
 
     let root = SCNNode()
+
     private let xRing = SCNNode()
     private let yRing = SCNNode()
     private let zRing = SCNNode()
-    private let screenRing = SCNNode()
 
-    var radius: CGFloat = 0.35
+    private let xAxisLine = SCNNode()
+    private let yAxisLine = SCNNode()
+    private let zAxisLine = SCNNode()
+
+    private let axisLineLength: CGFloat = 0.55
+    private let ringRadius: CGFloat = 0.42
+    private let ringPipeRadius: CGFloat = 0.008
 
     init() {
-        root.name = "ViewportRotationGizmoRoot"
-        root.renderingOrder = 1000
-
-        xRing.name = "RotationGizmoAxis_X"
-        yRing.name = "RotationGizmoAxis_Y"
-        zRing.name = "RotationGizmoAxis_Z"
-        screenRing.name = "RotationGizmoAxis_SCREEN"
-
-        xRing.geometry = makeRingGeometry(color: .systemRed)
-        yRing.geometry = makeRingGeometry(color: .systemGreen)
-        zRing.geometry = makeRingGeometry(color: .systemBlue)
-        screenRing.geometry = makeRingGeometry(color: .systemYellow)
-
-        xRing.eulerAngles = SCNVector3(0, Float.pi / 2.0, 0)
-        yRing.eulerAngles = SCNVector3(Float.pi / 2.0, 0, 0)
-        zRing.eulerAngles = SCNVector3(0, 0, 0)
-
-        for ring in [xRing, yRing, zRing, screenRing] {
-            ring.renderingOrder = 1000
-            root.addChildNode(ring)
-        }
-
+        root.name = "ViewportJointRotationGizmoRoot"
+        root.renderingOrder = 2000
         root.isHidden = true
+
+        xRing.name = "JointRotationGizmo_X"
+        yRing.name = "JointRotationGizmo_Y"
+        zRing.name = "JointRotationGizmo_Z"
+
+        xRing.geometry = makeRing(color: .systemRed)
+        yRing.geometry = makeRing(color: .systemGreen)
+        zRing.geometry = makeRing(color: .systemBlue)
+
+        // SCNTorus lies in local XY plane, normal along local Z.
+        xRing.simdEulerAngles = SIMD3<Float>(0, .pi / 2.0, 0)
+        yRing.simdEulerAngles = SIMD3<Float>(.pi / 2.0, 0, 0)
+        zRing.simdEulerAngles = SIMD3<Float>(0, 0, 0)
+
+        xAxisLine.name = "JointRotationGizmo_XAxisLine"
+        yAxisLine.name = "JointRotationGizmo_YAxisLine"
+        zAxisLine.name = "JointRotationGizmo_ZAxisLine"
+
+        xAxisLine.geometry = makeAxisLine(color: .systemRed)
+        yAxisLine.geometry = makeAxisLine(color: .systemGreen)
+        zAxisLine.geometry = makeAxisLine(color: .systemBlue)
+
+        xAxisLine.simdEulerAngles = SIMD3<Float>(0, 0, .pi / 2.0)
+        zAxisLine.simdEulerAngles = SIMD3<Float>(.pi / 2.0, 0, 0)
+
+        for node in [xRing, yRing, zRing, xAxisLine, yAxisLine, zAxisLine] {
+            node.renderingOrder = 2000
+            root.addChildNode(node)
+        }
     }
 
     func setVisible(_ visible: Bool) {
@@ -49,61 +63,117 @@ final class ViewportRotationGizmo {
     }
 
     func update(
-        selectedJointWorldPosition: SIMD3<Float>?,
+        selectedBone: SCNNode?,
         cameraNode: SCNNode,
-        view: SCNView
+        view: SCNView,
+        space: RotationGizmoSpace,
+        visible: Bool
     ) {
-        guard let selectedJointWorldPosition else {
+        guard visible, let selectedBone else {
             root.isHidden = true
             return
         }
 
         root.isHidden = false
-        root.simdPosition = selectedJointWorldPosition
+        root.simdPosition = selectedBone.simdWorldPosition
 
-        screenRing.simdOrientation = simd_inverse(root.simdWorldOrientation) * cameraNode.simdWorldOrientation
+        switch space {
+        case .local:
+            root.simdOrientation = selectedBone.simdWorldOrientation
+        case .world:
+            root.simdOrientation = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
+        }
 
-        let cameraPos = cameraNode.simdWorldPosition
-        let distance = max(simd_length(selectedJointWorldPosition - cameraPos), 0.001)
+        applyConstantScreenSize(cameraNode: cameraNode, view: view)
+    }
 
-        let fov = Float(cameraNode.camera?.fieldOfView ?? 69.4) * .pi / 180.0
-        let worldHeightAtDepth = 2.0 * distance * tan(fov * 0.5)
-        let pixelHeight = max(Float(view.bounds.height), 1.0)
-
-        let desiredPixels: Float = 120.0
-        let worldDiameter = worldHeightAtDepth * desiredPixels / pixelHeight
-        let worldRadius = worldDiameter * 0.5
-
-        root.simdScale = SIMD3<Float>(repeating: worldRadius / Float(radius))
+    func worldAxis(for axis: Axis) -> SIMD3<Float> {
+        switch axis {
+        case .x:
+            return normalizeSafe(
+                root.simdWorldTransform.columns.0.xyz,
+                fallback: SIMD3<Float>(1, 0, 0)
+            )
+        case .y:
+            return normalizeSafe(
+                root.simdWorldTransform.columns.1.xyz,
+                fallback: SIMD3<Float>(0, 1, 0)
+            )
+        case .z:
+            return normalizeSafe(
+                root.simdWorldTransform.columns.2.xyz,
+                fallback: SIMD3<Float>(0, 0, 1)
+            )
+        }
     }
 
     func axisFromHitNode(_ node: SCNNode?) -> Axis? {
-        var n = node
+        var current = node
 
-        while let current = n {
-            switch current.name {
+        while let n = current {
+            switch n.name {
             case xRing.name:
                 return .x
             case yRing.name:
                 return .y
             case zRing.name:
                 return .z
-            case screenRing.name:
-                return .screen
             default:
-                n = current.parent
+                current = n.parent
             }
         }
 
         return nil
     }
 
-    private func makeRingGeometry(color: NSColor) -> SCNGeometry {
+    private func applyConstantScreenSize(
+        cameraNode: SCNNode,
+        view: SCNView
+    ) {
+        let cameraPosition = cameraNode.simdWorldPosition
+        let distance = max(simd_length(root.simdPosition - cameraPosition), 0.001)
+
+        let worldHeight: Float
+        if let camera = cameraNode.camera,
+           camera.usesOrthographicProjection {
+            worldHeight = Float(camera.orthographicScale)
+        } else {
+            let fov = Float(cameraNode.camera?.fieldOfView ?? 69.4) * .pi / 180.0
+            worldHeight = 2.0 * distance * tan(fov * 0.5)
+        }
+
+        let desiredDiameterPixels: Float = 150.0
+        let pixelHeight = max(Float(view.bounds.height), 1.0)
+        let worldDiameter = worldHeight * desiredDiameterPixels / pixelHeight
+        let worldRadius = worldDiameter * 0.5
+
+        root.simdScale = SIMD3<Float>(
+            repeating: worldRadius / Float(ringRadius)
+        )
+    }
+
+    private func makeRing(color: NSColor) -> SCNGeometry {
         let torus = SCNTorus(
-            ringRadius: radius,
-            pipeRadius: 0.006
+            ringRadius: ringRadius,
+            pipeRadius: ringPipeRadius
         )
 
+        let material = makeMaterial(color: color)
+        torus.materials = [material]
+        return torus
+    }
+
+    private func makeAxisLine(color: NSColor) -> SCNGeometry {
+        let cylinder = SCNCylinder(
+            radius: 0.006,
+            height: axisLineLength
+        )
+
+        cylinder.materials = [makeMaterial(color: color)]
+        return cylinder
+    }
+
+    private func makeMaterial(color: NSColor) -> SCNMaterial {
         let material = SCNMaterial()
         material.lightingModel = .constant
         material.diffuse.contents = color
@@ -111,8 +181,24 @@ final class ViewportRotationGizmo {
         material.isDoubleSided = true
         material.readsFromDepthBuffer = false
         material.writesToDepthBuffer = false
+        return material
+    }
 
-        torus.materials = [material]
-        return torus
+    private func normalizeSafe(
+        _ value: SIMD3<Float>,
+        fallback: SIMD3<Float>
+    ) -> SIMD3<Float> {
+        let length = simd_length(value)
+        guard length > 0.000001 else {
+            return fallback
+        }
+
+        return value / length
+    }
+}
+
+private extension SIMD4 where Scalar == Float {
+    var xyz: SIMD3<Float> {
+        SIMD3<Float>(x, y, z)
     }
 }

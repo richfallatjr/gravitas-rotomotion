@@ -46,6 +46,10 @@ struct ContentView: View {
         .frame(minWidth: 1120, minHeight: 820)
         .onAppear {
             print("[RotoMotion UI] Main ContentView appeared")
+            roto.refreshSelectedJointEulerFields()
+        }
+        .onChange(of: roto.selectedRotationJoint) { _, _ in
+            roto.refreshSelectedJointEulerFields()
         }
         .onDisappear {
             releaseUIVideoAccess()
@@ -179,6 +183,7 @@ struct ContentView: View {
                 heldRotationOverrideEulerXYZByJoint: roto.heldRotationOverrideEulerXYZByJoint,
                 liveRotationOverrideEulerXYZByJoint: roto.liveRotationOverrideEulerXYZByJoint,
                 liveRotationOverridesActive: roto.isRotationGizmoDragging,
+                rotationOverrideRevision: roto.rotationOverrideRevision,
                 showRawVision: roto.showRawVisionPoints,
                 showNormalizedMeshy: roto.showNormalizedMeshyPoints,
                 showSmoothedMeshy: false,
@@ -187,6 +192,7 @@ struct ContentView: View {
                 showRaySolvedRig: roto.showDebugSolvedSkeleton,
                 showSkinnedRig: roto.showSkinnedRig,
                 showRotationGizmo: roto.showRotationGizmo,
+                rotationGizmoSpace: roto.rotationGizmoSpace,
                 selectedRotationJoint: roto.selectedRotationJoint,
                 onRotationGizmoEulerChanged: { joint, euler in
                     DispatchQueue.main.async {
@@ -425,7 +431,77 @@ struct ContentView: View {
                 }
                 .pickerStyle(.menu)
 
-                Toggle("Show Viewport Rotation Gizmo", isOn: $roto.showRotationGizmo)
+                GroupBox("Selected Joint Euler Override") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(roto.selectedRotationJoint)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        HStack {
+                            Text("X")
+                                .frame(width: 20, alignment: .leading)
+
+                            TextField(
+                                "X",
+                                value: Binding(
+                                    get: { roto.selectedJointEulerDegreesX },
+                                    set: { roto.setSelectedJointEulerDegrees(x: $0) }
+                                ),
+                                format: .number.precision(.fractionLength(2))
+                            )
+                            .textFieldStyle(.roundedBorder)
+
+                            Text("°")
+                        }
+
+                        HStack {
+                            Text("Y")
+                                .frame(width: 20, alignment: .leading)
+
+                            TextField(
+                                "Y",
+                                value: Binding(
+                                    get: { roto.selectedJointEulerDegreesY },
+                                    set: { roto.setSelectedJointEulerDegrees(y: $0) }
+                                ),
+                                format: .number.precision(.fractionLength(2))
+                            )
+                            .textFieldStyle(.roundedBorder)
+
+                            Text("°")
+                        }
+
+                        HStack {
+                            Text("Z")
+                                .frame(width: 20, alignment: .leading)
+
+                            TextField(
+                                "Z",
+                                value: Binding(
+                                    get: { roto.selectedJointEulerDegreesZ },
+                                    set: { roto.setSelectedJointEulerDegrees(z: $0) }
+                                ),
+                                format: .number.precision(.fractionLength(2))
+                            )
+                            .textFieldStyle(.roundedBorder)
+
+                            Text("°")
+                        }
+
+                        Text("Euler XYZ override. No W / quaternion channel.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Picker("Gizmo", selection: $roto.rotationGizmoSpace) {
+                    ForEach(RotationGizmoSpace.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Toggle("Rotation Gizmo", isOn: $roto.showRotationGizmo)
 
                 Button("Add Rotation Key") {
                     roto.addRotationKeyForSelectedJoint()
