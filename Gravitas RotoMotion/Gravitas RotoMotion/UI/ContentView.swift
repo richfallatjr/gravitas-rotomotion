@@ -158,6 +158,8 @@ struct ContentView: View {
                 referenceRigYawDegrees: roto.referenceRigYawDegrees,
                 applySolvedPoseToReferenceRig: roto.applySolvedPoseToReferenceRig,
                 rigRotationApplyMode: roto.rigRotationApplyMode,
+                rotationEditLayer: roto.rotationEditLayer,
+                liveRotationDeltaByJoint: roto.liveRotationDeltaByJoint,
                 showRawVision: roto.showRawVisionPoints,
                 showNormalizedMeshy: roto.showNormalizedMeshyPoints,
                 showSmoothedMeshy: false,
@@ -285,6 +287,8 @@ struct ContentView: View {
 
                 sessionPoseSourcePanel
 
+                rotationAuthoringPanel
+
                 usdzRetargetExportPanel
 
                 diagnosticsPanel
@@ -328,6 +332,66 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
 
                 Text(roto.skinnedRigStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(.caption)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var selectedRotationKeyCount: Int {
+        roto.rotationEditLayer.keyframesByJoint[roto.selectedRotationJoint]?.count ?? 0
+    }
+
+    private var rotationAuthoringPanel: some View {
+        GroupBox("Rotation Authoring") {
+            VStack(alignment: .leading, spacing: 8) {
+                Picker("Joint", selection: $roto.selectedRotationJoint) {
+                    ForEach(roto.editableJointNames, id: \.self) { joint in
+                        Text(joint).tag(joint)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                Toggle("Clean Keys Mode", isOn: $roto.cleanRotationKeysEnabled)
+
+                Text("Rotation keys on \(roto.selectedRotationJoint): \(selectedRotationKeyCount)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                RotationOrbiterView(
+                    onDragDelta: { dx, dy in
+                        roto.applyRotationOrbiterDrag(dx: dx, dy: dy)
+                    },
+                    onCommit: {
+                        roto.keyCurrentRotationEdit()
+                    }
+                )
+                .frame(height: 160)
+
+                Button("Key Current Rotation") {
+                    roto.keyCurrentRotationEdit()
+                    uiStatus = roto.status
+                    pipelineRenderToken += 1
+                }
+
+                Button("Clear Selected Joint Keys") {
+                    roto.clearRotationKeysForSelectedJoint()
+                    uiStatus = roto.status
+                    pipelineRenderToken += 1
+                }
+                .disabled(selectedRotationKeyCount == 0)
+
+                Button("Clean All Rotation Keys From Joint") {
+                    roto.cleanAllRotationKeysForSelectedJoint()
+                    uiStatus = roto.status
+                    pipelineRenderToken += 1
+                }
+                .disabled(selectedRotationKeyCount == 0)
+
+                Text(roto.rotationAuthoringStatus)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -406,12 +470,28 @@ struct ContentView: View {
                     .foregroundStyle(roto.openUSDToolStatus?.ready == true ? Color.green : Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
+                Button("Bake Rig Animation For Export") {
+                    roto.bakeLiveRigAnimationForExport()
+                    uiStatus = roto.status
+                    pipelineRenderToken += 1
+                }
+                .disabled(
+                    roto.skinnedRigSession == nil ||
+                    roto.rayAnimationSolveResult == nil ||
+                    roto.currentVideoPlaneSize == nil
+                )
+
+                Text(roto.bakedRigAnimationStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
                 Button("Export Animated Target USDZ") {
                     roto.exportAnimatedTargetUSDZFromRaySolve()
                     uiStatus = roto.status
                     pipelineRenderToken += 1
                 }
-                .disabled(roto.rayAnimationSolveResult == nil)
+                .disabled(roto.rayAnimationSolveResult == nil || roto.bakedRigAnimation == nil)
 
                 Button("Reveal Last Export") {
                     roto.revealLastAnimatedUSDZExport()
@@ -458,6 +538,10 @@ struct ContentView: View {
 
         if roto.rayAnimationSolveResult == nil {
             needs.append("solved ray IK animation")
+        }
+
+        if roto.bakedRigAnimation == nil {
+            needs.append("baked rig animation")
         }
 
         if !needs.isEmpty {
@@ -521,6 +605,8 @@ struct ContentView: View {
                     roto.rayAnimationSolveResult = nil
                     roto.sessionArmatureSnapshot = nil
                     roto.sessionArmaturePoseBuffer = nil
+                    roto.bakedRigAnimation = nil
+                    roto.bakedRigAnimationStatus = "Ray animation cleared. Bake rig animation before export."
                     roto.sessionPoseSource = .none
                     roto.sessionPoseStatus = "No session pose source detected."
                     roto.rayAnimationSolveStatus = "Ray animation solve cleared."
@@ -730,6 +816,8 @@ struct ContentView: View {
         roto.rayAnimationSolveResult = nil
         roto.sessionArmatureSnapshot = nil
         roto.sessionArmaturePoseBuffer = nil
+        roto.bakedRigAnimation = nil
+        roto.bakedRigAnimationStatus = "Video changed. Bake rig animation before export."
         roto.sessionPoseSource = .none
         roto.sessionPoseStatus = "No session pose source detected."
         roto.currentVideoPlaneSize = nil

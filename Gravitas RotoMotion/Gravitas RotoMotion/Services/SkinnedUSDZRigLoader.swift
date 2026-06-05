@@ -7,15 +7,17 @@ import simd
 enum SkinnedUSDZRigLoader {
     static func load(
         url: URL,
+        originalSourceURL: URL? = nil,
         unitScaleToMeters: Float = 0.01,
         sceneUnitsPerMeter: Float = 5.0,
         yawCorrectionRadians: Float = .pi,
         defaultRigZ: Float = -2.0
     ) throws -> SkinnedRigSession {
+        let convertToYUp = false
         let scene = try SCNScene(
             url: url,
             options: [
-                SCNSceneSource.LoadingOption.convertToYUp: false,
+                SCNSceneSource.LoadingOption.convertToYUp: convertToYUp,
                 SCNSceneSource.LoadingOption.convertUnitsToMeters: false
             ]
         )
@@ -123,6 +125,8 @@ enum SkinnedUSDZRigLoader {
 
         return SkinnedRigSession(
             sourceURL: url,
+            originalSourceURL: originalSourceURL ?? url,
+            loadedWithConvertToYUp: convertToYUp,
             displayRootNode: placementNode,
             correctionNode: correctionNode,
             importedRigRootNode: importedRigRoot,

@@ -235,6 +235,9 @@ final class RotoMotionViewModel: ObservableObject {
     var activeCameraFOVDegrees: Double {
         cameraProfile.portraitVerticalFOVDegrees
     }
+    var editableJointNames: [String] {
+        CanonicalRig.jointNames
+    }
     let cameraZ: Float = 0.0
     let defaultReferenceRigZ: Float = -9.0
     let defaultImagePlaneZ: Float = -2000.0
@@ -282,6 +285,34 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var rigRotationApplyMode: RigRotationApplyMode = .restThenDelta {
         didSet { persist(rigRotationApplyMode.rawValue, AppStorageKeys.rigRotationApplyMode) }
     }
+    @Published var bakedRigAnimation: BakedRigAnimation? {
+        didSet { persistCodable(bakedRigAnimation, AppStorageKeys.bakedRigAnimation) }
+    }
+    @Published var bakedRigAnimationStatus = "No baked rig animation." {
+        didSet { persist(bakedRigAnimationStatus, AppStorageKeys.bakedRigAnimationStatus) }
+    }
+    @Published var rotationEditLayer = JointRotationEditLayer.default {
+        didSet { persistCodable(rotationEditLayer, AppStorageKeys.rotationEditLayer) }
+    }
+    @Published var selectedRotationJoint = "Head" {
+        didSet {
+            rotationEditLayer.selectedJoint = selectedRotationJoint
+            persist(selectedRotationJoint, AppStorageKeys.selectedRotationJoint)
+        }
+    }
+    @Published var cleanRotationKeysEnabled = false {
+        didSet {
+            rotationEditLayer.cleanKeysEnabled = cleanRotationKeysEnabled
+            bakedRigAnimation = nil
+            bakedRigAnimationStatus = "Rotation edit mode changed. Bake rig animation before export."
+            applyCurrentFrameToLiveRig()
+            persist(cleanRotationKeysEnabled, AppStorageKeys.cleanRotationKeysEnabled)
+        }
+    }
+    @Published var rotationAuthoringStatus = "No rotation key." {
+        didSet { persist(rotationAuthoringStatus, AppStorageKeys.rotationAuthoringStatus) }
+    }
+    @Published var liveRotationDeltaByJoint: [String: SIMD4<Float>] = [:]
     @Published var sessionSkeletonPath: String?
     @Published var sessionJointPaths: [String] = []
     @Published var sessionJointLeafNames: [String] = []
@@ -432,6 +463,12 @@ final class RotoMotionViewModel: ObservableObject {
         static let referenceRigVisibleHeightFraction = prefix + "referenceRigVisibleHeightFraction"
         static let referenceRigCameraZ = prefix + "referenceRigCameraZ"
         static let rigRotationApplyMode = prefix + "rigRotationApplyMode"
+        static let bakedRigAnimation = prefix + "bakedRigAnimation"
+        static let bakedRigAnimationStatus = prefix + "bakedRigAnimationStatus"
+        static let rotationEditLayer = prefix + "rotationEditLayer"
+        static let selectedRotationJoint = prefix + "selectedRotationJoint"
+        static let cleanRotationKeysEnabled = prefix + "cleanRotationKeysEnabled"
+        static let rotationAuthoringStatus = prefix + "rotationAuthoringStatus"
         static let lastAnimatedUSDZExportURL = prefix + "lastAnimatedUSDZExportURL"
         static let lastAnimatedUSDZExportFolderURL = prefix + "lastAnimatedUSDZExportFolderURL"
         static let showVisionRays = prefix + "showVisionRays"
@@ -486,6 +523,15 @@ final class RotoMotionViewModel: ObservableObject {
         } catch {
             diagnostics.log("App storage encode failed for \(key): \(error.localizedDescription)")
         }
+    }
+
+    private func persistCodable<T: Encodable>(_ value: T?, _ key: String) {
+        guard let value else {
+            Self.appStorage.removeObject(forKey: key)
+            return
+        }
+
+        persistCodable(value, key)
     }
 
     private func storedBool(_ key: String) -> Bool? {
@@ -594,6 +640,16 @@ final class RotoMotionViewModel: ObservableObject {
            let value = RigRotationApplyMode(rawValue: rawValue) {
             rigRotationApplyMode = value
         }
+        if let value = storedCodable(JointRotationEditLayer.self, AppStorageKeys.rotationEditLayer) {
+            rotationEditLayer = value
+            selectedRotationJoint = value.selectedJoint
+            cleanRotationKeysEnabled = value.cleanKeysEnabled
+        }
+        if let value = storedString(AppStorageKeys.selectedRotationJoint) { selectedRotationJoint = value }
+        if let value = storedBool(AppStorageKeys.cleanRotationKeysEnabled) { cleanRotationKeysEnabled = value }
+        if let value = storedString(AppStorageKeys.rotationAuthoringStatus) { rotationAuthoringStatus = value }
+        if let value = storedCodable(BakedRigAnimation.self, AppStorageKeys.bakedRigAnimation) { bakedRigAnimation = value }
+        if let value = storedString(AppStorageKeys.bakedRigAnimationStatus) { bakedRigAnimationStatus = value }
 
         if let value = storedBool(AppStorageKeys.showVisionRays) { showVisionRays = value }
         if let value = storedBool(AppStorageKeys.showRaySolvedRig) { showRaySolvedRig = value }
@@ -1140,6 +1196,8 @@ final class RotoMotionViewModel: ObservableObject {
         showSkinnedRig = true
         sessionArmatureSnapshot = nil
         sessionArmaturePoseBuffer = nil
+        bakedRigAnimation = nil
+        bakedRigAnimationStatus = "Solve changed. Bake rig animation before export."
 
         if skinnedRigSession != nil {
             sessionPoseSource = .posedArmatureLocalTransforms
@@ -1219,6 +1277,8 @@ final class RotoMotionViewModel: ObservableObject {
                 targetCharacterUSDZURL = url
             }
             sessionArmaturePoseBuffer = nil
+            bakedRigAnimation = nil
+            bakedRigAnimationStatus = "Reference rig loaded. Bake rig animation before export."
             sessionArmatureSnapshot = nil
             referenceRigPlacementStatus = """
             Reference rig loaded.
@@ -1251,6 +1311,8 @@ final class RotoMotionViewModel: ObservableObject {
         } catch {
             skinnedRigSession = nil
             sessionArmaturePoseBuffer = nil
+            bakedRigAnimation = nil
+            bakedRigAnimationStatus = "Reference rig load failed. Bake unavailable."
             sessionArmatureSnapshot = nil
             sessionPoseSource = rayAnimationSolveResult == nil ? .none : .drawnJointPositions
             sessionPoseStatus = sessionPoseSource == .none
@@ -1262,52 +1324,138 @@ final class RotoMotionViewModel: ObservableObject {
         }
     }
 
-    func bakeSessionArmaturePoseBuffer() {
+    func bakeLiveRigAnimationForExport() {
         guard let session = skinnedRigSession else {
-            usdzRetargetStatus = "Load skinned rig before baking session pose buffer."
-            status = usdzRetargetStatus
-            diagnostics.log(usdzRetargetStatus)
+            bakedRigAnimationStatus = "Load reference skinned rig first."
+            status = bakedRigAnimationStatus
+            diagnostics.log(bakedRigAnimationStatus)
             return
         }
 
         guard let solve = rayAnimationSolveResult else {
-            usdzRetargetStatus = "Run ray solve before baking session pose buffer."
-            status = usdzRetargetStatus
-            diagnostics.log(usdzRetargetStatus)
+            bakedRigAnimationStatus = "Run Solve Full Animation first."
+            status = bakedRigAnimationStatus
+            diagnostics.log(bakedRigAnimationStatus)
             return
         }
 
-        var frames: [SessionArmaturePoseBuffer.Frame] = []
+        guard let videoPlaneSize = currentVideoPlaneSize else {
+            bakedRigAnimationStatus = "Video plane size unavailable. Show the viewport before baking."
+            status = bakedRigAnimationStatus
+            diagnostics.log(bakedRigAnimationStatus)
+            return
+        }
+
+        let savedRootPosition = session.displayRootNode.simdPosition
+        let savedRootOrientation = session.displayRootNode.simdOrientation
+        let savedRootScale = session.displayRootNode.simdScale
+        let savedBoneTransforms = session.jointOrder.reduce(into: [String: simd_float4x4]()) { result, joint in
+            if let bone = session.bonesByCanonicalName[joint] {
+                result[joint] = bone.simdTransform
+            }
+        }
+
+        defer {
+            session.displayRootNode.simdPosition = savedRootPosition
+            session.displayRootNode.simdOrientation = savedRootOrientation
+            session.displayRootNode.simdScale = savedRootScale
+
+            for (joint, transform) in savedBoneTransforms {
+                session.bonesByCanonicalName[joint]?.simdTransform = transform
+            }
+        }
+
+        var frames: [BakedRigAnimation.Frame] = []
 
         for solvedFrame in solve.frames {
-            applyCurrentReferenceRigDisplayTransform(to: session)
+            guard let normalizedFrame = normalizedFrameClosestTo(
+                timeSeconds: solvedFrame.timeSeconds
+            ) else {
+                continue
+            }
 
-            SkinnedRigRotomationDriver.rotomateFrame(
+            SkinnedRigRotomationDriver.rotomateFrameWithCurvePins(
                 solvedFrame,
-                session: session
+                normalizedFrame: normalizedFrame,
+                session: session,
+                cameraOrigin: SIMD3<Float>(0, 0, 0),
+                videoPlaneSize: videoPlaneSize,
+                videoPlaneZ: currentVideoPlaneZ
+            )
+
+            JointRotationEditApplier.apply(
+                to: session,
+                editLayer: rotationEditLayer,
+                liveRotationDeltaByJoint: liveRotationDeltaByJoint,
+                timeSeconds: solvedFrame.timeSeconds
             )
 
             frames.append(
-                SkinnedRigLocalTransformSampler.sampleFrame(
+                BakedRigAnimationSampler.sample(
                     session: session,
                     frameIndex: solvedFrame.frameIndex,
-                    timeSeconds: solvedFrame.timeSeconds
+                    timeSeconds: solvedFrame.timeSeconds,
+                    jointNames: session.jointOrder
                 )
             )
         }
 
-        sessionArmaturePoseBuffer = .init(
-            schema: "com.gravitas.rotomotion.session_armature_pose.v0",
+        let baked = BakedRigAnimation(
+            schema: "com.gravitas.rotomotion.baked_rig_animation.v0",
             clipID: retargetClipID,
             fps: inferredFPS(solve.frames),
+            jointNames: session.jointOrder,
             frames: frames
         )
 
+        bakedRigAnimation = baked
+        sessionArmaturePoseBuffer = baked.asSessionArmaturePoseBuffer()
         sessionPoseSource = .posedArmatureLocalTransforms
-        sessionPoseStatus = "Actual skinned rig was rotomated to locked 3D positions and sampled: \(frames.count) frames."
-        usdzRetargetStatus = "Baked session armature pose buffer: \(frames.count) frames."
-        status = usdzRetargetStatus
-        diagnostics.log(usdzRetargetStatus)
+        sessionPoseStatus = "Baked immutable rig animation from live curve-pinned pose: \(frames.count) frames."
+        bakedRigAnimationStatus = "Baked \(frames.count) frames for export."
+        usdzRetargetStatus = bakedRigAnimationStatus
+        status = bakedRigAnimationStatus
+        diagnostics.log(bakedRigAnimationStatus)
+    }
+
+    func bakeSessionArmaturePoseBuffer() {
+        bakeLiveRigAnimationForExport()
+    }
+
+    func normalizedFrameClosestTo(
+        timeSeconds: Double
+    ) -> NormalizedMeshyPoseCapture.Frame? {
+        guard let frames = normalizedCapture?.frames,
+              !frames.isEmpty else {
+            return nil
+        }
+
+        return frames.min {
+            abs($0.timeSeconds - timeSeconds) < abs($1.timeSeconds - timeSeconds)
+        }
+    }
+
+    private func exportTargetURLAvoidingViewportCopy(
+        _ url: URL
+    ) -> URL {
+        guard let session = skinnedRigSession else {
+            return url
+        }
+
+        let targetIsViewportCopy = url.standardizedFileURL == session.sourceURL.standardizedFileURL
+        let viewportIsOriginal = session.sourceURL.standardizedFileURL == session.originalSourceURL.standardizedFileURL
+
+        guard targetIsViewportCopy, !viewportIsOriginal else {
+            return url
+        }
+
+        diagnostics.log("""
+        Export target was the viewport-only reference copy. Using original USDZ instead.
+          viewport source: \(session.sourceURL.path)
+          export target: \(session.originalSourceURL.path)
+        """)
+
+        return session.originalSourceURL
     }
 
     private func inferredFPS(
@@ -1357,6 +1505,8 @@ final class RotoMotionViewModel: ObservableObject {
         rayAnimationSolveResult = nil
         sessionArmatureSnapshot = nil
         sessionArmaturePoseBuffer = nil
+        bakedRigAnimation = nil
+        bakedRigAnimationStatus = "Reference changed. Bake rig animation before export."
         sessionPoseSource = .none
         sessionPoseStatus = "No session pose source detected."
         currentVideoPlaneSize = nil
@@ -2239,6 +2389,7 @@ final class RotoMotionViewModel: ObservableObject {
             let unitScale = Float(referenceRigProfile?.unitScaleToMeters ?? 1.0)
             let session = try SkinnedUSDZRigLoader.load(
                 url: viewportRigURL,
+                originalSourceURL: url,
                 unitScaleToMeters: unitScale,
                 sceneUnitsPerMeter: Float(raySceneUnitsPerMeter),
                 yawCorrectionRadians: 0,
@@ -2251,6 +2402,8 @@ final class RotoMotionViewModel: ObservableObject {
                 targetCharacterUSDZURL = url
             }
             sessionArmaturePoseBuffer = nil
+            bakedRigAnimation = nil
+            bakedRigAnimationStatus = "Reference rig loaded. Bake rig animation before export."
             sessionArmatureSnapshot = nil
             referenceRigPlacementStatus = """
             Reference rig loaded.
@@ -2361,6 +2514,143 @@ final class RotoMotionViewModel: ObservableObject {
             0
         )
         session.correctionNode.simdEulerAngles = SIMD3<Float>(0, 0, 0)
+    }
+
+    func applyRotationOrbiterDrag(
+        dx: CGFloat,
+        dy: CGFloat
+    ) {
+        let joint = selectedRotationJoint
+        let sensitivity: Float = 0.01
+        let yaw = simd_quatf(
+            angle: Float(dx) * sensitivity,
+            axis: SIMD3<Float>(0, 1, 0)
+        )
+        let pitch = simd_quatf(
+            angle: Float(dy) * sensitivity,
+            axis: SIMD3<Float>(1, 0, 0)
+        )
+        let increment = yaw * pitch
+        let current = liveRotationDeltaByJoint[joint]
+            .map(JointRotationEditApplier.quatFromWXYZ)
+            ?? simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
+        let updated = increment * current
+
+        liveRotationDeltaByJoint[joint] = SIMD4<Float>(
+            updated.vector.w,
+            updated.vector.x,
+            updated.vector.y,
+            updated.vector.z
+        )
+
+        rotationAuthoringStatus = "Editing \(joint)"
+        status = rotationAuthoringStatus
+        bakedRigAnimation = nil
+        bakedRigAnimationStatus = "Rotation edits changed. Bake rig animation before export."
+        applyCurrentFrameToLiveRig()
+    }
+
+    func applyCurrentFrameToLiveRig() {
+        guard let session = skinnedRigSession,
+              let solvedFrame = currentRaySolvedFrame,
+              let normalizedFrame = currentNormalizedFrame,
+              let videoPlaneSize = currentVideoPlaneSize else {
+            return
+        }
+
+        SkinnedRigRotomationDriver.rotomateFrameWithCurvePins(
+            solvedFrame,
+            normalizedFrame: normalizedFrame,
+            session: session,
+            cameraOrigin: SIMD3<Float>(0, 0, 0),
+            videoPlaneSize: videoPlaneSize,
+            videoPlaneZ: currentVideoPlaneZ
+        )
+
+        applyRotationEditLayerToLiveRig()
+    }
+
+    func applyRotationEditLayerToLiveRig() {
+        guard let session = skinnedRigSession else {
+            return
+        }
+
+        JointRotationEditApplier.apply(
+            to: session,
+            editLayer: rotationEditLayer,
+            liveRotationDeltaByJoint: liveRotationDeltaByJoint,
+            timeSeconds: currentVideoTimeSeconds
+        )
+    }
+
+    func keyCurrentRotationEdit() {
+        let joint = selectedRotationJoint
+
+        guard let delta = liveRotationDeltaByJoint[joint] else {
+            rotationAuthoringStatus = "No live rotation delta for \(joint)."
+            return
+        }
+
+        let key = JointRotationEditLayer.Keyframe(
+            frameIndex: currentFrameIndex,
+            timeSeconds: currentVideoTimeSeconds,
+            deltaRotationWXYZ: [
+                Double(delta.x),
+                Double(delta.y),
+                Double(delta.z),
+                Double(delta.w)
+            ]
+        )
+
+        if cleanRotationKeysEnabled {
+            rotationEditLayer.keyframesByJoint[joint] = [key]
+            rotationAuthoringStatus = "Clean-keyed \(joint) with one held key."
+        } else {
+            var keys = rotationEditLayer.keyframesByJoint[joint] ?? []
+            keys.removeAll { $0.frameIndex == currentFrameIndex }
+            keys.append(key)
+            keys.sort { $0.timeSeconds < $1.timeSeconds }
+            rotationEditLayer.keyframesByJoint[joint] = keys
+            rotationAuthoringStatus = "Keyed \(joint) at frame \(currentFrameIndex)."
+        }
+
+        status = rotationAuthoringStatus
+        liveRotationDeltaByJoint[joint] = nil
+        bakedRigAnimation = nil
+        bakedRigAnimationStatus = "Rotation edits changed. Bake rig animation before export."
+        diagnostics.log(rotationAuthoringStatus)
+    }
+
+    func clearRotationKeysForSelectedJoint() {
+        rotationEditLayer.keyframesByJoint[selectedRotationJoint] = []
+        liveRotationDeltaByJoint[selectedRotationJoint] = nil
+        rotationAuthoringStatus = "Cleared keys for \(selectedRotationJoint)."
+        status = rotationAuthoringStatus
+        bakedRigAnimation = nil
+        bakedRigAnimationStatus = "Rotation edits changed. Bake rig animation before export."
+        diagnostics.log(rotationAuthoringStatus)
+        applyCurrentFrameToLiveRig()
+    }
+
+    func cleanAllRotationKeysForSelectedJoint() {
+        let joint = selectedRotationJoint
+        let oldCount = rotationEditLayer.keyframesByJoint[joint]?.count ?? 0
+
+        // Rotation edit cleanup only.
+        // Does not modify ray-solved positions, normalized joints, or curve-pinned solve data.
+        rotationEditLayer.keyframesByJoint[joint] = []
+        liveRotationDeltaByJoint[joint] = nil
+
+        rotationAuthoringStatus = """
+        Cleaned all rotation keys for \(joint).
+        Removed \(oldCount) keys.
+        """
+
+        bakedRigAnimation = nil
+        bakedRigAnimationStatus = "Rotation edits changed. Bake rig animation before export."
+        status = rotationAuthoringStatus
+        diagnostics.log(rotationAuthoringStatus)
+        applyCurrentFrameToLiveRig()
     }
 
     func inspectCurrentJointFrame() {
@@ -2577,21 +2867,16 @@ final class RotoMotionViewModel: ObservableObject {
             return
         }
 
-        if sessionArmaturePoseBuffer == nil {
-            bakeSessionArmaturePoseBuffer()
-        }
-
-        guard let poseBuffer = sessionArmaturePoseBuffer else {
-            usdzRetargetStatus = """
-            Session pose source is posedArmatureLocalTransforms, but no session armature pose buffer was captured.
-            Cannot export animated target USDZ.
-            """
+        guard let bakedRigAnimation else {
+            usdzRetargetStatus = "Bake rig animation before export."
             status = usdzRetargetStatus
             diagnostics.log(usdzRetargetStatus)
             return
         }
 
-        let targetURL: URL
+        let poseBuffer = bakedRigAnimation.asSessionArmaturePoseBuffer()
+
+        var targetURL: URL
 
         if let existingTarget = targetCharacterUSDZURL {
             targetURL = existingTarget
@@ -2609,6 +2894,9 @@ final class RotoMotionViewModel: ObservableObject {
             diagnostics.log(usdzRetargetStatus)
             return
         }
+
+        targetURL = exportTargetURLAvoidingViewportCopy(targetURL)
+        targetCharacterUSDZURL = targetURL
 
         let toolStatus = OpenUSDToolChecker.check()
         openUSDToolStatus = toolStatus
@@ -2680,6 +2968,28 @@ final class RotoMotionViewModel: ObservableObject {
             )
 
             diagnostics.log("Wrote posed skinned rig armature buffer JSON: \(sessionPoseJSON.path)")
+
+            let viewportSource = skinnedRigSession?.sourceURL
+            let originalSource = skinnedRigSession?.originalSourceURL
+            let exportUsesOriginalSource: Bool
+
+            if let originalSource {
+                exportUsesOriginalSource = targetURL.standardizedFileURL == originalSource.standardizedFileURL
+            } else {
+                exportUsesOriginalSource = true
+            }
+
+            diagnostics.log("""
+            Session export source:
+              bone local transforms only: true
+              includes display placement transform: false
+              includes display correction transform: false
+              loadedWithConvertToYUp: \(skinnedRigSession?.loadedWithConvertToYUp ?? false)
+              exportTargetIsOriginalUSDZ: \(exportUsesOriginalSource)
+              viewport source: \(viewportSource?.path ?? "nil")
+              original source: \(originalSource?.path ?? "nil")
+              export target: \(targetURL.path)
+            """)
 
             if sessionJointPaths.isEmpty {
                 if let referenceRigProfile {

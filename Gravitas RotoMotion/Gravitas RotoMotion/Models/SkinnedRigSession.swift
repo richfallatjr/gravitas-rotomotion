@@ -4,7 +4,12 @@ import SceneKit
 import simd
 
 final class SkinnedRigSession: ObservableObject {
+    /// File loaded into SceneKit for viewport display. This may be a temporary opacity-modified copy.
     let sourceURL: URL
+
+    /// Original user-selected USDZ. Export must use this, not a viewport-only opacity copy.
+    let originalSourceURL: URL
+    let loadedWithConvertToYUp: Bool
 
     /// Normal node that can be added to the RotoMotion viewport scene.
     /// This is not the loaded SCNScene.rootNode.
@@ -33,6 +38,8 @@ final class SkinnedRigSession: ObservableObject {
 
     init(
         sourceURL: URL,
+        originalSourceURL: URL,
+        loadedWithConvertToYUp: Bool,
         displayRootNode: SCNNode,
         correctionNode: SCNNode,
         importedRigRootNode: SCNNode,
@@ -48,6 +55,8 @@ final class SkinnedRigSession: ObservableObject {
         unitScaleMetadata: Float
     ) {
         self.sourceURL = sourceURL
+        self.originalSourceURL = originalSourceURL
+        self.loadedWithConvertToYUp = loadedWithConvertToYUp
         self.displayRootNode = displayRootNode
         self.correctionNode = correctionNode
         self.importedRigRootNode = importedRigRootNode

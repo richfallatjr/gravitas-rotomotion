@@ -73,6 +73,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let referenceRigYawDegrees: Double
     let applySolvedPoseToReferenceRig: Bool
     let rigRotationApplyMode: RigRotationApplyMode
+    let rotationEditLayer: JointRotationEditLayer
+    let liveRotationDeltaByJoint: [String: SIMD4<Float>]
 
     let showRawVision: Bool
     let showNormalizedMeshy: Bool
@@ -116,6 +118,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             referenceRigYawDegrees: referenceRigYawDegrees,
             applySolvedPoseToReferenceRig: applySolvedPoseToReferenceRig,
             rigRotationApplyMode: rigRotationApplyMode,
+            rotationEditLayer: rotationEditLayer,
+            liveRotationDeltaByJoint: liveRotationDeltaByJoint,
             showRawVision: showRawVision,
             showNormalizedMeshy: showNormalizedMeshy,
             showSmoothedMeshy: showSmoothedMeshy,
@@ -280,6 +284,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             referenceRigYawDegrees: Double,
             applySolvedPoseToReferenceRig: Bool,
             rigRotationApplyMode: RigRotationApplyMode,
+            rotationEditLayer: JointRotationEditLayer,
+            liveRotationDeltaByJoint: [String: SIMD4<Float>],
             showRawVision: Bool,
             showNormalizedMeshy: Bool,
             showSmoothedMeshy: Bool,
@@ -318,6 +324,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 referenceRigYawDegrees: referenceRigYawDegrees,
                 applySolvedPoseToReferenceRig: applySolvedPoseToReferenceRig,
                 rigRotationApplyMode: rigRotationApplyMode,
+                rotationEditLayer: rotationEditLayer,
+                liveRotationDeltaByJoint: liveRotationDeltaByJoint,
                 visible: showSkinnedRig
             )
             updateRawOverlay(rawFrame, visible: showRawVision)
@@ -713,6 +721,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             referenceRigYawDegrees: Double,
             applySolvedPoseToReferenceRig: Bool,
             rigRotationApplyMode: RigRotationApplyMode,
+            rotationEditLayer: JointRotationEditLayer,
+            liveRotationDeltaByJoint: [String: SIMD4<Float>],
             visible: Bool
         ) {
             guard let session else {
@@ -770,6 +780,13 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                     cameraOrigin: SIMD3<Float>(0, 0, 0),
                     videoPlaneSize: videoPlaneSize,
                     videoPlaneZ: currentVideoPlaneZ
+                )
+
+                JointRotationEditApplier.apply(
+                    to: session,
+                    editLayer: rotationEditLayer,
+                    liveRotationDeltaByJoint: liveRotationDeltaByJoint,
+                    timeSeconds: frame.timeSeconds
                 )
 
                 if frameIndex % 30 == 0,
