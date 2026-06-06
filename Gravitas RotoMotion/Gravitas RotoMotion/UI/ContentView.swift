@@ -2079,6 +2079,7 @@ struct ContentView: View {
 struct RotationEulerChannelRow: View {
     @ObservedObject var roto: RotoMotionViewModel
     let axis: RotationFieldAxis
+    @FocusState private var isFieldFocused: Bool
 
     private var value: Binding<Double> {
         switch axis {
@@ -2142,6 +2143,7 @@ struct RotationEulerChannelRow: View {
             .textFieldStyle(.roundedBorder)
             .monospacedDigit()
             .frame(width: 90)
+            .focused($isFieldFocused)
             .overlay(
                 RoundedRectangle(cornerRadius: 5)
                     .stroke(
@@ -2155,6 +2157,11 @@ struct RotationEulerChannelRow: View {
             )
             .onTapGesture {
                 roto.selectRotationScrollAxis(axis)
+            }
+            .onChange(of: isFieldFocused) { _, focused in
+                if focused {
+                    roto.selectRotationScrollAxis(axis)
+                }
             }
 
             Text("°")
@@ -2202,6 +2209,7 @@ struct RotationScrollWheelCapture: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.roto = roto
+        context.coordinator.updateSelectedAxis(roto.selectedRotationFieldAxis)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -2210,6 +2218,7 @@ struct RotationScrollWheelCapture: NSViewRepresentable {
 
     final class Coordinator {
         var roto: RotoMotionViewModel
+        private var selectedAxis: RotationFieldAxis?
         private var monitor: Any?
         private var accumulator: CGFloat = 0
 
@@ -2229,33 +2238,22 @@ struct RotationScrollWheelCapture: NSViewRepresentable {
             monitor = NSEvent.addLocalMonitorForEvents(
                 matching: .scrollWheel
             ) { [weak self] event in
-                let dominant: CGFloat
-
-                if abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) {
-                    dominant = event.scrollingDeltaX
-                } else {
-                    dominant = event.scrollingDeltaY
+                guard let self,
+                      let axis = self.selectedAxis else {
+                    return event
                 }
 
-                let hasPreciseScrollingDeltas = event.hasPreciseScrollingDeltas
-
-                var consumed = false
-                MainActor.assumeIsolated {
-                    guard let self,
-                          let axis = self.roto.selectedRotationFieldAxis else {
-                        return
-                    }
-
-                    self.handle(
-                        dominantDelta: dominant,
-                        hasPreciseScrollingDeltas: hasPreciseScrollingDeltas,
-                        axis: axis
-                    )
-                    consumed = true
-                }
-
-                return consumed ? nil : event
+                self.handle(event: event, axis: axis)
+                return nil
             }
+        }
+
+        func updateSelectedAxis(_ axis: RotationFieldAxis?) {
+            if selectedAxis != axis {
+                accumulator = 0
+            }
+
+            selectedAxis = axis
         }
 
         func uninstall() {
@@ -2265,18 +2263,22 @@ struct RotationScrollWheelCapture: NSViewRepresentable {
             }
         }
 
-        private func handle(
-            dominantDelta: CGFloat,
-            hasPreciseScrollingDeltas: Bool,
-            axis: RotationFieldAxis
-        ) {
+        private func handle(event: NSEvent, axis: RotationFieldAxis) {
+            let dominantDelta: CGFloat
+
+            if abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) {
+                dominantDelta = event.scrollingDeltaX
+            } else {
+                dominantDelta = event.scrollingDeltaY
+            }
+
             guard abs(dominantDelta) > 0.0001 else {
                 return
             }
 
             accumulator += dominantDelta
 
-            let unitsPerStep: CGFloat = hasPreciseScrollingDeltas ? 10.0 : 1.0
+            let unitsPerStep: CGFloat = event.hasPreciseScrollingDeltas ? 10.0 : 1.0
             let wholeSteps = Int((accumulator / unitsPerStep).rounded(.towardZero))
 
             guard wholeSteps != 0 else {
