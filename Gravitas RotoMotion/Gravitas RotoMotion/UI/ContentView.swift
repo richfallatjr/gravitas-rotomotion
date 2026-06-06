@@ -172,7 +172,8 @@ struct ContentView: View {
                 rightNormalizedFrame: currentRightNormalizedFrame,
                 smoothedFrame: nil,
                 stereoJointFrame: roto.spatialStereoAvailable ? roto.currentStereoJointFrame : nil,
-                stereoTargetFrame: roto.currentStereoTargetFrame,
+                conditionedStereoFrame: roto.currentConditionedStereoFrame,
+                jointDepthEvidenceFrame: roto.currentJointDepthEvidenceFrame,
                 groundPlane: roto.groundPlane,
                 raySolveResult: roto.currentRaySolveResult,
                 raySolvedFrame: roto.currentRaySolvedFrame,
@@ -198,7 +199,9 @@ struct ContentView: View {
                 showRightEyeNormalizedOverlay: roto.shouldShowRightEyeNormalizedOverlay,
                 showSmoothedMeshy: false,
                 showStereo3DSkeleton: roto.showStereo3DSkeleton && roto.spatialStereoAvailable,
+                showConditionedStereoSkeleton: roto.showConditionedStereoSkeleton && roto.conditionedStereoJointCapture != nil,
                 showStereoReprojectionOverlay: roto.spatialStereoAvailable,
+                showJointDepthValidationOverlay: roto.showJointDepthValidationOverlay && roto.jointDepthEvidenceCapture != nil,
                 showGroundPlane: roto.groundPlane.visible,
                 showVisionRays: roto.showVisionRays,
                 showRaySolvedRig: roto.showDebugSolvedSkeleton,
@@ -493,8 +496,26 @@ struct ContentView: View {
                 }
                 .disabled(roto.normalizedLeftCapture == nil || roto.normalizedRightCapture == nil)
 
+                Button("Build Disparity Map") {
+                    Task {
+                        await roto.buildSpatialDisparityMaps()
+                        uiStatus = roto.status
+                        pipelineRenderToken += 1
+                    }
+                }
+                .disabled(
+                    roto.isWorking ||
+                    roto.captureMode != .spatialVideo ||
+                    roto.spatialLeftEyeFrames.isEmpty ||
+                    roto.spatialRightEyeFrames.isEmpty ||
+                    roto.spatialVideoMetadata == nil
+                )
+
                 Toggle("Stereo 3D Skeleton", isOn: $roto.showStereo3DSkeleton)
                     .disabled(!roto.spatialStereoAvailable)
+
+                Toggle("Joint Depth Validation", isOn: $roto.showJointDepthValidationOverlay)
+                    .disabled(roto.jointDepthEvidenceCapture == nil)
 
                 Text("Left frames: \(roto.leftEyeFrames.count), right frames: \(roto.rightEyeFrames.count)")
                     .font(.caption2)
@@ -505,6 +526,11 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
 
                 Text(roto.spatialStereoAvailable ? "Stereo 3D skeleton available." : roto.spatialDepthStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(roto.spatialDisparityStatus)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

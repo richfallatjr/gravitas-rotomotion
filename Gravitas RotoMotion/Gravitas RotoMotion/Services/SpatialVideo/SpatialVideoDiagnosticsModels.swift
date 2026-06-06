@@ -2,12 +2,12 @@ import CoreGraphics
 import CoreMedia
 import Foundation
 
-enum StereoEye: String, Codable {
+enum StereoEye: String, Codable, Sendable {
     case left
     case right
 }
 
-struct SpatialEyeFrameDiagnostic: Codable, Identifiable {
+struct SpatialEyeFrameDiagnostic: Codable, Identifiable, Sendable {
     var id: String { "\(eye.rawValue)_\(frameIndex)" }
 
     let eye: StereoEye
@@ -42,7 +42,7 @@ struct SpatialEyeFrameDiagnostic: Codable, Identifiable {
     let pngPath: String?
 }
 
-struct SpatialDecodedEyeFrame {
+struct SpatialDecodedEyeFrame: @unchecked Sendable {
     let eye: StereoEye
     let frameIndex: Int
     let presentationTime: CMTime

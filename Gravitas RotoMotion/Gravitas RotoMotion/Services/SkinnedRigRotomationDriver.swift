@@ -1243,3 +1243,252 @@ enum StereoTargetRigRotomationDriver {
         """)
     }
 }
+
+enum ConditionedStereoTargetRigRotomationDriver {
+    static func rotomateFrame(
+        _ frame: ConditionedStereoJointCapture.Frame,
+        session: SkinnedRigSession,
+        metersToSceneUnits: Float,
+        iterations: Int = 6
+    ) {
+        let targetScale = max(metersToSceneUnits, 0.0001)
+
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = 0
+
+        resetBonesToRestOnly(session: session)
+        placeRootFromConditionedPelvis(
+            frame,
+            session: session,
+            targetScale: targetScale
+        )
+
+        for _ in 0..<iterations {
+            solveChain(
+                ["LeftUpLeg", "LeftLeg", "LeftFoot", "LeftToeBase"],
+                frame,
+                session: session,
+                targetScale: targetScale
+            )
+            solveChain(
+                ["RightUpLeg", "RightLeg", "RightFoot", "RightToeBase"],
+                frame,
+                session: session,
+                targetScale: targetScale
+            )
+            solveChain(
+                ["Hips", "Spine", "neck", "Head", "headfront"],
+                frame,
+                session: session,
+                targetScale: targetScale
+            )
+            solveChain(
+                ["LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand"],
+                frame,
+                session: session,
+                targetScale: targetScale
+            )
+            solveChain(
+                ["RightShoulder", "RightArm", "RightForeArm", "RightHand"],
+                frame,
+                session: session,
+                targetScale: targetScale
+            )
+        }
+
+        SCNTransaction.commit()
+        logFitError(
+            frame,
+            session: session,
+            targetScale: targetScale
+        )
+    }
+
+    private static func resetBonesToRestOnly(
+        session: SkinnedRigSession
+    ) {
+        for jointName in session.jointOrder {
+            guard let bone = session.bonesByCanonicalName[jointName],
+                  let restPosition = session.restLocalPositions[jointName],
+                  let restOrientation = session.restLocalOrientations[jointName],
+                  let restScale = session.restLocalScales[jointName] else {
+                continue
+            }
+
+            bone.simdPosition = restPosition
+            bone.simdOrientation = restOrientation
+            bone.simdScale = restScale
+        }
+    }
+
+    private static func conditionedPosition(
+        _ joint: String,
+        in frame: ConditionedStereoJointCapture.Frame,
+        targetScale: Float
+    ) -> SIMD3<Float>? {
+        guard let target = frame.joints[joint],
+              target.positionCameraXYZ.count == 3 else {
+            return nil
+        }
+
+        return SIMD3<Float>(
+            Float(target.positionCameraXYZ[0]),
+            Float(target.positionCameraXYZ[1]),
+            Float(target.positionCameraXYZ[2])
+        ) * targetScale
+    }
+
+    private static func placeRootFromConditionedPelvis(
+        _ frame: ConditionedStereoJointCapture.Frame,
+        session: SkinnedRigSession,
+        targetScale: Float
+    ) {
+        let targetNames = [
+            "Hips",
+            "LeftUpLeg",
+            "RightUpLeg"
+        ]
+        var deltas: [SIMD3<Float>] = []
+
+        for name in targetNames {
+            guard let bone = session.bonesByCanonicalName[name],
+                  let target = conditionedPosition(
+                    name,
+                    in: frame,
+                    targetScale: targetScale
+                  ) else {
+                continue
+            }
+
+            deltas.append(target - bone.simdWorldPosition)
+        }
+
+        guard !deltas.isEmpty else {
+            return
+        }
+
+        let averageDelta = deltas.reduce(
+            SIMD3<Float>(0, 0, 0),
+            +
+        ) / Float(deltas.count)
+
+        session.displayRootNode.simdPosition += averageDelta
+    }
+
+    private static func solveChain(
+        _ chain: [String],
+        _ frame: ConditionedStereoJointCapture.Frame,
+        session: SkinnedRigSession,
+        targetScale: Float
+    ) {
+        guard chain.count >= 2 else {
+            return
+        }
+
+        for i in 0..<(chain.count - 1) {
+            let parentName = chain[i]
+            let childName = chain[i + 1]
+
+            guard let parentNode = session.bonesByCanonicalName[parentName],
+                  let childNode = session.bonesByCanonicalName[childName],
+                  let childTarget = conditionedPosition(
+                    childName,
+                    in: frame,
+                    targetScale: targetScale
+                  ) else {
+                continue
+            }
+
+            rotateParentToMoveChild(
+                parentNode: parentNode,
+                childNode: childNode,
+                childTarget: childTarget
+            )
+        }
+    }
+
+    private static func rotateParentToMoveChild(
+        parentNode: SCNNode,
+        childNode: SCNNode,
+        childTarget: SIMD3<Float>
+    ) {
+        let parentWorld = parentNode.simdWorldPosition
+        let childWorld = childNode.simdWorldPosition
+        let current = childWorld - parentWorld
+        let target = childTarget - parentWorld
+
+        guard simd_length(current) > 0.0001,
+              simd_length(target) > 0.0001 else {
+            return
+        }
+
+        let deltaWorld = simd_quatf(
+            from: simd_normalize(current),
+            to: simd_normalize(target)
+        )
+
+        applyWorldRotationDelta(
+            deltaWorld,
+            to: parentNode
+        )
+    }
+
+    private static func applyWorldRotationDelta(
+        _ deltaWorld: simd_quatf,
+        to node: SCNNode
+    ) {
+        guard let parent = node.parent else {
+            node.simdOrientation = deltaWorld * node.simdOrientation
+            return
+        }
+
+        let parentWorld = parent.simdWorldOrientation
+        let localDelta = simd_inverse(parentWorld) * deltaWorld * parentWorld
+
+        node.simdOrientation = localDelta * node.simdOrientation
+    }
+
+    private static func logFitError(
+        _ frame: ConditionedStereoJointCapture.Frame,
+        session: SkinnedRigSession,
+        targetScale: Float
+    ) {
+        var total: Float = 0
+        var count: Float = 0
+        var worstJoint = "none"
+        var worstError: Float = 0
+
+        for jointName in session.jointOrder {
+            guard let bone = session.bonesByCanonicalName[jointName],
+                  let target = conditionedPosition(
+                    jointName,
+                    in: frame,
+                    targetScale: targetScale
+                  ) else {
+                continue
+            }
+
+            let error = simd_length(bone.simdWorldPosition - target)
+            total += error
+            count += 1
+
+            if error > worstError {
+                worstError = error
+                worstJoint = jointName
+            }
+        }
+
+        guard frame.frameIndex == 0 || frame.frameIndex % 30 == 0 else {
+            return
+        }
+
+        print("""
+        [ConditionedStereoTargetRigRotomation] fit error
+          frame: \(frame.frameIndex)
+          avg: \(count > 0 ? total / count : 0)
+          worstJoint: \(worstJoint)
+          worstError: \(worstError)
+          metersToSceneUnits: \(targetScale)
+        """)
+    }
+}
