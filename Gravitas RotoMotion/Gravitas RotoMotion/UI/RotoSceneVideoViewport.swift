@@ -132,6 +132,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let selectedDisparityPlateOverlay: DisparityPlateOverlayKind
     let disparityPlateOverlayOpacity: Double
     let showFusedStereoTargets: Bool
+    let showSpatialTargetBalls: Bool
+    let spatialTargetBallScale: Double
     let showGroundPlane: Bool
     let showVisionRays: Bool
     let showRaySolvedRig: Bool
@@ -210,6 +212,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             selectedDisparityPlateOverlay: selectedDisparityPlateOverlay,
             disparityPlateOverlayOpacity: disparityPlateOverlayOpacity,
             showFusedStereoTargets: showFusedStereoTargets,
+            showSpatialTargetBalls: showSpatialTargetBalls,
+            spatialTargetBallScale: spatialTargetBallScale,
             showGroundPlane: showGroundPlane,
             showVisionRays: showVisionRays,
             showRaySolvedRig: showRaySolvedRig,
@@ -462,6 +466,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             selectedDisparityPlateOverlay: DisparityPlateOverlayKind,
             disparityPlateOverlayOpacity: Double,
             showFusedStereoTargets: Bool,
+            showSpatialTargetBalls: Bool,
+            spatialTargetBallScale: Double,
             showGroundPlane: Bool,
             showVisionRays: Bool,
             showRaySolvedRig: Bool,
@@ -586,7 +592,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 fusedFrame: fusedStereoTargetFrame,
                 solveTargetMode: solveTargetMode,
                 alignment: stereoToRigAlignment,
-                visible: stereoToRigAlignment.isValid
+                visible: showSpatialTargetBalls && stereoToRigAlignment.isValid,
+                scale: spatialTargetBallScale
             )
             updateRaySolveDebug(
                 result: raySolveResult,
@@ -1425,7 +1432,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             fusedFrame: FusedStereoJointTargetCapture.Frame?,
             solveTargetMode: RotoSolveTargetMode,
             alignment: StereoToRigAlignment,
-            visible: Bool
+            visible: Bool,
+            scale: Double
         ) {
             alignedStereoTargetRoot.isHidden = !visible
             removeAllChildren(from: alignedStereoTargetRoot)
@@ -1456,7 +1464,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 let line = makeLineNode(
                     from: SCNVector3(pa.x, pa.y, pa.z),
                     to: SCNVector3(pb.x, pb.y, pb.z),
-                    color: NSColor.white.withAlphaComponent(0.9)
+                    color: NSColor.systemGreen.withAlphaComponent(0.55)
                 )
                 line.renderingOrder = 930
                 alignedStereoTargetRoot.addChildNode(line)
@@ -1464,19 +1472,18 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
 
             for (jointName, p) in snapshot.positions {
                 let status = snapshot.statusByJoint[jointName] ?? "accepted"
-                let color: NSColor
-
-                if status.contains("rejected") {
-                    color = .systemRed
-                } else if status.contains("held") {
-                    color = .systemGray
-                } else {
-                    color = .white
-                }
+                let confidence = snapshot.confidenceByJoint[jointName] ?? 1.0
+                let rejected = status.contains("rejected")
+                let held = status.contains("held")
+                let radius = 0.04 * CGFloat(max(0.15, min(1.0, scale)))
 
                 let node = makePointNode(
-                    color: color,
-                    radius: status.contains("rejected") ? 0.05 : 0.04
+                    color: spatialTargetColor(
+                        confidence: confidence,
+                        rejected: rejected,
+                        held: held
+                    ),
+                    radius: radius
                 )
                 node.position = SCNVector3(p.x, p.y, p.z)
                 node.renderingOrder = 940
@@ -1501,6 +1508,33 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             let positions: [String: SIMD3<Float>]
             let connectableJoints: Set<String>
             let statusByJoint: [String: String]
+            let confidenceByJoint: [String: Double]
+        }
+
+        private func spatialTargetColor(
+            confidence: Double,
+            rejected: Bool,
+            held: Bool
+        ) -> NSColor {
+            if rejected {
+                return NSColor.systemRed.withAlphaComponent(0.75)
+            }
+
+            if held {
+                return NSColor.systemGray.withAlphaComponent(0.65)
+            }
+
+            let c = max(0.0, min(1.0, confidence))
+
+            if c >= 0.65 {
+                return NSColor.systemGreen.withAlphaComponent(0.70)
+            }
+
+            if c >= 0.35 {
+                return NSColor.systemYellow.withAlphaComponent(0.70)
+            }
+
+            return NSColor.systemOrange.withAlphaComponent(0.70)
         }
 
         private func alignedTargetSnapshot(
@@ -1513,6 +1547,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 var positions: [String: SIMD3<Float>] = [:]
                 var connectable = Set<String>()
                 var statuses: [String: String] = [:]
+                var confidences: [String: Double] = [:]
 
                 for (jointName, target) in fusedFrame.joints {
                     let point = target.positionCameraXYZ ?? target.visionStereoPositionCameraXYZ
@@ -1534,6 +1569,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                     statuses[jointName] = target.rejected
                         ? "rejected"
                         : target.status
+                    confidences[jointName] = target.confidence
 
                     if !target.rejected {
                         connectable.insert(jointName)
@@ -1545,7 +1581,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                     source: "fusedStereoTargets",
                     positions: positions,
                     connectableJoints: connectable,
-                    statusByJoint: statuses
+                    statusByJoint: statuses,
+                    confidenceByJoint: confidences
                 )
             }
 
@@ -1555,12 +1592,14 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                     source: "none",
                     positions: [:],
                     connectableJoints: [],
-                    statusByJoint: [:]
+                    statusByJoint: [:],
+                    confidenceByJoint: [:]
                 )
             }
 
             var positions: [String: SIMD3<Float>] = [:]
             var statuses: [String: String] = [:]
+            var confidences: [String: Double] = [:]
 
             for (jointName, target) in conditionedFrame.joints {
                 guard target.positionCameraXYZ.count == 3 else {
@@ -1577,6 +1616,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                     alignment: alignment
                 )
                 statuses[jointName] = target.status
+                confidences[jointName] = target.confidence
             }
 
             return AlignedTargetSnapshot(
@@ -1584,7 +1624,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 source: "conditionedStereoTargets",
                 positions: positions,
                 connectableJoints: Set(positions.keys),
-                statusByJoint: statuses
+                statusByJoint: statuses,
+                confidenceByJoint: confidences
             )
         }
 

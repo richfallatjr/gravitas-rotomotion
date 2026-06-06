@@ -222,12 +222,25 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var isBuildingSpatialDisparity = false
     @Published var spatialDisparityBuildProgress: Double = 0
     @Published var spatialDisparityBuildProgressText = "No disparity build running."
+    @Published var spatialDisparityBuildPhase: SpatialDisparityBuildPhase = .idle
+    @Published var spatialDisparityProgressFraction: Double = 0
+    @Published var spatialDisparityProgressTitle = "No disparity build."
+    @Published var spatialDisparityProgressDetail = ""
+    @Published var spatialDisparityCurrentFrame = 0
+    @Published var spatialDisparityTotalFrames = 0
+    @Published var spatialDisparityCurrentRow = 0
+    @Published var spatialDisparityTotalRows = 0
+    @Published var spatialDisparityElapsedSeconds: Double = 0
+    @Published var spatialDisparityEstimatedRemainingSeconds: Double = 0
+    @Published var spatialDisparityLastFrameValidPercent: Double = 0
     @Published var spatialSolveReadiness: SpatialSolveReadiness = .notSpatial
     @Published var spatialRayPinDepthMode: SpatialRayPinDepthMode = .leftEyeRayPinningFallback
     @Published var spatialSolveStatus = "No spatial solve ready."
     @Published var showDisparityOnImagePlane = true
     @Published var disparityPlateOverlayOpacity: Double = 0.65
     @Published var selectedDisparityPlateOverlay: DisparityPlateOverlayKind = .depth
+    @Published var showSpatialTargetBalls = false
+    @Published var spatialTargetBallScale: Double = 0.35
     @Published var fusedStereoJointTargetCapture: FusedStereoJointTargetCapture?
     @Published var showFusedStereoTargets = true
     @Published var fusedStereoTargetStatus = "No fused stereo targets."
@@ -2282,6 +2295,12 @@ final class RotoMotionViewModel: ObservableObject {
     }
 
     func bakeLiveRigAnimationForExport() {
+        if captureMode == .spatialVideo,
+           solveTargetMode == .spatialDepthGuidedRayPinned {
+            bakeSpatialDepthGuidedRayPinnedRigAnimationForExport()
+            return
+        }
+
         guard let session = skinnedRigSession else {
             bakedRigAnimationStatus = "Load reference skinned rig first."
             status = bakedRigAnimationStatus
@@ -2468,6 +2487,182 @@ final class RotoMotionViewModel: ObservableObject {
         diagnostics.log(bakedRigAnimationStatus)
     }
 
+    func bakeSpatialDepthGuidedRayPinnedRigAnimationForExport() {
+        guard let session = skinnedRigSession else {
+            bakedRigAnimationStatus = "Spatial bake failed: no skinned rig session."
+            status = bakedRigAnimationStatus
+            diagnostics.log(bakedRigAnimationStatus)
+            return
+        }
+
+        guard let leftCapture = normalizedLeftCapture,
+              !leftCapture.frames.isEmpty else {
+            bakedRigAnimationStatus = "Spatial bake failed: no normalized left-eye capture."
+            status = bakedRigAnimationStatus
+            diagnostics.log(bakedRigAnimationStatus)
+            return
+        }
+
+        guard let videoPlaneSize = currentVideoPlaneSize else {
+            bakedRigAnimationStatus = "Spatial bake failed: no current video plane size."
+            status = bakedRigAnimationStatus
+            diagnostics.log(bakedRigAnimationStatus)
+            return
+        }
+
+        if spatialRayPinDepthMode == .disparityDepthGuided {
+            guard let evidence = jointDepthEvidenceCapture,
+                  !evidence.frames.isEmpty else {
+                bakedRigAnimationStatus = "Spatial bake failed: disparityDepthGuided mode requires joint depth evidence."
+                status = bakedRigAnimationStatus
+                diagnostics.log(bakedRigAnimationStatus)
+                return
+            }
+        }
+
+        bakeSpatialDepthGuidedRayPinnedRigAnimationForExport(
+            session: session,
+            leftCapture: leftCapture,
+            videoPlaneSize: videoPlaneSize
+        )
+    }
+
+    private func bakeSpatialDepthGuidedRayPinnedRigAnimationForExport(
+        session: SkinnedRigSession,
+        leftCapture: NormalizedMeshyPoseCapture,
+        videoPlaneSize: CGSize
+    ) {
+        let savedRootPosition = session.displayRootNode.simdPosition
+        let savedRootOrientation = session.displayRootNode.simdOrientation
+        let savedRootScale = session.displayRootNode.simdScale
+        let savedBoneTransforms = session.jointOrder.reduce(into: [String: simd_float4x4]()) { result, joint in
+            if let bone = session.bonesByCanonicalName[joint] {
+                result[joint] = bone.simdTransform
+            }
+        }
+
+        defer {
+            session.displayRootNode.simdPosition = savedRootPosition
+            session.displayRootNode.simdOrientation = savedRootOrientation
+            session.displayRootNode.simdScale = savedRootScale
+
+            for (joint, transform) in savedBoneTransforms {
+                session.bonesByCanonicalName[joint]?.simdTransform = transform
+            }
+        }
+
+        let authoredJoints = authoredRotationJoints()
+        let authoredSummary = authoredJoints.sorted().joined(separator: ", ")
+        var frames: [BakedRigAnimation.Frame] = []
+        frames.reserveCapacity(leftCapture.frames.count)
+
+        diagnostics.log("""
+        Spatial bake START:
+          mode: \(spatialRayPinDepthMode.rawValue)
+          solveTargetMode: \(solveTargetMode.rawValue)
+          leftFrames: \(leftCapture.frames.count)
+          jointDepthEvidenceFrames: \(jointDepthEvidenceCapture?.frames.count ?? 0)
+          authoredKeyedJoints: \(authoredSummary.isEmpty ? "none" : authoredSummary)
+          usesLeftEyeRayPinning: true
+          usesDisparityDepth: \(spatialRayPinDepthMode == .disparityDepthGuided)
+          usesConditionedStereoPointCloud: false
+          usesMetersToSceneUnits: false
+        """)
+
+        for (ordinal, normalizedFrame) in leftCapture.frames.enumerated() {
+            let evidenceFrame = spatialRayPinDepthMode == .disparityDepthGuided
+                ? nearestJointDepthEvidenceFrame(timeSeconds: normalizedFrame.timeSeconds)
+                : nil
+
+            SkinnedRigRotomationDriver.rotomateFrameWithDepthGuidedRayPins(
+                normalizedFrame: normalizedFrame,
+                jointDepthEvidenceFrame: evidenceFrame,
+                depthMode: spatialRayPinDepthMode,
+                session: session,
+                cameraOrigin: SIMD3<Float>(0, 0, 0),
+                videoPlaneSize: videoPlaneSize,
+                videoPlaneZ: currentVideoPlaneZ
+            )
+
+            applyRotationOverridesToRigForBakeFrame(
+                session: session,
+                frameIndex: normalizedFrame.frameIndex,
+                timeSeconds: normalizedFrame.timeSeconds
+            )
+
+            var bakedFrame = BakedRigAnimationSampler.sample(
+                session: session,
+                frameIndex: normalizedFrame.frameIndex,
+                timeSeconds: normalizedFrame.timeSeconds,
+                jointNames: session.jointOrder
+            )
+
+            bakedFrame = replaceAuthoredJointRotations(
+                bakedFrame,
+                authoredJoints: authoredJoints,
+                frameIndex: normalizedFrame.frameIndex,
+                timeSeconds: normalizedFrame.timeSeconds
+            )
+
+            frames.append(bakedFrame)
+
+            if normalizedFrame.frameIndex == 0 || normalizedFrame.frameIndex % 30 == 0 {
+                diagnostics.log("""
+                Spatial bake frame:
+                  ordinal: \(ordinal + 1)/\(leftCapture.frames.count)
+                  frameIndex: \(normalizedFrame.frameIndex)
+                  time: \(String(format: "%.3f", normalizedFrame.timeSeconds))
+                  evidence: \(evidenceFrame == nil ? "none" : "yes")
+                """)
+            }
+        }
+
+        for joint in authoredJoints.sorted() {
+            let keys = rotationOverrideLayer.keyframesByJoint[joint] ?? []
+            diagnostics.log("""
+            Spatial bake authored key replacement:
+              joint: \(joint)
+              keyCount: \(keys.count)
+              frames: \(keys.map { "\($0.frameIndex)" }.joined(separator: ", "))
+            """)
+        }
+
+        let baked = BakedRigAnimation(
+            schema: "com.gravitas.rotomotion.baked_rig_animation.v0",
+            clipID: retargetClipID,
+            fps: inferredFPSFromNormalizedFrames(leftCapture.frames),
+            jointNames: session.jointOrder,
+            frames: frames
+        )
+
+        bakedRigAnimation = baked
+        sessionArmaturePoseBuffer = baked.asSessionArmaturePoseBuffer()
+        sessionPoseSource = .posedArmatureLocalTransforms
+        sessionPoseStatus = "Baked immutable rig animation from spatial depth-guided ray pins: \(frames.count) frames."
+        bakedRigAnimationStatus = """
+        Spatial bake complete:
+          frames: \(frames.count)
+          mode: \(spatialRayPinDepthMode.rawValue)
+          authored keyed joints: \(authoredJoints.count)
+        """
+        usdzRetargetStatus = bakedRigAnimationStatus
+        status = bakedRigAnimationStatus
+        diagnostics.log(bakedRigAnimationStatus)
+    }
+
+    private func nearestJointDepthEvidenceFrame(
+        timeSeconds: Double
+    ) -> JointDepthEvidenceCapture.Frame? {
+        guard let frames = jointDepthEvidenceCapture?.frames,
+              !frames.isEmpty else {
+            return nil
+        }
+
+        return frames.min {
+            abs($0.timeSeconds - timeSeconds) < abs($1.timeSeconds - timeSeconds)
+        }
+    }
+
     private func writeBakeRotationOverrideDebugJSON(
         selectedKeys: [JointRotationOverrideLayer.Keyframe],
         evaluatedFrames: [[String: Any]],
@@ -2545,6 +2740,19 @@ final class RotoMotionViewModel: ObservableObject {
 
     private func inferredFPS(
         _ frames: [RotoRayAnimationSolveResult.Frame]
+    ) -> Double {
+        guard let first = frames.first,
+              let last = frames.last,
+              frames.count > 1 else {
+            return 24.0
+        }
+
+        let duration = max(last.timeSeconds - first.timeSeconds, 0.0001)
+        return Double(frames.count - 1) / duration
+    }
+
+    private func inferredFPSFromNormalizedFrames(
+        _ frames: [NormalizedMeshyPoseCapture.Frame]
     ) -> Double {
         guard let first = frames.first,
               let last = frames.last,
@@ -2742,6 +2950,14 @@ final class RotoMotionViewModel: ObservableObject {
             progress: 0,
             text: "No disparity build running."
         )
+        updateDisparityProgress(
+            phase: .idle,
+            fraction: 0,
+            title: "No disparity build.",
+            detail: status,
+            currentFrame: 0,
+            totalFrames: 0
+        )
         resetSpatialDisparityDebugProof(status: "No disparity debug proof.")
         resetFusedStereoTargetState(status: "No fused stereo targets.")
         updateSpatialSolveReadiness()
@@ -2764,14 +2980,32 @@ final class RotoMotionViewModel: ObservableObject {
         _ tracker: SpatialDisparityBuildProgressTracker
     ) {
         spatialDisparityProgressTask?.cancel()
+        let startedAt = Date()
         spatialDisparityProgressTask = Task { [weak self] in
             while !Task.isCancelled {
                 let snapshot = tracker.snapshot()
+                let elapsed = Date().timeIntervalSince(startedAt)
+                let remaining = snapshot.fraction > 0
+                    ? elapsed * (1.0 - snapshot.fraction) / max(snapshot.fraction, 0.0001)
+                    : 0
 
                 await MainActor.run { [weak self] in
                     guard let self else { return }
                     self.spatialDisparityBuildProgress = snapshot.fraction
                     self.spatialDisparityBuildProgressText = snapshot.statusText
+                    self.updateDisparityProgress(
+                        phase: self.phaseForDisparityProgressStage(snapshot.stage),
+                        fraction: snapshot.fraction,
+                        title: "Building Disparity Map",
+                        detail: snapshot.statusText,
+                        currentFrame: min(snapshot.completedUnits, snapshot.totalUnits),
+                        totalFrames: snapshot.totalUnits,
+                        currentRow: 0,
+                        totalRows: 0,
+                        elapsedSeconds: elapsed,
+                        estimatedRemainingSeconds: remaining,
+                        validPercent: self.spatialDisparityLastFrameValidPercent
+                    )
                 }
 
                 try? await Task.sleep(nanoseconds: 120_000_000)
@@ -2787,6 +3021,51 @@ final class RotoMotionViewModel: ObservableObject {
         spatialDisparityProgressTask = nil
         spatialDisparityBuildProgress = min(1, max(0, progress))
         spatialDisparityBuildProgressText = text
+    }
+
+    @MainActor
+    func updateDisparityProgress(
+        phase: SpatialDisparityBuildPhase,
+        fraction: Double,
+        title: String,
+        detail: String,
+        currentFrame: Int,
+        totalFrames: Int,
+        currentRow: Int = 0,
+        totalRows: Int = 0,
+        elapsedSeconds: Double = 0,
+        estimatedRemainingSeconds: Double = 0,
+        validPercent: Double = 0
+    ) {
+        spatialDisparityBuildPhase = phase
+        spatialDisparityProgressFraction = min(1, max(0, fraction))
+        spatialDisparityProgressTitle = title
+        spatialDisparityProgressDetail = detail
+        spatialDisparityCurrentFrame = currentFrame
+        spatialDisparityTotalFrames = totalFrames
+        spatialDisparityCurrentRow = currentRow
+        spatialDisparityTotalRows = totalRows
+        spatialDisparityElapsedSeconds = elapsedSeconds
+        spatialDisparityEstimatedRemainingSeconds = estimatedRemainingSeconds
+        spatialDisparityLastFrameValidPercent = validPercent
+    }
+
+    private func phaseForDisparityProgressStage(
+        _ stage: String
+    ) -> SpatialDisparityBuildPhase {
+        if stage.contains("Preparing") {
+            return .preparing
+        }
+
+        if stage.contains("Computing") || stage.contains("Computed") {
+            return .computingFrame
+        }
+
+        if stage.contains("Writing") || stage.contains("Wrote") {
+            return .writingPreviews
+        }
+
+        return .preparing
     }
 
     func loadSpatialVideo(
@@ -3442,6 +3721,14 @@ final class RotoMotionViewModel: ObservableObject {
         status = spatialDisparityStatus
         spatialDisparityBuildProgress = 0
         spatialDisparityBuildProgressText = "Preparing disparity maps: 0/\(totalProgressUnits)"
+        updateDisparityProgress(
+            phase: .preparing,
+            fraction: 0,
+            title: "Building Disparity Map",
+            detail: "Preparing disparity maps: 0/\(totalProgressUnits)",
+            currentFrame: 0,
+            totalFrames: totalProgressUnits
+        )
         progressTracker.update(
             stage: "Preparing disparity maps",
             completedUnits: 0,
@@ -3507,6 +3794,15 @@ final class RotoMotionViewModel: ObservableObject {
                 )
             }
 
+            updateDisparityProgress(
+                phase: .buildingJointEvidence,
+                fraction: 0.98,
+                title: "Building Disparity Map",
+                detail: "Building joint depth evidence...",
+                currentFrame: disparity.frames.count,
+                totalFrames: disparity.frames.count
+            )
+
             let evidence = JointDepthEvidenceBuilder.buildCandidateBased(
                 disparity: disparity,
                 normalizedLeft: leftNorm,
@@ -3519,6 +3815,10 @@ final class RotoMotionViewModel: ObservableObject {
             )
 
             jointDepthEvidenceCapture = evidence
+            bakedRigAnimation = nil
+            sessionArmaturePoseBuffer = nil
+            bakedRigAnimationStatus = "Bake is stale. Re-bake rig animation for export."
+            sessionIsDirty = true
 
             guard let first = disparity.frames.first else {
                 throw NSError(
@@ -3533,11 +3833,13 @@ final class RotoMotionViewModel: ObservableObject {
             let firstPreview = previewResult.previewCapture.frames.first
             let debug = try SpatialDisparityDebugDumper.dumpDebugImages(frame: first)
             let stats = SpatialDisparityDebugStats.make(frame: first)
+            let firstValidPercent = stats.validPercent
 
             spatialDisparityDepthPreviewImage = debug.depthImage
             spatialDisparityConfidencePreviewImage = debug.confidenceImage
             spatialDisparityRawPreviewImage = debug.rawDisparityImage
             spatialDisparityDebugDirectoryPath = previewResult.dumpDirectory.path
+            spatialDisparityLastFrameValidPercent = firstValidPercent
 
             spatialDisparityDebugStatus = """
             Full disparity first-frame proof SUCCESS:
@@ -3583,6 +3885,15 @@ final class RotoMotionViewModel: ObservableObject {
                 progress: 1,
                 text: "Disparity maps complete: \(disparity.frames.count) frames."
             )
+            updateDisparityProgress(
+                phase: .success,
+                fraction: 1,
+                title: "Disparity Map Complete",
+                detail: "Built \(disparity.frames.count) frames. Evidence frames: \(evidence.frames.count).",
+                currentFrame: disparity.frames.count,
+                totalFrames: disparity.frames.count,
+                validPercent: firstValidPercent
+            )
             updateSpatialSolveReadiness()
             diagnostics.log("""
             Spatial disparity build SUCCESS:
@@ -3605,6 +3916,14 @@ final class RotoMotionViewModel: ObservableObject {
             finishSpatialDisparityProgress(
                 progress: 0,
                 text: "Disparity build failed."
+            )
+            updateDisparityProgress(
+                phase: .failed,
+                fraction: 0,
+                title: "Disparity Map Failed",
+                detail: error.localizedDescription,
+                currentFrame: spatialDisparityCurrentFrame,
+                totalFrames: spatialDisparityTotalFrames
             )
             updateSpatialSolveReadiness()
             diagnostics.log("""
@@ -5310,7 +5629,7 @@ final class RotoMotionViewModel: ObservableObject {
         """)
 
         guard let bakedRigAnimation else {
-            usdzRetargetStatus = "Bake animation before export. Rotation keys are not baked."
+            usdzRetargetStatus = "Bake Rig Animation For Export before exporting. No baked rig animation is available."
             status = usdzRetargetStatus
             diagnostics.log(usdzRetargetStatus)
             return

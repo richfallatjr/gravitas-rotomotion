@@ -92,6 +92,18 @@ enum SpatialSolveReadiness: String, Codable {
     case ready
 }
 
+enum SpatialDisparityBuildPhase: String, Codable {
+    case idle
+    case preparing
+    case convertingFrames
+    case computingFrame
+    case writingPreviews
+    case buildingJointEvidence
+    case success
+    case failed
+    case cancelled
+}
+
 struct StereoToRigAlignment: Codable, Equatable {
     var isValid: Bool
 

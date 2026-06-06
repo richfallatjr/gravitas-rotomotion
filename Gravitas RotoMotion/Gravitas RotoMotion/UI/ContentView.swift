@@ -208,6 +208,8 @@ struct ContentView: View {
                 selectedDisparityPlateOverlay: roto.selectedDisparityPlateOverlay,
                 disparityPlateOverlayOpacity: roto.disparityPlateOverlayOpacity,
                 showFusedStereoTargets: roto.showFusedStereoTargets && roto.fusedStereoJointTargetCapture != nil,
+                showSpatialTargetBalls: roto.showSpatialTargetBalls,
+                spatialTargetBallScale: roto.spatialTargetBallScale,
                 showGroundPlane: roto.groundPlane.visible,
                 showVisionRays: roto.showVisionRays,
                 showRaySolvedRig: roto.showDebugSolvedSkeleton,
@@ -538,6 +540,43 @@ struct ContentView: View {
                     }
                 }
 
+                GroupBox("Disparity Build") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text(roto.spatialDisparityProgressTitle)
+                                .font(.caption)
+                                .bold()
+
+                            Spacer()
+
+                            Text("\(Int(roto.spatialDisparityProgressFraction * 100))%")
+                                .font(.caption)
+                                .monospacedDigit()
+                        }
+
+                        ProgressView(value: roto.spatialDisparityProgressFraction)
+                            .tint(.green)
+
+                        Text(roto.spatialDisparityProgressDetail)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Text("""
+                        phase: \(roto.spatialDisparityBuildPhase.rawValue)
+                        frame: \(roto.spatialDisparityCurrentFrame)/\(roto.spatialDisparityTotalFrames)
+                        row: \(roto.spatialDisparityCurrentRow)/\(roto.spatialDisparityTotalRows)
+                        elapsed: \(String(format: "%.1f", roto.spatialDisparityElapsedSeconds))s
+                        remaining: \(String(format: "%.1f", roto.spatialDisparityEstimatedRemainingSeconds))s
+                        last valid: \(String(format: "%.2f", roto.spatialDisparityLastFrameValidPercent))%
+                        """)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
                 GroupBox("Disparity Map Proof") {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
@@ -645,6 +684,17 @@ struct ContentView: View {
 
                 Toggle("Fused Stereo Targets", isOn: $roto.showFusedStereoTargets)
                     .disabled(roto.fusedStereoJointTargetCapture == nil)
+
+                Toggle("Spatial Target Balls", isOn: $roto.showSpatialTargetBalls)
+
+                if roto.showSpatialTargetBalls {
+                    HStack {
+                        Text("Target Size")
+                            .font(.caption)
+
+                        Slider(value: $roto.spatialTargetBallScale, in: 0.15...1.0)
+                    }
+                }
 
                 Text("Left frames: \(roto.leftEyeFrames.count), right frames: \(roto.rightEyeFrames.count)")
                     .font(.caption2)
