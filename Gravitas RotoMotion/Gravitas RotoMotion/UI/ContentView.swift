@@ -642,20 +642,20 @@ struct ContentView: View {
                             }
 
                             HStack {
-                                Button("Left -1") {
-                                    roto.nudgeManualSpatialCameraPanX(-1.0)
-                                }
-
-                                Button("-0.1") {
+                                Button("Left -0.1") {
                                     roto.nudgeManualSpatialCameraPanX(-0.1)
                                 }
 
-                                Button("+0.1") {
-                                    roto.nudgeManualSpatialCameraPanX(0.1)
+                                Button("-0.01") {
+                                    roto.nudgeManualSpatialCameraPanX(-0.01)
                                 }
 
-                                Button("Right +1") {
-                                    roto.nudgeManualSpatialCameraPanX(1.0)
+                                Button("+0.01") {
+                                    roto.nudgeManualSpatialCameraPanX(0.01)
+                                }
+
+                                Button("Right +0.1") {
+                                    roto.nudgeManualSpatialCameraPanX(0.1)
                                 }
                             }
                             .font(.caption)
@@ -680,20 +680,20 @@ struct ContentView: View {
                             }
 
                             HStack {
-                                Button("Down -1") {
-                                    roto.nudgeManualSpatialCameraPanY(-1.0)
-                                }
-
-                                Button("-0.1") {
+                                Button("Down -0.1") {
                                     roto.nudgeManualSpatialCameraPanY(-0.1)
                                 }
 
-                                Button("+0.1") {
-                                    roto.nudgeManualSpatialCameraPanY(0.1)
+                                Button("-0.01") {
+                                    roto.nudgeManualSpatialCameraPanY(-0.01)
                                 }
 
-                                Button("Up +1") {
-                                    roto.nudgeManualSpatialCameraPanY(1.0)
+                                Button("+0.01") {
+                                    roto.nudgeManualSpatialCameraPanY(0.01)
+                                }
+
+                                Button("Up +0.1") {
+                                    roto.nudgeManualSpatialCameraPanY(0.1)
                                 }
                             }
                             .font(.caption)
@@ -718,20 +718,20 @@ struct ContentView: View {
                             }
 
                             HStack {
-                                Button("Away -1") {
-                                    roto.nudgeManualSpatialCameraDepthZ(-1.0)
-                                }
-
-                                Button("-0.1") {
+                                Button("Away -0.1") {
                                     roto.nudgeManualSpatialCameraDepthZ(-0.1)
                                 }
 
-                                Button("+0.1") {
-                                    roto.nudgeManualSpatialCameraDepthZ(0.1)
+                                Button("-0.01") {
+                                    roto.nudgeManualSpatialCameraDepthZ(-0.01)
                                 }
 
-                                Button("Toward +1") {
-                                    roto.nudgeManualSpatialCameraDepthZ(1.0)
+                                Button("+0.01") {
+                                    roto.nudgeManualSpatialCameraDepthZ(0.01)
+                                }
+
+                                Button("Toward +0.1") {
+                                    roto.nudgeManualSpatialCameraDepthZ(0.1)
                                 }
                             }
                             .font(.caption)
