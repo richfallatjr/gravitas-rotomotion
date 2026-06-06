@@ -1,4 +1,5 @@
 import AppKit
+import Foundation
 import SceneKit
 import SwiftUI
 import simd
@@ -95,6 +96,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let stereoJointFrame: StereoMeshyJointCapture.Frame?
     let conditionedStereoFrame: ConditionedStereoJointCapture.Frame?
     let jointDepthEvidenceFrame: JointDepthEvidenceCapture.Frame?
+    let disparityPreviewFrame: SpatialDisparityPreviewCapture.Frame?
+    let fusedStereoTargetFrame: FusedStereoJointTargetCapture.Frame?
 
     let groundPlane: GroundPlaneController?
     let raySolveResult: RotoRaySolveResult?
@@ -125,13 +128,20 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let showConditionedStereoSkeleton: Bool
     let showStereoReprojectionOverlay: Bool
     let showJointDepthValidationOverlay: Bool
+    let showDisparityOnImagePlane: Bool
+    let selectedDisparityPlateOverlay: DisparityPlateOverlayKind
+    let disparityPlateOverlayOpacity: Double
+    let showFusedStereoTargets: Bool
     let showGroundPlane: Bool
     let showVisionRays: Bool
     let showRaySolvedRig: Bool
     let showSkinnedRig: Bool
+    let showSkinnedGeometry: Bool
     let showRotationGizmo: Bool
     let stereoMetersToRigSceneUnits: Float
+    let stereoToRigAlignment: StereoToRigAlignment
     let solveTargetMode: RotoSolveTargetMode
+    let spatialRayPinDepthMode: SpatialRayPinDepthMode
     let rotationGizmoSpace: RotationGizmoSpace
     let selectedRotationJoint: String
     let onRotationGizmoEulerChanged: (_ joint: String, _ eulerXYZ: SIMD3<Float>) -> Void
@@ -166,6 +176,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             stereoJointFrame: stereoJointFrame,
             conditionedStereoFrame: conditionedStereoFrame,
             jointDepthEvidenceFrame: jointDepthEvidenceFrame,
+            disparityPreviewFrame: disparityPreviewFrame,
+            fusedStereoTargetFrame: fusedStereoTargetFrame,
             groundPlane: groundPlane,
             raySolveResult: raySolveResult,
             raySolvedFrame: raySolvedFrame,
@@ -194,13 +206,20 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             showConditionedStereoSkeleton: showConditionedStereoSkeleton,
             showStereoReprojectionOverlay: showStereoReprojectionOverlay,
             showJointDepthValidationOverlay: showJointDepthValidationOverlay,
+            showDisparityOnImagePlane: showDisparityOnImagePlane,
+            selectedDisparityPlateOverlay: selectedDisparityPlateOverlay,
+            disparityPlateOverlayOpacity: disparityPlateOverlayOpacity,
+            showFusedStereoTargets: showFusedStereoTargets,
             showGroundPlane: showGroundPlane,
             showVisionRays: showVisionRays,
             showRaySolvedRig: showRaySolvedRig,
             showSkinnedRig: showSkinnedRig,
+            showSkinnedGeometry: showSkinnedGeometry,
             showRotationGizmo: showRotationGizmo,
             stereoMetersToRigSceneUnits: stereoMetersToRigSceneUnits,
+            stereoToRigAlignment: stereoToRigAlignment,
             solveTargetMode: solveTargetMode,
+            spatialRayPinDepthMode: spatialRayPinDepthMode,
             rotationGizmoSpace: rotationGizmoSpace,
             selectedRotationJoint: selectedRotationJoint
         )
@@ -210,6 +229,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private let scene = SCNScene()
         private let cameraNode = SCNNode()
         private let videoPlaneNode = SCNNode()
+        private let disparityPlateOverlayNode = SCNNode()
         private let rawOverlayRoot = SCNNode()
         private let normalizedOverlayRoot = SCNNode()
         private let rightRawOverlayRoot = SCNNode()
@@ -219,6 +239,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private let conditionedStereoSkeletonRoot = SCNNode()
         private let stereoReprojectionRoot = SCNNode()
         private let jointDepthEvidenceOverlayRoot = SCNNode()
+        private let fusedStereoTargetRoot = SCNNode()
+        private let alignedStereoTargetRoot = SCNNode()
         private let groundRoot = SCNNode()
         private let visionRayRoot = SCNNode()
         private let solvedRigRoot = SCNNode()
@@ -264,6 +286,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private var showRotationGizmo = false
         private var lastRotationGizmoVisibilitySignature: String?
         private var lastRotationOverrideLogSignature: String?
+        private var currentDisparityOverlaySignature: String?
 
         func makeView() -> SCNView {
             let view = RotoSCNView()
@@ -337,6 +360,9 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             conditionedStereoSkeletonRoot.name = "ConditionedStereoSkeletonRoot"
             stereoReprojectionRoot.name = "StereoReprojectionOverlayRoot"
             jointDepthEvidenceOverlayRoot.name = "JointDepthEvidenceOverlayRoot"
+            disparityPlateOverlayNode.name = "DisparityPlateOverlayNode"
+            fusedStereoTargetRoot.name = "FusedStereoTargetRoot"
+            alignedStereoTargetRoot.name = "AlignedStereoTargetRoot"
             groundRoot.name = "GroundPlaneRoot"
             visionRayRoot.name = "VisionRayRoot"
             solvedRigRoot.name = "RaySolvedRigRoot"
@@ -353,6 +379,9 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             scene.rootNode.addChildNode(conditionedStereoSkeletonRoot)
             scene.rootNode.addChildNode(stereoReprojectionRoot)
             scene.rootNode.addChildNode(jointDepthEvidenceOverlayRoot)
+            scene.rootNode.addChildNode(disparityPlateOverlayNode)
+            scene.rootNode.addChildNode(fusedStereoTargetRoot)
+            scene.rootNode.addChildNode(alignedStereoTargetRoot)
             scene.rootNode.addChildNode(visionRayRoot)
             scene.rootNode.addChildNode(solvedRigRoot)
             scene.rootNode.addChildNode(solveErrorRoot)
@@ -399,6 +428,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             stereoJointFrame: StereoMeshyJointCapture.Frame?,
             conditionedStereoFrame: ConditionedStereoJointCapture.Frame?,
             jointDepthEvidenceFrame: JointDepthEvidenceCapture.Frame?,
+            disparityPreviewFrame: SpatialDisparityPreviewCapture.Frame?,
+            fusedStereoTargetFrame: FusedStereoJointTargetCapture.Frame?,
             groundPlane: GroundPlaneController?,
             raySolveResult: RotoRaySolveResult?,
             raySolvedFrame: RotoRayAnimationSolveResult.Frame?,
@@ -427,13 +458,20 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             showConditionedStereoSkeleton: Bool,
             showStereoReprojectionOverlay: Bool,
             showJointDepthValidationOverlay: Bool,
+            showDisparityOnImagePlane: Bool,
+            selectedDisparityPlateOverlay: DisparityPlateOverlayKind,
+            disparityPlateOverlayOpacity: Double,
+            showFusedStereoTargets: Bool,
             showGroundPlane: Bool,
             showVisionRays: Bool,
             showRaySolvedRig: Bool,
             showSkinnedRig: Bool,
+            showSkinnedGeometry: Bool,
             showRotationGizmo: Bool,
             stereoMetersToRigSceneUnits: Float,
+            stereoToRigAlignment: StereoToRigAlignment,
             solveTargetMode: RotoSolveTargetMode,
+            spatialRayPinDepthMode: SpatialRayPinDepthMode,
             rotationGizmoSpace: RotationGizmoSpace,
             selectedRotationJoint: String
         ) {
@@ -466,9 +504,12 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 frame: raySolvedFrame,
                 frameIndex: frameIndex,
                 normalizedFrame: normalizedFrame,
+                rightNormalizedFrame: rightNormalizedFrame,
+                jointDepthEvidenceFrame: jointDepthEvidenceFrame,
                 conditionedStereoFrame: conditionedStereoFrame,
+                fusedStereoTargetFrame: fusedStereoTargetFrame,
                 solveTargetMode: solveTargetMode,
-                stereoMetersToRigSceneUnits: stereoMetersToRigSceneUnits,
+                spatialRayPinDepthMode: spatialRayPinDepthMode,
                 referenceRigScaleMultiplier: referenceRigScaleMultiplier,
                 referenceRigX: referenceRigX,
                 referenceRigY: referenceRigY,
@@ -480,7 +521,9 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 heldRotationOverrideEulerXYZByJoint: heldRotationOverrideEulerXYZByJoint,
                 liveRotationOverrideEulerXYZByJoint: liveRotationOverrideEulerXYZByJoint,
                 liveRotationOverridesActive: liveRotationOverridesActive,
-                visible: showSkinnedRig
+                visible: showSkinnedRig,
+                showSkinnedGeometry: showSkinnedGeometry,
+                stereoToRigAlignment: stereoToRigAlignment
             )
             rotationGizmo.root.isHidden = !showRotationGizmo
             logRotationGizmoVisibilityIfNeeded(showRotationGizmo: showRotationGizmo)
@@ -508,6 +551,12 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 visible: showRightEyeNormalizedOverlay
             )
             updateSmoothedOverlay(smoothedFrame, visible: showSmoothedMeshy)
+            updateDisparityPlateOverlay(
+                previewFrame: disparityPreviewFrame,
+                visible: showDisparityOnImagePlane,
+                kind: selectedDisparityPlateOverlay,
+                opacity: disparityPlateOverlayOpacity
+            )
             updateStereoDepthOverlay(
                 stereoJointFrame,
                 visible: showStereo3DSkeleton,
@@ -526,6 +575,18 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 evidenceFrame: jointDepthEvidenceFrame,
                 normalizedFrame: normalizedFrame,
                 visible: showJointDepthValidationOverlay
+            )
+            updateFusedStereoTargetOverlay(
+                frame: fusedStereoTargetFrame,
+                visible: showFusedStereoTargets,
+                metersToRigSceneUnits: stereoMetersToRigSceneUnits
+            )
+            updateAlignedStereoTargetOverlay(
+                conditionedFrame: conditionedStereoFrame,
+                fusedFrame: fusedStereoTargetFrame,
+                solveTargetMode: solveTargetMode,
+                alignment: stereoToRigAlignment,
+                visible: stereoToRigAlignment.isValid
             )
             updateRaySolveDebug(
                 result: raySolveResult,
@@ -959,6 +1020,89 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             )
         }
 
+        private func updateDisparityPlateOverlay(
+            previewFrame: SpatialDisparityPreviewCapture.Frame?,
+            visible: Bool,
+            kind: DisparityPlateOverlayKind,
+            opacity: Double
+        ) {
+            guard visible,
+                  let previewFrame else {
+                disparityPlateOverlayNode.isHidden = true
+                currentDisparityOverlaySignature = nil
+                return
+            }
+
+            let path: String?
+
+            switch kind {
+            case .depth:
+                path = previewFrame.depthPreviewPNGPath
+            case .confidence:
+                path = previewFrame.confidencePreviewPNGPath
+            case .rawDisparity:
+                path = previewFrame.rawDisparityPreviewPNGPath
+            }
+
+            guard let path,
+                  FileManager.default.fileExists(atPath: path),
+                  let image = NSImage(contentsOfFile: path) else {
+                disparityPlateOverlayNode.isHidden = true
+                currentDisparityOverlaySignature = nil
+                return
+            }
+
+            if disparityPlateOverlayNode.geometry == nil {
+                disparityPlateOverlayNode.geometry = SCNPlane(
+                    width: videoPlaneSize.width,
+                    height: videoPlaneSize.height
+                )
+            }
+
+            if let plane = disparityPlateOverlayNode.geometry as? SCNPlane {
+                plane.width = videoPlaneSize.width
+                plane.height = videoPlaneSize.height
+            }
+
+            disparityPlateOverlayNode.simdPosition = SIMD3<Float>(
+                0,
+                0,
+                currentVideoPlaneZ + 1.35
+            )
+            disparityPlateOverlayNode.renderingOrder = 700
+            disparityPlateOverlayNode.isHidden = false
+
+            let clampedOpacity = max(0, min(1, opacity))
+            let signature = "\(path)|\(kind.rawValue)|\(String(format: "%.3f", clampedOpacity))|\(videoPlaneSize.width)x\(videoPlaneSize.height)"
+
+            guard currentDisparityOverlaySignature != signature else {
+                return
+            }
+
+            let material = SCNMaterial()
+            material.lightingModel = .constant
+            material.diffuse.contents = image
+            material.transparency = CGFloat(clampedOpacity)
+            material.isDoubleSided = true
+            material.readsFromDepthBuffer = false
+            material.writesToDepthBuffer = false
+            material.diffuse.wrapS = .clamp
+            material.diffuse.wrapT = .clamp
+            material.diffuse.contentsTransform = SCNMatrix4Identity
+
+            disparityPlateOverlayNode.geometry?.materials = [material]
+            currentDisparityOverlaySignature = signature
+
+            print("""
+            [RotoSceneVideoViewport] Disparity plate overlay updated
+              frame: \(previewFrame.frameIndex)
+              kind: \(kind.rawValue)
+              path: \(path)
+              opacity: \(clampedOpacity)
+              normalizedUV: 0..1
+            """)
+        }
+
         private func updateStereoDepthOverlay(
             _ frame: StereoMeshyJointCapture.Frame?,
             visible: Bool,
@@ -1188,6 +1332,262 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             }
         }
 
+        private func updateFusedStereoTargetOverlay(
+            frame: FusedStereoJointTargetCapture.Frame?,
+            visible: Bool,
+            metersToRigSceneUnits: Float
+        ) {
+            fusedStereoTargetRoot.isHidden = !visible
+            removeAllChildren(from: fusedStereoTargetRoot)
+
+            guard visible, let frame else {
+                return
+            }
+
+            let scale = max(metersToRigSceneUnits, 0.0001)
+            var positions: [String: SIMD3<Float>] = [:]
+            var accepted = 0
+            var rejected = 0
+            var held = 0
+
+            for (name, target) in frame.joints {
+                let point = target.positionCameraXYZ ?? target.visionStereoPositionCameraXYZ
+
+                guard let point,
+                      point.count == 3 else {
+                    continue
+                }
+
+                let p = SIMD3<Float>(
+                    Float(point[0]),
+                    Float(point[1]),
+                    Float(point[2])
+                ) * scale
+                positions[name] = p
+
+                let color: NSColor
+
+                if target.rejected {
+                    color = .systemRed
+                    rejected += 1
+                } else if target.status.contains("held") {
+                    color = .systemGray
+                    held += 1
+                } else {
+                    color = .systemGreen
+                    accepted += 1
+                }
+
+                let node = makePointNode(
+                    color: color,
+                    radius: target.rejected ? 0.045 : 0.035
+                )
+                node.position = SCNVector3(p.x, p.y, p.z)
+                node.renderingOrder = 875
+                fusedStereoTargetRoot.addChildNode(node)
+            }
+
+            for (a, b) in meshySkeletonBones {
+                guard let targetA = frame.joints[a],
+                      let targetB = frame.joints[b],
+                      !targetA.rejected,
+                      !targetB.rejected,
+                      let pa = positions[a],
+                      let pb = positions[b] else {
+                    continue
+                }
+
+                let color = targetA.status.contains("held") || targetB.status.contains("held")
+                    ? NSColor.systemGray.withAlphaComponent(0.85)
+                    : NSColor.systemGreen.withAlphaComponent(0.95)
+                let line = makeLineNode(
+                    from: SCNVector3(pa.x, pa.y, pa.z),
+                    to: SCNVector3(pb.x, pb.y, pb.z),
+                    color: color
+                )
+                line.renderingOrder = 870
+                fusedStereoTargetRoot.addChildNode(line)
+            }
+
+            if frame.frameIndex == 0 || frame.frameIndex % 30 == 0 {
+                print("""
+                [RotoSceneVideoViewport] Fused stereo target overlay updated
+                  frame: \(frame.frameIndex)
+                  accepted: \(accepted)
+                  held: \(held)
+                  rejected: \(rejected)
+                """)
+            }
+        }
+
+        private func updateAlignedStereoTargetOverlay(
+            conditionedFrame: ConditionedStereoJointCapture.Frame?,
+            fusedFrame: FusedStereoJointTargetCapture.Frame?,
+            solveTargetMode: RotoSolveTargetMode,
+            alignment: StereoToRigAlignment,
+            visible: Bool
+        ) {
+            alignedStereoTargetRoot.isHidden = !visible
+            removeAllChildren(from: alignedStereoTargetRoot)
+
+            guard visible, alignment.isValid else {
+                return
+            }
+
+            let snapshot = alignedTargetSnapshot(
+                conditionedFrame: conditionedFrame,
+                fusedFrame: fusedFrame,
+                solveTargetMode: solveTargetMode,
+                alignment: alignment
+            )
+
+            guard !snapshot.positions.isEmpty else {
+                return
+            }
+
+            for (a, b) in meshySkeletonBones {
+                guard snapshot.connectableJoints.contains(a),
+                      snapshot.connectableJoints.contains(b),
+                      let pa = snapshot.positions[a],
+                      let pb = snapshot.positions[b] else {
+                    continue
+                }
+
+                let line = makeLineNode(
+                    from: SCNVector3(pa.x, pa.y, pa.z),
+                    to: SCNVector3(pb.x, pb.y, pb.z),
+                    color: NSColor.white.withAlphaComponent(0.9)
+                )
+                line.renderingOrder = 930
+                alignedStereoTargetRoot.addChildNode(line)
+            }
+
+            for (jointName, p) in snapshot.positions {
+                let status = snapshot.statusByJoint[jointName] ?? "accepted"
+                let color: NSColor
+
+                if status.contains("rejected") {
+                    color = .systemRed
+                } else if status.contains("held") {
+                    color = .systemGray
+                } else {
+                    color = .white
+                }
+
+                let node = makePointNode(
+                    color: color,
+                    radius: status.contains("rejected") ? 0.05 : 0.04
+                )
+                node.position = SCNVector3(p.x, p.y, p.z)
+                node.renderingOrder = 940
+                alignedStereoTargetRoot.addChildNode(node)
+            }
+
+            if snapshot.frameIndex == 0 || snapshot.frameIndex % 30 == 0 {
+                print("""
+                [RotoSceneVideoViewport] Aligned stereo target overlay updated
+                  frame: \(snapshot.frameIndex)
+                  mode: \(snapshot.source)
+                  jointsDrawn: \(snapshot.positions.count)
+                  alignmentScale: \(alignment.scale)
+                  alignmentTranslation: \(alignment.translation.simdFloat)
+                """)
+            }
+        }
+
+        private struct AlignedTargetSnapshot {
+            let frameIndex: Int
+            let source: String
+            let positions: [String: SIMD3<Float>]
+            let connectableJoints: Set<String>
+            let statusByJoint: [String: String]
+        }
+
+        private func alignedTargetSnapshot(
+            conditionedFrame: ConditionedStereoJointCapture.Frame?,
+            fusedFrame: FusedStereoJointTargetCapture.Frame?,
+            solveTargetMode: RotoSolveTargetMode,
+            alignment: StereoToRigAlignment
+        ) -> AlignedTargetSnapshot {
+            if let fusedFrame {
+                var positions: [String: SIMD3<Float>] = [:]
+                var connectable = Set<String>()
+                var statuses: [String: String] = [:]
+
+                for (jointName, target) in fusedFrame.joints {
+                    let point = target.positionCameraXYZ ?? target.visionStereoPositionCameraXYZ
+
+                    guard let point,
+                          point.count == 3 else {
+                        continue
+                    }
+
+                    let stereoMeters = SIMD3<Float>(
+                        Float(point[0]),
+                        Float(point[1]),
+                        Float(point[2])
+                    )
+                    positions[jointName] = StereoToRigAlignmentSolver.transform(
+                        stereoMeters,
+                        alignment: alignment
+                    )
+                    statuses[jointName] = target.rejected
+                        ? "rejected"
+                        : target.status
+
+                    if !target.rejected {
+                        connectable.insert(jointName)
+                    }
+                }
+
+                return AlignedTargetSnapshot(
+                    frameIndex: fusedFrame.frameIndex,
+                    source: "fusedStereoTargets",
+                    positions: positions,
+                    connectableJoints: connectable,
+                    statusByJoint: statuses
+                )
+            }
+
+            guard let conditionedFrame else {
+                return AlignedTargetSnapshot(
+                    frameIndex: -1,
+                    source: "none",
+                    positions: [:],
+                    connectableJoints: [],
+                    statusByJoint: [:]
+                )
+            }
+
+            var positions: [String: SIMD3<Float>] = [:]
+            var statuses: [String: String] = [:]
+
+            for (jointName, target) in conditionedFrame.joints {
+                guard target.positionCameraXYZ.count == 3 else {
+                    continue
+                }
+
+                let stereoMeters = SIMD3<Float>(
+                    Float(target.positionCameraXYZ[0]),
+                    Float(target.positionCameraXYZ[1]),
+                    Float(target.positionCameraXYZ[2])
+                )
+                positions[jointName] = StereoToRigAlignmentSolver.transform(
+                    stereoMeters,
+                    alignment: alignment
+                )
+                statuses[jointName] = target.status
+            }
+
+            return AlignedTargetSnapshot(
+                frameIndex: conditionedFrame.frameIndex,
+                source: "conditionedStereoTargets",
+                positions: positions,
+                connectableJoints: Set(positions.keys),
+                statusByJoint: statuses
+            )
+        }
+
         private struct MeshyOverlayPoint {
             let x: Double
             let y: Double
@@ -1267,9 +1667,12 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             frame: RotoRayAnimationSolveResult.Frame?,
             frameIndex: Int,
             normalizedFrame: NormalizedMeshyPoseCapture.Frame?,
+            rightNormalizedFrame: NormalizedMeshyPoseCapture.Frame?,
+            jointDepthEvidenceFrame: JointDepthEvidenceCapture.Frame?,
             conditionedStereoFrame: ConditionedStereoJointCapture.Frame?,
+            fusedStereoTargetFrame: FusedStereoJointTargetCapture.Frame?,
             solveTargetMode: RotoSolveTargetMode,
-            stereoMetersToRigSceneUnits: Float,
+            spatialRayPinDepthMode: SpatialRayPinDepthMode,
             referenceRigScaleMultiplier: Double,
             referenceRigX: Double,
             referenceRigY: Double,
@@ -1281,7 +1684,9 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             heldRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
             liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
             liveRotationOverridesActive: Bool,
-            visible: Bool
+            visible: Bool,
+            showSkinnedGeometry: Bool,
+            stereoToRigAlignment: StereoToRigAlignment
         ) {
             guard let session else {
                 skinnedRigRoot?.removeFromParentNode()
@@ -1320,27 +1725,35 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
 
             session.displayRootNode.isHidden = !visible
             rigBoundsRoot.isHidden = !visible
+            updateSkinnedGeometryVisibility(
+                session: session,
+                visible: visible && showSkinnedGeometry
+            )
 
             if applySolvedPoseToReferenceRig,
-               solveTargetMode == .spatialStereo3D,
-               let conditionedStereoFrame {
-                ConditionedStereoTargetRigRotomationDriver.rotomateFrame(
-                    conditionedStereoFrame,
+               solveTargetMode == .spatialDepthGuidedRayPinned,
+               let normalizedFrame {
+                SkinnedRigRotomationDriver.rotomateFrameWithDepthGuidedRayPins(
+                    normalizedFrame: normalizedFrame,
+                    jointDepthEvidenceFrame: spatialRayPinDepthMode == .disparityDepthGuided ? jointDepthEvidenceFrame : nil,
+                    depthMode: spatialRayPinDepthMode,
                     session: session,
-                    metersToSceneUnits: stereoMetersToRigSceneUnits
+                    cameraOrigin: SIMD3<Float>(0, 0, 0),
+                    videoPlaneSize: videoPlaneSize,
+                    videoPlaneZ: currentVideoPlaneZ
                 )
 
                 applyViewportRotationOverrides(
                     session: session,
                     overrideLayer: rotationOverrideLayer,
                     liveOverridesActive: liveRotationOverridesActive,
-                    frameIndex: conditionedStereoFrame.frameIndex,
-                    timeSeconds: conditionedStereoFrame.timeSeconds
+                    frameIndex: normalizedFrame.frameIndex,
+                    timeSeconds: normalizedFrame.timeSeconds
                 )
 
                 if frameIndex % 30 == 0,
                    lastCurvePinnedPlaybackLogFrame != frameIndex {
-                    print("[RotoMotion Playback] Applied conditioned stereo-target rig frame \(frameIndex)")
+                    print("[RotoMotion Playback] Applied depth-guided ray-pinned rig frame \(frameIndex)")
                     lastCurvePinnedPlaybackLogFrame = frameIndex
                 }
             } else if applySolvedPoseToReferenceRig,
@@ -1369,21 +1782,56 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                     print("[RotoMotion Playback] Applied curve-pinned rig frame \(frameIndex)")
                     lastCurvePinnedPlaybackLogFrame = frameIndex
                 }
-            } else {
+            } else if solveTargetMode == .spatialDepthGuidedRayPinned {
                 if applySolvedPoseToReferenceRig,
-                   solveTargetMode == .spatialStereo3D,
                    frameIndex % 30 == 0,
                    lastCurvePinnedPlaybackLogFrame != frameIndex {
                     print("""
-                    [RotoMotion Playback] Stereo target solve unavailable
+                    [RotoMotion Playback] Stereo target solve skipped
                       frame: \(frameIndex)
-                      reason: no conditioned stereo target frame
+                      mode: \(solveTargetMode.rawValue)
+                      reason: inactive or unavailable
+                      skinned rig remains visible: \(visible)
                     """)
                     lastCurvePinnedPlaybackLogFrame = frameIndex
                 }
-
+            } else {
                 SkinnedRigRotomationDriver.resetToRest(session: session)
             }
+        }
+
+        private func updateSkinnedGeometryVisibility(
+            session: SkinnedRigSession,
+            visible: Bool
+        ) {
+            session.skinnedMeshNode.isHidden = !visible
+
+            session.displayRootNode.enumerateChildNodes { node, _ in
+                if node.geometry != nil {
+                    node.isHidden = !visible
+                }
+            }
+        }
+
+        private func logStereoSolveSkipped(
+            frameIndex: Int,
+            mode: RotoSolveTargetMode,
+            reason: String,
+            visible: Bool
+        ) {
+            guard frameIndex % 30 == 0,
+                  lastCurvePinnedPlaybackLogFrame != frameIndex else {
+                return
+            }
+
+            print("""
+            [RotoMotion Playback] Stereo target solve skipped
+              frame: \(frameIndex)
+              mode: \(mode.rawValue)
+              reason: \(reason)
+              skinned rig remains visible: \(visible)
+            """)
+            lastCurvePinnedPlaybackLogFrame = frameIndex
         }
 
         private func updateRotationGizmo(

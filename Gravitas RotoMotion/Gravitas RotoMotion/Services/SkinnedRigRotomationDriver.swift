@@ -64,6 +64,86 @@ enum JointRayBuilder {
     }
 }
 
+struct RayPinDepthGuidance {
+    let jointName: String
+    let disparityDepthMeters: Float?
+    let stereoJointDepthMeters: Float?
+    let confidence: Float
+    let accepted: Bool
+    let status: String
+}
+
+enum RayPinDepthGuidanceBuilder {
+    static func build(
+        evidenceFrame: JointDepthEvidenceCapture.Frame?
+    ) -> [String: RayPinDepthGuidance] {
+        guard let evidenceFrame else {
+            return [:]
+        }
+
+        var out: [String: RayPinDepthGuidance] = [:]
+
+        for (jointName, evidence) in evidenceFrame.joints {
+            let accepted = evidence.disparityDepthMeters != nil &&
+                evidence.passesDepthValidation
+
+            out[jointName] = RayPinDepthGuidance(
+                jointName: jointName,
+                disparityDepthMeters: evidence.disparityDepthMeters.map(Float.init),
+                stereoJointDepthMeters: evidence.stereoJointDepthMeters.map(Float.init),
+                confidence: Float(evidence.disparityConfidence),
+                accepted: accepted,
+                status: evidence.status + "|winner=\(evidence.winningCandidateSource ?? "nil")"
+            )
+        }
+
+        return out
+    }
+}
+
+struct RayPinStereoEnvelope {
+    let jointName: String
+    let valid: Bool
+    let status: String
+}
+
+enum RayPinStereoEnvelopeBuilder {
+    static func build(
+        leftFrame: NormalizedMeshyPoseCapture.Frame,
+        rightFrame: NormalizedMeshyPoseCapture.Frame?
+    ) -> [String: RayPinStereoEnvelope] {
+        var out: [String: RayPinStereoEnvelope] = [:]
+
+        for jointName in CanonicalRig.jointNames {
+            guard let left = leftFrame.joints[jointName],
+                  !left.missing else {
+                continue
+            }
+
+            guard let right = rightFrame?.joints[jointName],
+                  !right.missing else {
+                out[jointName] = RayPinStereoEnvelope(
+                    jointName: jointName,
+                    valid: true,
+                    status: "left_only"
+                )
+                continue
+            }
+
+            let verticalMismatch = abs(left.y - right.y)
+            let valid = verticalMismatch < 0.08
+
+            out[jointName] = RayPinStereoEnvelope(
+                jointName: jointName,
+                valid: valid,
+                status: valid ? "stereo_envelope_valid" : "stereo_envelope_vertical_mismatch"
+            )
+        }
+
+        return out
+    }
+}
+
 enum SkinnedRigRotomationDriver {
     static let armChains: [[String]] = [
         ["LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand"],
@@ -169,6 +249,103 @@ enum SkinnedRigRotomationDriver {
         )
     }
 
+    static func rotomateFrameWithDepthGuidedRayPins(
+        normalizedFrame: NormalizedMeshyPoseCapture.Frame,
+        jointDepthEvidenceFrame: JointDepthEvidenceCapture.Frame?,
+        depthMode: SpatialRayPinDepthMode,
+        session: SkinnedRigSession,
+        cameraOrigin: SIMD3<Float>,
+        videoPlaneSize: CGSize,
+        videoPlaneZ: Float,
+        iterations: Int = 8
+    ) {
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = 0
+
+        resetBonesToRestOnly(session: session)
+
+        let rays = JointRayBuilder.buildRays(
+            normalizedFrame: normalizedFrame,
+            cameraOrigin: cameraOrigin,
+            videoPlaneSize: videoPlaneSize,
+            videoPlaneZ: videoPlaneZ
+        )
+        let depthGuidance: [String: RayPinDepthGuidance]
+
+        switch depthMode {
+        case .disparityDepthGuided:
+            depthGuidance = RayPinDepthGuidanceBuilder.build(
+                evidenceFrame: jointDepthEvidenceFrame
+            )
+
+        case .leftEyeRayPinningFallback:
+            depthGuidance = [:]
+        }
+
+        if normalizedFrame.frameIndex == 0 || normalizedFrame.frameIndex % 30 == 0 {
+            print("""
+            [DepthGuidedRayPinning] active spatial solve
+              frame: \(normalizedFrame.frameIndex)
+              mode: \(depthMode.rawValue)
+              usesLeftEyeRays: true
+              usesDisparityDepthGuidance: \(depthMode == .disparityDepthGuided)
+              depthGuidedJoints: \(depthGuidance.values.filter { $0.disparityDepthMeters != nil }.count)
+              usesDirectStereoPoints: false
+              usesConditionedStereoPointCloud: false
+              usesMetersToSceneUnits: false
+              usesHipsSpineInitialFit: false
+            """)
+        }
+
+        placePelvisFromUpperLegRayPins(
+            session: session,
+            rays: rays,
+            depthGuidance: depthGuidance
+        )
+
+        for _ in 0..<iterations {
+            solveDepthGuidedRayPinChain(
+                ["LeftUpLeg", "LeftLeg", "LeftFoot", "LeftToeBase"],
+                rays: rays,
+                depthGuidance: depthGuidance,
+                session: session
+            )
+            solveDepthGuidedRayPinChain(
+                ["RightUpLeg", "RightLeg", "RightFoot", "RightToeBase"],
+                rays: rays,
+                depthGuidance: depthGuidance,
+                session: session
+            )
+            solveDepthGuidedRayPinChain(
+                ["Hips", "Spine02", "Spine01", "Spine", "neck", "Head", "headfront"],
+                rays: rays,
+                depthGuidance: depthGuidance,
+                session: session
+            )
+            solveDepthGuidedRayPinChain(
+                ["LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand"],
+                rays: rays,
+                depthGuidance: depthGuidance,
+                session: session
+            )
+            solveDepthGuidedRayPinChain(
+                ["RightShoulder", "RightArm", "RightForeArm", "RightHand"],
+                rays: rays,
+                depthGuidance: depthGuidance,
+                session: session
+            )
+        }
+
+        SCNTransaction.commit()
+
+        logDepthGuidedRayPinFit(
+            session: session,
+            rays: rays,
+            depthGuidance: depthGuidance,
+            frameIndex: normalizedFrame.frameIndex
+        )
+    }
+
     static func rotomateFrame(
         _ frame: RotoRayAnimationSolveResult.Frame,
         session: SkinnedRigSession,
@@ -266,6 +443,212 @@ enum SkinnedRigRotomationDriver {
             deltaWorld,
             to: hipsNode
         )
+    }
+
+    private static func placePelvisFromUpperLegRayPins(
+        session: SkinnedRigSession,
+        rays: [String: JointRay],
+        depthGuidance: [String: RayPinDepthGuidance]
+    ) {
+        let driverJoints = [
+            "LeftUpLeg",
+            "RightUpLeg"
+        ]
+        var deltas: [SIMD3<Float>] = []
+
+        for jointName in driverJoints {
+            guard depthGuidance[jointName]?.accepted != false,
+                  let bone = session.bonesByCanonicalName[jointName],
+                  let ray = rays[jointName] else {
+                continue
+            }
+
+            let current = bone.simdWorldPosition
+            let target = closestPointOnRay(
+                ray: ray,
+                to: current
+            )
+
+            deltas.append(target - current)
+        }
+
+        guard !deltas.isEmpty else {
+            return
+        }
+
+        let average = deltas.reduce(SIMD3<Float>(0, 0, 0), +) / Float(deltas.count)
+        session.displayRootNode.simdPosition += average
+    }
+
+    private static func solveDepthGuidedRayPinChain(
+        _ chain: [String],
+        rays: [String: JointRay],
+        depthGuidance: [String: RayPinDepthGuidance],
+        session: SkinnedRigSession
+    ) {
+        guard chain.count >= 2 else {
+            return
+        }
+
+        for i in 0..<(chain.count - 1) {
+            let parentName = chain[i]
+            let childName = chain[i + 1]
+
+            guard depthGuidance[childName]?.accepted != false else {
+                continue
+            }
+
+            guard let parentNode = session.bonesByCanonicalName[parentName],
+                  let childNode = session.bonesByCanonicalName[childName],
+                  let childRay = rays[childName] else {
+                continue
+            }
+
+            let parentWorld = parentNode.simdWorldPosition
+            let childWorld = childNode.simdWorldPosition
+            let boneLength = max(
+                simd_length(childWorld - parentWorld),
+                0.0001
+            )
+            let target = targetPointOnRayAtBoneLength(
+                childRay: childRay,
+                parentWorld: parentWorld,
+                currentChildWorld: childWorld,
+                boneLength: boneLength,
+                parentDepthGuidance: depthGuidance[parentName],
+                childDepthGuidance: depthGuidance[childName]
+            )
+
+            rotateParentToMoveChild(
+                parentNode: parentNode,
+                childNode: childNode,
+                childTarget: target
+            )
+        }
+    }
+
+    private static func targetPointOnRayAtBoneLength(
+        childRay: JointRay,
+        parentWorld: SIMD3<Float>,
+        currentChildWorld: SIMD3<Float>,
+        boneLength: Float,
+        parentDepthGuidance: RayPinDepthGuidance?,
+        childDepthGuidance: RayPinDepthGuidance?
+    ) -> SIMD3<Float> {
+        let candidates = raySphereIntersections(
+            ray: childRay,
+            center: parentWorld,
+            radius: boneLength
+        )
+
+        guard !candidates.isEmpty else {
+            return approximatePointOnRayAtBoneLength(
+                ray: childRay,
+                parentWorld: parentWorld,
+                currentChildWorld: currentChildWorld,
+                boneLength: boneLength
+            )
+        }
+
+        return candidates.min {
+            scoreRayCandidate(
+                $0,
+                parentWorld: parentWorld,
+                currentChildWorld: currentChildWorld,
+                parentDepthGuidance: parentDepthGuidance,
+                childDepthGuidance: childDepthGuidance
+            ) < scoreRayCandidate(
+                $1,
+                parentWorld: parentWorld,
+                currentChildWorld: currentChildWorld,
+                parentDepthGuidance: parentDepthGuidance,
+                childDepthGuidance: childDepthGuidance
+            )
+        } ?? candidates[0]
+    }
+
+    private static func scoreRayCandidate(
+        _ candidate: SIMD3<Float>,
+        parentWorld: SIMD3<Float>,
+        currentChildWorld: SIMD3<Float>,
+        parentDepthGuidance: RayPinDepthGuidance?,
+        childDepthGuidance: RayPinDepthGuidance?
+    ) -> Float {
+        var score: Float = 0
+
+        score += simd_length(candidate - currentChildWorld) * 0.15
+
+        let candidateDepthScene = -candidate.z
+        let parentDepthScene = -parentWorld.z
+        let candidateDeltaScene = candidateDepthScene - parentDepthScene
+
+        if let parentDepth = parentDepthGuidance?.disparityDepthMeters,
+           let childDepth = childDepthGuidance?.disparityDepthMeters {
+            let desiredDeltaMeters = childDepth - parentDepth
+
+            if abs(desiredDeltaMeters) > 0.03,
+               abs(candidateDeltaScene) > 0.0001,
+               (desiredDeltaMeters > 0) != (candidateDeltaScene > 0) {
+                score += 1000.0
+            }
+
+            let sceneDepthPerMeter = max(
+                parentDepthScene / max(parentDepth, 0.001),
+                0.0001
+            )
+            let desiredDeltaScene = desiredDeltaMeters * sceneDepthPerMeter
+
+            score += abs(candidateDeltaScene - desiredDeltaScene)
+                * max(childDepthGuidance?.confidence ?? 0.1, 0.1)
+        }
+
+        return score
+    }
+
+    private static func raySphereIntersections(
+        ray: JointRay,
+        center: SIMD3<Float>,
+        radius: Float
+    ) -> [SIMD3<Float>] {
+        let o = ray.origin
+        let d = ray.direction
+        let oc = o - center
+
+        let a = simd_dot(d, d)
+        let b = 2.0 * simd_dot(oc, d)
+        let c = simd_dot(oc, oc) - radius * radius
+        let discriminant = b * b - 4.0 * a * c
+
+        guard discriminant >= 0 else {
+            return []
+        }
+
+        let root = sqrt(discriminant)
+        let t0 = (-b - root) / (2.0 * a)
+        let t1 = (-b + root) / (2.0 * a)
+
+        return [t0, t1]
+            .filter { $0.isFinite && $0 >= 0 }
+            .map { ray.point(at: $0) }
+    }
+
+    private static func approximatePointOnRayAtBoneLength(
+        ray: JointRay,
+        parentWorld: SIMD3<Float>,
+        currentChildWorld: SIMD3<Float>,
+        boneLength: Float
+    ) -> SIMD3<Float> {
+        let closest = closestPointOnRay(
+            ray: ray,
+            to: currentChildWorld
+        )
+        let direction = closest - parentWorld
+
+        guard simd_length(direction) > 0.0001 else {
+            return currentChildWorld
+        }
+
+        return parentWorld + simd_normalize(direction) * boneLength
     }
 
     private static func solvePinnedJointSequence(
@@ -767,6 +1150,55 @@ enum SkinnedRigRotomationDriver {
         }
     }
 
+    private static func logDepthGuidedRayPinFit(
+        session: SkinnedRigSession,
+        rays: [String: JointRay],
+        depthGuidance: [String: RayPinDepthGuidance],
+        frameIndex: Int
+    ) {
+        var worst = "none"
+        var worstError: Float = 0
+        var sum: Float = 0
+        var count: Float = 0
+
+        for jointName in session.jointOrder {
+            guard jointName != "Hips" else {
+                continue
+            }
+
+            guard let bone = session.bonesByCanonicalName[jointName],
+                  let ray = rays[jointName] else {
+                continue
+            }
+
+            let point = bone.simdWorldPosition
+            let closest = closestPointOnRay(
+                ray: ray,
+                to: point
+            )
+            let error = simd_length(point - closest)
+
+            sum += error
+            count += 1
+
+            if error > worstError {
+                worstError = error
+                worst = jointName
+            }
+        }
+
+        if frameIndex == 0 || frameIndex % 30 == 0 {
+            print("""
+            [DepthGuidedRayPinning] fit error
+              frame: \(frameIndex)
+              avgRayDistance: \(String(format: "%.5f", count > 0 ? sum / count : 0))
+              worst: \(worst)
+              worstRayDistance: \(String(format: "%.5f", worstError))
+              depthGuidedJoints: \(depthGuidance.values.filter { $0.disparityDepthMeters != nil }.count)
+            """)
+        }
+    }
+
     private static func lockBase(
         session: SkinnedRigSession,
         targets: [String: SIMD3<Float>]
@@ -1248,11 +1680,9 @@ enum ConditionedStereoTargetRigRotomationDriver {
     static func rotomateFrame(
         _ frame: ConditionedStereoJointCapture.Frame,
         session: SkinnedRigSession,
-        metersToSceneUnits: Float,
+        stereoToRigAlignment: StereoToRigAlignment,
         iterations: Int = 6
     ) {
-        let targetScale = max(metersToSceneUnits, 0.0001)
-
         SCNTransaction.begin()
         SCNTransaction.animationDuration = 0
 
@@ -1260,7 +1690,7 @@ enum ConditionedStereoTargetRigRotomationDriver {
         placeRootFromConditionedPelvis(
             frame,
             session: session,
-            targetScale: targetScale
+            alignment: stereoToRigAlignment
         )
 
         for _ in 0..<iterations {
@@ -1268,31 +1698,31 @@ enum ConditionedStereoTargetRigRotomationDriver {
                 ["LeftUpLeg", "LeftLeg", "LeftFoot", "LeftToeBase"],
                 frame,
                 session: session,
-                targetScale: targetScale
+                alignment: stereoToRigAlignment
             )
             solveChain(
                 ["RightUpLeg", "RightLeg", "RightFoot", "RightToeBase"],
                 frame,
                 session: session,
-                targetScale: targetScale
+                alignment: stereoToRigAlignment
             )
             solveChain(
                 ["Hips", "Spine", "neck", "Head", "headfront"],
                 frame,
                 session: session,
-                targetScale: targetScale
+                alignment: stereoToRigAlignment
             )
             solveChain(
                 ["LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand"],
                 frame,
                 session: session,
-                targetScale: targetScale
+                alignment: stereoToRigAlignment
             )
             solveChain(
                 ["RightShoulder", "RightArm", "RightForeArm", "RightHand"],
                 frame,
                 session: session,
-                targetScale: targetScale
+                alignment: stereoToRigAlignment
             )
         }
 
@@ -1300,7 +1730,7 @@ enum ConditionedStereoTargetRigRotomationDriver {
         logFitError(
             frame,
             session: session,
-            targetScale: targetScale
+            alignment: stereoToRigAlignment
         )
     }
 
@@ -1324,24 +1754,29 @@ enum ConditionedStereoTargetRigRotomationDriver {
     private static func conditionedPosition(
         _ joint: String,
         in frame: ConditionedStereoJointCapture.Frame,
-        targetScale: Float
+        alignment: StereoToRigAlignment
     ) -> SIMD3<Float>? {
         guard let target = frame.joints[joint],
               target.positionCameraXYZ.count == 3 else {
             return nil
         }
 
-        return SIMD3<Float>(
+        let stereoMeters = SIMD3<Float>(
             Float(target.positionCameraXYZ[0]),
             Float(target.positionCameraXYZ[1]),
             Float(target.positionCameraXYZ[2])
-        ) * targetScale
+        )
+
+        return StereoToRigAlignmentSolver.transform(
+            stereoMeters,
+            alignment: alignment
+        )
     }
 
     private static func placeRootFromConditionedPelvis(
         _ frame: ConditionedStereoJointCapture.Frame,
         session: SkinnedRigSession,
-        targetScale: Float
+        alignment: StereoToRigAlignment
     ) {
         let targetNames = [
             "Hips",
@@ -1355,7 +1790,7 @@ enum ConditionedStereoTargetRigRotomationDriver {
                   let target = conditionedPosition(
                     name,
                     in: frame,
-                    targetScale: targetScale
+                    alignment: alignment
                   ) else {
                 continue
             }
@@ -1379,7 +1814,7 @@ enum ConditionedStereoTargetRigRotomationDriver {
         _ chain: [String],
         _ frame: ConditionedStereoJointCapture.Frame,
         session: SkinnedRigSession,
-        targetScale: Float
+        alignment: StereoToRigAlignment
     ) {
         guard chain.count >= 2 else {
             return
@@ -1394,7 +1829,7 @@ enum ConditionedStereoTargetRigRotomationDriver {
                   let childTarget = conditionedPosition(
                     childName,
                     in: frame,
-                    targetScale: targetScale
+                    alignment: alignment
                   ) else {
                 continue
             }
@@ -1451,7 +1886,7 @@ enum ConditionedStereoTargetRigRotomationDriver {
     private static func logFitError(
         _ frame: ConditionedStereoJointCapture.Frame,
         session: SkinnedRigSession,
-        targetScale: Float
+        alignment: StereoToRigAlignment
     ) {
         var total: Float = 0
         var count: Float = 0
@@ -1463,7 +1898,7 @@ enum ConditionedStereoTargetRigRotomationDriver {
                   let target = conditionedPosition(
                     jointName,
                     in: frame,
-                    targetScale: targetScale
+                    alignment: alignment
                   ) else {
                 continue
             }
@@ -1488,7 +1923,291 @@ enum ConditionedStereoTargetRigRotomationDriver {
           avg: \(count > 0 ? total / count : 0)
           worstJoint: \(worstJoint)
           worstError: \(worstError)
-          metersToSceneUnits: \(targetScale)
+          alignmentValid: \(alignment.isValid)
+          alignmentScale: \(alignment.scale)
+          alignmentTranslation: \(alignment.translation.simdFloat)
+        """)
+    }
+}
+
+enum FusedStereoTargetRigRotomationDriver {
+    static func rotomateFrame(
+        _ frame: FusedStereoJointTargetCapture.Frame,
+        session: SkinnedRigSession,
+        stereoToRigAlignment: StereoToRigAlignment,
+        iterations: Int = 6
+    ) {
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = 0
+
+        resetBonesToRestOnly(session: session)
+        placeRootFromFusedPelvis(
+            frame,
+            session: session,
+            alignment: stereoToRigAlignment
+        )
+
+        for _ in 0..<iterations {
+            solveChain(
+                ["LeftUpLeg", "LeftLeg", "LeftFoot", "LeftToeBase"],
+                frame,
+                session: session,
+                alignment: stereoToRigAlignment
+            )
+            solveChain(
+                ["RightUpLeg", "RightLeg", "RightFoot", "RightToeBase"],
+                frame,
+                session: session,
+                alignment: stereoToRigAlignment
+            )
+            solveChain(
+                ["Hips", "Spine", "neck", "Head", "headfront"],
+                frame,
+                session: session,
+                alignment: stereoToRigAlignment
+            )
+            solveChain(
+                ["LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand"],
+                frame,
+                session: session,
+                alignment: stereoToRigAlignment
+            )
+            solveChain(
+                ["RightShoulder", "RightArm", "RightForeArm", "RightHand"],
+                frame,
+                session: session,
+                alignment: stereoToRigAlignment
+            )
+        }
+
+        SCNTransaction.commit()
+        logFitError(
+            frame,
+            session: session,
+            alignment: stereoToRigAlignment
+        )
+    }
+
+    private static func resetBonesToRestOnly(
+        session: SkinnedRigSession
+    ) {
+        for jointName in session.jointOrder {
+            guard let bone = session.bonesByCanonicalName[jointName],
+                  let restPosition = session.restLocalPositions[jointName],
+                  let restOrientation = session.restLocalOrientations[jointName],
+                  let restScale = session.restLocalScales[jointName] else {
+                continue
+            }
+
+            bone.simdPosition = restPosition
+            bone.simdOrientation = restOrientation
+            bone.simdScale = restScale
+        }
+    }
+
+    private static func fusedPosition(
+        _ joint: String,
+        in frame: FusedStereoJointTargetCapture.Frame,
+        alignment: StereoToRigAlignment
+    ) -> SIMD3<Float>? {
+        guard let target = frame.joints[joint],
+              !target.rejected,
+              let values = target.positionCameraXYZ,
+              values.count == 3 else {
+            return nil
+        }
+
+        let stereoMeters = SIMD3<Float>(
+            Float(values[0]),
+            Float(values[1]),
+            Float(values[2])
+        )
+
+        return StereoToRigAlignmentSolver.transform(
+            stereoMeters,
+            alignment: alignment
+        )
+    }
+
+    private static func fusedWeight(
+        _ joint: String,
+        in frame: FusedStereoJointTargetCapture.Frame
+    ) -> Float {
+        guard let target = frame.joints[joint],
+              !target.rejected else {
+            return 0
+        }
+
+        let base = Float(max(0.05, min(target.confidence, 1.0)))
+
+        if target.status.contains("held") {
+            return max(0.05, base * 0.5)
+        }
+
+        return base
+    }
+
+    private static func placeRootFromFusedPelvis(
+        _ frame: FusedStereoJointTargetCapture.Frame,
+        session: SkinnedRigSession,
+        alignment: StereoToRigAlignment
+    ) {
+        let targetNames = [
+            "Hips",
+            "LeftUpLeg",
+            "RightUpLeg"
+        ]
+        var weightedDelta = SIMD3<Float>(0, 0, 0)
+        var totalWeight: Float = 0
+
+        for name in targetNames {
+            guard let bone = session.bonesByCanonicalName[name],
+                  let target = fusedPosition(
+                    name,
+                    in: frame,
+                    alignment: alignment
+                  ) else {
+                continue
+            }
+
+            let weight = fusedWeight(name, in: frame)
+            weightedDelta += (target - bone.simdWorldPosition) * weight
+            totalWeight += weight
+        }
+
+        guard totalWeight > 0 else {
+            return
+        }
+
+        session.displayRootNode.simdPosition += weightedDelta / totalWeight
+    }
+
+    private static func solveChain(
+        _ chain: [String],
+        _ frame: FusedStereoJointTargetCapture.Frame,
+        session: SkinnedRigSession,
+        alignment: StereoToRigAlignment
+    ) {
+        guard chain.count >= 2 else {
+            return
+        }
+
+        for i in 0..<(chain.count - 1) {
+            let parentName = chain[i]
+            let childName = chain[i + 1]
+
+            guard let parentNode = session.bonesByCanonicalName[parentName],
+                  let childNode = session.bonesByCanonicalName[childName],
+                  let target = fusedPosition(
+                    childName,
+                    in: frame,
+                    alignment: alignment
+                  ) else {
+                continue
+            }
+
+            let weight = fusedWeight(childName, in: frame)
+            let childWorld = childNode.simdWorldPosition
+            let weightedTarget = childWorld + (target - childWorld) * weight
+
+            rotateParentToMoveChild(
+                parentNode: parentNode,
+                childNode: childNode,
+                childTarget: weightedTarget
+            )
+        }
+    }
+
+    private static func rotateParentToMoveChild(
+        parentNode: SCNNode,
+        childNode: SCNNode,
+        childTarget: SIMD3<Float>
+    ) {
+        let parentWorld = parentNode.simdWorldPosition
+        let childWorld = childNode.simdWorldPosition
+        let current = childWorld - parentWorld
+        let target = childTarget - parentWorld
+
+        guard simd_length(current) > 0.0001,
+              simd_length(target) > 0.0001 else {
+            return
+        }
+
+        let deltaWorld = simd_quatf(
+            from: simd_normalize(current),
+            to: simd_normalize(target)
+        )
+
+        applyWorldRotationDelta(
+            deltaWorld,
+            to: parentNode
+        )
+    }
+
+    private static func applyWorldRotationDelta(
+        _ deltaWorld: simd_quatf,
+        to node: SCNNode
+    ) {
+        guard let parent = node.parent else {
+            node.simdOrientation = deltaWorld * node.simdOrientation
+            return
+        }
+
+        let parentWorld = parent.simdWorldOrientation
+        let localDelta = simd_inverse(parentWorld) * deltaWorld * parentWorld
+
+        node.simdOrientation = localDelta * node.simdOrientation
+    }
+
+    private static func logFitError(
+        _ frame: FusedStereoJointTargetCapture.Frame,
+        session: SkinnedRigSession,
+        alignment: StereoToRigAlignment
+    ) {
+        var total: Float = 0
+        var count: Float = 0
+        var worstJoint = "none"
+        var worstError: Float = 0
+        var rejected = 0
+
+        for jointName in session.jointOrder {
+            if frame.joints[jointName]?.rejected == true {
+                rejected += 1
+            }
+
+            guard let bone = session.bonesByCanonicalName[jointName],
+                  let target = fusedPosition(
+                    jointName,
+                    in: frame,
+                    alignment: alignment
+                  ) else {
+                continue
+            }
+
+            let error = simd_length(bone.simdWorldPosition - target)
+            total += error
+            count += 1
+
+            if error > worstError {
+                worstError = error
+                worstJoint = jointName
+            }
+        }
+
+        guard frame.frameIndex == 0 || frame.frameIndex % 30 == 0 else {
+            return
+        }
+
+        print("""
+        [FusedStereoTargetRigRotomation] fit error
+          frame: \(frame.frameIndex)
+          avg: \(count > 0 ? total / count : 0)
+          worstJoint: \(worstJoint)
+          worstError: \(worstError)
+          rejected: \(rejected)
+          alignmentValid: \(alignment.isValid)
+          alignmentScale: \(alignment.scale)
+          alignmentTranslation: \(alignment.translation.simdFloat)
         """)
     }
 }

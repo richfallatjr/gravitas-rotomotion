@@ -63,6 +63,58 @@ enum RotationGizmoSpace: String, CaseIterable, Identifiable, Codable {
     }
 }
 
+private struct SpatialDisparityBuildProgressSnapshot: Sendable {
+    let stage: String
+    let completedUnits: Int
+    let totalUnits: Int
+
+    var fraction: Double {
+        guard totalUnits > 0 else {
+            return 0
+        }
+
+        return min(1, max(0, Double(completedUnits) / Double(totalUnits)))
+    }
+
+    var statusText: String {
+        guard totalUnits > 0 else {
+            return "\(stage): waiting..."
+        }
+
+        return "\(stage): \(completedUnits)/\(totalUnits)"
+    }
+}
+
+private final class SpatialDisparityBuildProgressTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current = SpatialDisparityBuildProgressSnapshot(
+        stage: "Preparing disparity build",
+        completedUnits: 0,
+        totalUnits: 1
+    )
+
+    func update(
+        stage: String,
+        completedUnits: Int,
+        totalUnits: Int
+    ) {
+        lock.lock()
+        current = SpatialDisparityBuildProgressSnapshot(
+            stage: stage,
+            completedUnits: completedUnits,
+            totalUnits: max(totalUnits, 1)
+        )
+        lock.unlock()
+    }
+
+    func snapshot() -> SpatialDisparityBuildProgressSnapshot {
+        lock.lock()
+        let value = current
+        lock.unlock()
+        return value
+    }
+}
+
 @MainActor
 final class RotoMotionViewModel: ObservableObject {
     enum SessionPoseSource: String {
@@ -156,10 +208,32 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var stereoConditioningStatus = "No conditioned stereo targets."
     @Published var stereoConditioningSettings = StereoTargetConditioningSettings.default
     @Published var spatialDisparityMapCapture: SpatialDisparityMapCapture?
+    @Published var spatialDisparityPreviewCapture: SpatialDisparityPreviewCapture?
     @Published var jointDepthEvidenceCapture: JointDepthEvidenceCapture?
     @Published var spatialDisparityStatus = "No disparity map built."
+    @Published var spatialDisparityDebugStatus = "No disparity debug proof."
+    @Published var spatialDisparityDebugDirectoryPath = ""
+    @Published var spatialDisparityDepthPreviewImage: NSImage?
+    @Published var spatialDisparityConfidencePreviewImage: NSImage?
+    @Published var spatialDisparityRawPreviewImage: NSImage?
+    @Published var spatialDisparityDebugFrameIndex = 0
     @Published var showJointDepthValidationOverlay = true
     @Published var stereoDisparitySettings = StereoDisparitySettings.default
+    @Published var isBuildingSpatialDisparity = false
+    @Published var spatialDisparityBuildProgress: Double = 0
+    @Published var spatialDisparityBuildProgressText = "No disparity build running."
+    @Published var spatialSolveReadiness: SpatialSolveReadiness = .notSpatial
+    @Published var spatialRayPinDepthMode: SpatialRayPinDepthMode = .leftEyeRayPinningFallback
+    @Published var spatialSolveStatus = "No spatial solve ready."
+    @Published var showDisparityOnImagePlane = true
+    @Published var disparityPlateOverlayOpacity: Double = 0.65
+    @Published var selectedDisparityPlateOverlay: DisparityPlateOverlayKind = .depth
+    @Published var fusedStereoJointTargetCapture: FusedStereoJointTargetCapture?
+    @Published var showFusedStereoTargets = true
+    @Published var fusedStereoTargetStatus = "No fused stereo targets."
+    @Published var stereoTargetFusionSettings = StereoTargetFusionSettings.default
+    @Published var stereoToRigAlignment: StereoToRigAlignment = .invalid
+    @Published var stereoAlignmentStatus = "Stereo-to-rig alignment not calibrated."
     @Published var spatialBaselineMeters: Double = 0.019 {
         didSet {
             persist(spatialBaselineMeters, AppStorageKeys.spatialBaselineMeters)
@@ -352,6 +426,9 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var skinnedRigStatus = "No skinned rig loaded."
     @Published var showSkinnedRig = true {
         didSet { persist(showSkinnedRig, AppStorageKeys.showSkinnedRig) }
+    }
+    @Published var showSkinnedGeometry = true {
+        didSet { persist(showSkinnedGeometry, AppStorageKeys.showSkinnedGeometry) }
     }
     @Published var viewportZoom: Double = 2.0 {
         didSet { persist(viewportZoom, AppStorageKeys.viewportZoom) }
@@ -551,6 +628,7 @@ final class RotoMotionViewModel: ObservableObject {
     private var playbackStartVideoTime = 0.0
     private var audioPlayer: AVPlayer?
     private var audioEndObserver: NSObjectProtocol?
+    private var spatialDisparityProgressTask: Task<Void, Never>?
     private var suppressSessionDirtyTracking = false
 
     init() {
@@ -622,6 +700,7 @@ final class RotoMotionViewModel: ObservableObject {
         static let retargetClipID = prefix + "retargetClipID"
         static let includeHipsTranslationInUSDZ = prefix + "includeHipsTranslationInUSDZ"
         static let showSkinnedRig = prefix + "showSkinnedRig"
+        static let showSkinnedGeometry = prefix + "showSkinnedGeometry"
         static let viewportZoom = prefix + "viewportZoom"
         static let cameraProfile = prefix + "cameraProfile"
         static let currentVideoPlaneZ = prefix + "currentVideoPlaneZ"
@@ -867,6 +946,7 @@ final class RotoMotionViewModel: ObservableObject {
         if let value = storedBool(AppStorageKeys.includeHipsTranslationInUSDZ) { includeHipsTranslationInUSDZ = value }
 
         if let value = storedBool(AppStorageKeys.showSkinnedRig) { showSkinnedRig = value }
+        if let value = storedBool(AppStorageKeys.showSkinnedGeometry) { showSkinnedGeometry = value }
         if let value = storedDouble(AppStorageKeys.viewportZoom) { viewportZoom = value }
         if let rawValue = storedString(AppStorageKeys.cameraProfile),
            let value = CameraProfile(rawValue: rawValue) {
@@ -1109,12 +1189,14 @@ final class RotoMotionViewModel: ObservableObject {
                 loadSkinnedRigUSDZFromReference(url)
             } else {
                 skinnedRigSession = nil
+                invalidateStereoToRigAlignment("session reference USDZ path missing")
                 skinnedRigStatus = "Reference USDZ path from session no longer exists: \(path)"
                 diagnostics.log(skinnedRigStatus)
             }
         } else {
             referenceSolveUSDZURL = nil
             skinnedRigSession = nil
+            invalidateStereoToRigAlignment("session has no reference USDZ")
             skinnedRigStatus = "No skinned rig loaded."
         }
 
@@ -1406,6 +1488,32 @@ final class RotoMotionViewModel: ObservableObject {
         }
     }
 
+    var currentSpatialDisparityFrame: SpatialDisparityMapCapture.Frame? {
+        guard let frames = spatialDisparityMapCapture?.frames,
+              !frames.isEmpty else {
+            return nil
+        }
+
+        let time = currentVideoTimeSeconds
+
+        return frames.min {
+            abs($0.timeSeconds - time) < abs($1.timeSeconds - time)
+        }
+    }
+
+    var currentSpatialDisparityPreviewFrame: SpatialDisparityPreviewCapture.Frame? {
+        guard let frames = spatialDisparityPreviewCapture?.frames,
+              !frames.isEmpty else {
+            return nil
+        }
+
+        let time = currentVideoTimeSeconds
+
+        return frames.min {
+            abs($0.timeSeconds - time) < abs($1.timeSeconds - time)
+        }
+    }
+
     var currentJointDepthEvidenceFrame: JointDepthEvidenceCapture.Frame? {
         guard let frames = jointDepthEvidenceCapture?.frames,
               !frames.isEmpty else {
@@ -1417,6 +1525,89 @@ final class RotoMotionViewModel: ObservableObject {
         return frames.min {
             abs($0.timeSeconds - time) < abs($1.timeSeconds - time)
         }
+    }
+
+    var currentFusedStereoTargetFrame: FusedStereoJointTargetCapture.Frame? {
+        guard let frames = fusedStereoJointTargetCapture?.frames,
+              !frames.isEmpty else {
+            return nil
+        }
+
+        let time = currentVideoTimeSeconds
+
+        return frames.min {
+            abs($0.timeSeconds - time) < abs($1.timeSeconds - time)
+        }
+    }
+
+    func updateSpatialSolveReadiness() {
+        guard captureMode == .spatialVideo else {
+            spatialSolveReadiness = .notSpatial
+            spatialSolveStatus = "Monocular mode."
+            return
+        }
+
+        guard normalizedLeftCapture != nil else {
+            spatialSolveReadiness = .needsVision
+            spatialSolveStatus = "Spatial solve needs left-eye Vision."
+            return
+        }
+
+        guard spatialDisparityMapCapture != nil else {
+            spatialSolveReadiness = .needsDisparityMap
+            spatialSolveStatus = "Spatial solve needs disparity map before solving."
+            return
+        }
+
+        guard jointDepthEvidenceCapture != nil else {
+            spatialSolveReadiness = .needsJointDepthEvidence
+            spatialSolveStatus = "Spatial solve needs joint depth evidence before solving."
+            return
+        }
+
+        spatialSolveReadiness = .ready
+        spatialSolveStatus = "Spatial solve ready: left-eye rays + disparity depth."
+    }
+
+    func calibrateStereoToRigAlignmentIfPossible() {
+        guard let session = skinnedRigSession else {
+            stereoToRigAlignment = .invalid
+            stereoAlignmentStatus = "Stereo alignment skipped: no skinned rig session."
+            diagnostics.log(stereoAlignmentStatus)
+            return
+        }
+
+        guard let frame = conditionedStereoJointCapture?.frames.first else {
+            stereoToRigAlignment = .invalid
+            stereoAlignmentStatus = "Stereo alignment skipped: no conditioned stereo frame."
+            diagnostics.log(stereoAlignmentStatus)
+            return
+        }
+
+        guard let alignment = StereoToRigAlignmentSolver.solveInitialAlignment(
+            stereoFrame: frame,
+            session: session
+        ) else {
+            stereoToRigAlignment = .invalid
+            stereoAlignmentStatus = "Stereo alignment failed: not enough matching joints."
+            diagnostics.log(stereoAlignmentStatus)
+            return
+        }
+
+        stereoToRigAlignment = alignment
+        stereoAlignmentStatus = """
+        Stereo-to-rig alignment calibrated:
+          scale: \(alignment.scale)
+          translation: \(alignment.translation.simdFloat)
+          rotationYRadians: \(alignment.rotationYRadians)
+        """
+        diagnostics.log(stereoAlignmentStatus)
+    }
+
+    private func invalidateStereoToRigAlignment(_ reason: String) {
+        stereoToRigAlignment = .invalid
+        stereoAlignmentStatus = "Stereo-to-rig alignment not calibrated: \(reason)"
+        diagnostics.log(stereoAlignmentStatus)
     }
 
     var currentSmoothedFrame: SmoothedMeshyPoseCapture.Frame? {
@@ -1752,51 +1943,9 @@ final class RotoMotionViewModel: ObservableObject {
         diagnostics.log(depthCalibrationStatus)
     }
 
-    func solveFullAnimationWithCameraRays() {
+    func solveFullAnimationWithCameraRays() async {
         if captureMode == .spatialVideo {
-            guard let conditionedStereoJointCapture else {
-                rayAnimationSolveStatus = "Spatial solve failed: no conditionedStereoJointCapture."
-                status = rayAnimationSolveStatus
-                diagnostics.log("""
-                Spatial solve failed:
-                  reason: no conditionedStereoJointCapture
-                  solveTargetMode: \(solveTargetMode.rawValue)
-                """)
-                return
-            }
-
-            if let referenceRigProfile {
-                captureSessionSkeletonIdentity(from: referenceRigProfile)
-            } else {
-                captureCanonicalSessionSkeletonIdentity()
-            }
-
-            solveTargetMode = .spatialStereo3D
-            applySolvedPoseToReferenceRig = true
-            showSkinnedRig = true
-            currentRaySolveResult = nil
-            rayAnimationSolveResult = nil
-            sessionArmatureSnapshot = nil
-            sessionArmaturePoseBuffer = nil
-            bakedRigAnimation = nil
-            bakedRigAnimationStatus = "Spatial stereo solve changed. Bake rig animation before export."
-            sessionPoseSource = .posedArmatureLocalTransforms
-            sessionPoseStatus = """
-            The actual skinned rig is rotomated live from triangulated stereo 3D joint targets.
-            Stereo target positions are converted from meters into the reference rig's native scene units.
-            """
-            raySolveStatus = "Single-frame ray solve cleared."
-            rayAnimationSolveStatus = "Spatial conditioned stereo target solve enabled for \(conditionedStereoJointCapture.frames.count) frames."
-            status = rayAnimationSolveStatus
-
-            diagnostics.log("""
-            Solve Full Animation using conditioned spatial stereo 3D targets.
-              conditionedFrames: \(conditionedStereoJointCapture.frames.count)
-              rawStereoFrames: \(stereoJointCapture?.frames.count ?? 0)
-              metersToSceneUnits: \(stereoMetersToRigSceneUnits)
-              referenceUnitScaleToMeters: \(referenceRigProfile?.unitScaleToMeters ?? 1.0)
-              applySolvedPoseToReferenceRig: \(applySolvedPoseToReferenceRig)
-            """)
+            await solveFullSpatialRayPinningWithDisparityOrFallback()
             return
         }
 
@@ -1943,6 +2092,113 @@ final class RotoMotionViewModel: ObservableObject {
         """)
     }
 
+    func solveFullSpatialRayPinningWithDisparityOrFallback() async {
+        guard normalizedLeftCapture != nil else {
+            applySolvedPoseToReferenceRig = false
+            rayAnimationSolveStatus = "Spatial solve blocked: run Vision on the left eye first."
+            status = rayAnimationSolveStatus
+
+            diagnostics.log("""
+            Spatial solve blocked:
+              reason: normalizedLeftCapture missing.
+              action: Run Vision first.
+            """)
+            return
+        }
+
+        guard !isBuildingSpatialDisparity else {
+            applySolvedPoseToReferenceRig = false
+            rayAnimationSolveStatus = "Spatial solve blocked: disparity build already in progress."
+            status = rayAnimationSolveStatus
+
+            diagnostics.log("""
+            Spatial solve blocked:
+              reason: disparity build is already running.
+              action: wait for Spatial disparity build SUCCESS or FAILED before solving.
+            """)
+            return
+        }
+
+        var disparityOK = spatialDisparityMapCapture != nil &&
+            spatialDisparityPreviewCapture != nil &&
+            jointDepthEvidenceCapture != nil
+
+        if !disparityOK {
+            diagnostics.log("""
+            Spatial solve preparing disparity:
+              currentDisparityFrames: \(spatialDisparityMapCapture?.frames.count ?? 0)
+              currentPreviewFrames: \(spatialDisparityPreviewCapture?.frames.count ?? 0)
+              currentEvidenceFrames: \(jointDepthEvidenceCapture?.frames.count ?? 0)
+            """)
+
+            disparityOK = await buildSpatialDisparityMaps()
+        }
+
+        if disparityOK {
+            spatialRayPinDepthMode = .disparityDepthGuided
+            diagnostics.log("""
+            Spatial solve using disparity-depth-guided left-eye ray pinning.
+              disparityFrames: \(spatialDisparityMapCapture?.frames.count ?? 0)
+              previewFrames: \(spatialDisparityPreviewCapture?.frames.count ?? 0)
+              evidenceFrames: \(jointDepthEvidenceCapture?.frames.count ?? 0)
+              disparityOverlayVisible: \(showDisparityOnImagePlane)
+            """)
+        } else {
+            spatialRayPinDepthMode = .leftEyeRayPinningFallback
+            diagnostics.log("""
+            Spatial solve falling back to LEFT-EYE RAY PINNING ONLY.
+              reason: disparity build failed or produced no evidence.
+              this is explicit fallback, not hidden.
+            """)
+        }
+
+        if let referenceRigProfile {
+            captureSessionSkeletonIdentity(from: referenceRigProfile)
+        } else {
+            captureCanonicalSessionSkeletonIdentity()
+        }
+
+        solveTargetMode = .spatialDepthGuidedRayPinned
+        applySolvedPoseToReferenceRig = true
+        showSkinnedRig = true
+        currentRaySolveResult = nil
+        rayAnimationSolveResult = nil
+        sessionArmatureSnapshot = nil
+        sessionArmaturePoseBuffer = nil
+        bakedRigAnimation = nil
+        bakedRigAnimationStatus = "Spatial depth-guided ray-pinned solve changed. Bake rig animation before export."
+        sessionPoseSource = .posedArmatureLocalTransforms
+        sessionPoseStatus = """
+        The actual skinned rig is rotomated live from depth-guided ray pins.
+        Left-eye Vision supplies rays; disparity evidence chooses depth along each ray.
+        """
+        raySolveStatus = "Single-frame ray solve cleared."
+        rayAnimationSolveStatus = "Spatial depth-guided ray-pinning solve enabled."
+        spatialSolveStatus = """
+        Spatial solve active:
+          mode: \(spatialRayPinDepthMode.rawValue)
+          solveTargetMode: \(solveTargetMode.rawValue)
+        """
+        status = rayAnimationSolveStatus
+
+        diagnostics.log("""
+        Solve Full Animation using LEFT-EYE ray pinning:
+          solveTargetMode: \(solveTargetMode.rawValue)
+          spatialRayPinDepthMode: \(spatialRayPinDepthMode.rawValue)
+          leftNormalizedFrames: \(normalizedLeftCapture?.frames.count ?? 0)
+          disparityFrames: \(spatialDisparityMapCapture?.frames.count ?? 0)
+          disparityPreviewFrames: \(spatialDisparityPreviewCapture?.frames.count ?? 0)
+          jointDepthEvidenceFrames: \(jointDepthEvidenceCapture?.frames.count ?? 0)
+          usesLeftEyeRays: true
+          usesRightEyeForRayPinning: false
+          usesDisparityDepthGuidance: \(spatialRayPinDepthMode == .disparityDepthGuided)
+          usesDirectStereoPoints: false
+          usesConditionedStereoPointCloud: false
+          usesMetersToSceneUnits: false
+          usesHipsSpineInitialFit: false
+        """)
+    }
+
     func loadSkinnedRigUSDZ() {
         guard let url = FilePanelHelpers.openUSDZURL() else {
             skinnedRigStatus = "Skinned rig selection canceled."
@@ -1969,6 +2225,8 @@ final class RotoMotionViewModel: ObservableObject {
             )
 
             skinnedRigSession = session
+            showSkinnedRig = true
+            showSkinnedGeometry = true
             if targetCharacterUSDZURL == nil {
                 targetCharacterUSDZURL = url
             }
@@ -2004,9 +2262,11 @@ final class RotoMotionViewModel: ObservableObject {
             diagnostics.log(sessionPoseStatus)
 
             fitReferenceRigHipsSpineIfPossible()
+            calibrateStereoToRigAlignmentIfPossible()
             refreshSelectedJointEulerFields()
         } catch {
             skinnedRigSession = nil
+            invalidateStereoToRigAlignment("skinned rig load failed")
             sessionArmaturePoseBuffer = nil
             bakedRigAnimation = nil
             bakedRigAnimationStatus = "Reference rig load failed. Bake unavailable."
@@ -2459,17 +2719,74 @@ final class RotoMotionViewModel: ObservableObject {
         spatialStereoAvailable = false
         spatialDepthStatus = "No stereo depth available."
         stereoConditioningStatus = "No conditioned stereo targets."
+        invalidateStereoToRigAlignment("spatial video state reset")
         spatialVideoStatus = "No spatial video loaded."
         stereoVisionStatus = "No stereo Vision solve yet."
+        spatialSolveReadiness = captureMode == .spatialVideo ? .needsVision : .notSpatial
+        spatialSolveStatus = captureMode == .spatialVideo
+            ? "Spatial video loaded. Run Vision on both eyes, then build disparity before solve."
+            : "Monocular mode."
         solveTargetMode = .monocularRayPinned
+        applySolvedPoseToReferenceRig = false
         activeCameraProfileSource = .monocularVerticalProfile
         updateActiveCameraIntrinsicsForCurrentMonocularFrame()
     }
 
     private func resetSpatialDisparityState(status: String) {
         spatialDisparityMapCapture = nil
+        spatialDisparityPreviewCapture = nil
         jointDepthEvidenceCapture = nil
         spatialDisparityStatus = status
+        spatialRayPinDepthMode = .leftEyeRayPinningFallback
+        finishSpatialDisparityProgress(
+            progress: 0,
+            text: "No disparity build running."
+        )
+        resetSpatialDisparityDebugProof(status: "No disparity debug proof.")
+        resetFusedStereoTargetState(status: "No fused stereo targets.")
+        updateSpatialSolveReadiness()
+    }
+
+    private func resetSpatialDisparityDebugProof(status: String) {
+        spatialDisparityDebugStatus = status
+        spatialDisparityDebugDirectoryPath = ""
+        spatialDisparityDepthPreviewImage = nil
+        spatialDisparityConfidencePreviewImage = nil
+        spatialDisparityRawPreviewImage = nil
+    }
+
+    private func resetFusedStereoTargetState(status: String) {
+        fusedStereoJointTargetCapture = nil
+        fusedStereoTargetStatus = status
+    }
+
+    private func startSpatialDisparityProgressPolling(
+        _ tracker: SpatialDisparityBuildProgressTracker
+    ) {
+        spatialDisparityProgressTask?.cancel()
+        spatialDisparityProgressTask = Task { [weak self] in
+            while !Task.isCancelled {
+                let snapshot = tracker.snapshot()
+
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.spatialDisparityBuildProgress = snapshot.fraction
+                    self.spatialDisparityBuildProgressText = snapshot.statusText
+                }
+
+                try? await Task.sleep(nanoseconds: 120_000_000)
+            }
+        }
+    }
+
+    private func finishSpatialDisparityProgress(
+        progress: Double,
+        text: String
+    ) {
+        spatialDisparityProgressTask?.cancel()
+        spatialDisparityProgressTask = nil
+        spatialDisparityBuildProgress = min(1, max(0, progress))
+        spatialDisparityBuildProgressText = text
     }
 
     func loadSpatialVideo(
@@ -2609,6 +2926,8 @@ final class RotoMotionViewModel: ObservableObject {
               horizontalFOV: \(activeCameraIntrinsics.horizontalFOVDegrees)
               verticalFOV: \(activeCameraIntrinsics.verticalFOVDegrees)
             """)
+            applySolvedPoseToReferenceRig = false
+            updateSpatialSolveReadiness()
         } catch {
             leftEyeFrames = []
             rightEyeFrames = []
@@ -2626,6 +2945,7 @@ final class RotoMotionViewModel: ObservableObject {
             stereoJointCapture = nil
             conditionedStereoJointCapture = nil
             stereoConditioningStatus = "No conditioned stereo targets."
+            invalidateStereoToRigAlignment("spatial decode failed")
             resetSpatialDisparityState(status: "Spatial disparity unavailable: spatial decode failed.")
             spatialVideoMetadata = try? await SpatialVideoMetadataReader.readMetadata(url: url)
             spatialStereoAvailable = false
@@ -2639,6 +2959,8 @@ final class RotoMotionViewModel: ObservableObject {
             spatialVideoStatus = "Spatial video decode failed: \(error.localizedDescription)"
             videoPlaybackStatus = "Spatial video decode failed. No fallback display."
             status = spatialVideoStatus
+            applySolvedPoseToReferenceRig = false
+            updateSpatialSolveReadiness()
             diagnostics.log("""
             Spatial video decode FAILED:
               no fallback: true
@@ -2730,6 +3052,7 @@ final class RotoMotionViewModel: ObservableObject {
                 stereoJointCapture = nil
                 conditionedStereoJointCapture = nil
                 stereoConditioningStatus = "No conditioned stereo targets."
+                invalidateStereoToRigAlignment("spatial metadata missing")
                 resetSpatialDisparityState(status: "Spatial disparity unavailable: missing spatial metadata.")
                 spatialStereoAvailable = false
                 stereoVisionStatus = "Spatial Vision failed: missing spatial video metadata."
@@ -2754,6 +3077,8 @@ final class RotoMotionViewModel: ObservableObject {
             spatialVideoStatus = stereoVisionStatus
             isWorking = false
             status = stereoVisionStatus
+            applySolvedPoseToReferenceRig = false
+            updateSpatialSolveReadiness()
             diagnostics.log(stereoVisionStatus)
             diagnostics.log("""
             Spatial both-eye Vision overlay state:
@@ -2769,12 +3094,15 @@ final class RotoMotionViewModel: ObservableObject {
             stereoJointCapture = nil
             conditionedStereoJointCapture = nil
             stereoConditioningStatus = "No conditioned stereo targets."
+            invalidateStereoToRigAlignment("spatial Vision failed")
             resetSpatialDisparityState(status: "Spatial disparity unavailable: spatial Vision failed.")
             spatialStereoAvailable = false
             stereoVisionStatus = "Spatial Vision failed: \(error.localizedDescription)"
             spatialVideoStatus = stereoVisionStatus
             status = stereoVisionStatus
             lastVisionError = error.localizedDescription
+            applySolvedPoseToReferenceRig = false
+            updateSpatialSolveReadiness()
             diagnostics.log("""
             Spatial Vision FAILED:
               error: \(error)
@@ -2822,6 +3150,8 @@ final class RotoMotionViewModel: ObservableObject {
             settings: stereoConditioningSettings
         )
         conditionedStereoJointCapture = conditioned
+        invalidateStereoToRigAlignment("conditioned stereo targets rebuilt")
+        calibrateStereoToRigAlignmentIfPossible()
         resetSpatialDisparityState(status: "Stereo joint depth changed. Rebuild disparity map.")
 
         let firstConditionedCount = conditioned.frames.first?.joints.count ?? 0
@@ -2834,15 +3164,7 @@ final class RotoMotionViewModel: ObservableObject {
         """
         diagnostics.log(stereoConditioningStatus)
 
-        let statusCounts = conditioned.frames
-            .flatMap { $0.joints.values.map(\.status) }
-            .reduce(into: [String: Int]()) { counts, status in
-                counts[status, default: 0] += 1
-            }
-        diagnostics.log("""
-        Stereo conditioning status counts:
-        \(statusCounts.map { "\($0.key): \($0.value)" }.sorted().joined(separator: "\n"))
-        """)
+        buildFusedStereoTargets()
 
         let validCounts = stereo.frames.map {
             $0.joints.values.filter(\.validStereo).count
@@ -2852,7 +3174,8 @@ final class RotoMotionViewModel: ObservableObject {
             : Double(validCounts.reduce(0, +)) / Double(validCounts.count)
 
         spatialStereoAvailable = true
-        solveTargetMode = .spatialStereo3D
+        applySolvedPoseToReferenceRig = false
+        updateSpatialSolveReadiness()
         spatialDepthStatus = """
         Stereo joint depth built:
           frames: \(stereo.frames.count)
@@ -2926,6 +3249,7 @@ final class RotoMotionViewModel: ObservableObject {
             stereoJointCapture = nil
             conditionedStereoJointCapture = nil
             stereoConditioningStatus = "No conditioned stereo targets."
+            invalidateStereoToRigAlignment("stereo joint depth failed")
             resetSpatialDisparityState(status: "Stereo joint depth failed. Rebuild disparity after stereo depth succeeds.")
             spatialVideoStatus = "Stereo depth failed: \(error.localizedDescription)"
             spatialDepthStatus = spatialVideoStatus
@@ -2935,12 +3259,146 @@ final class RotoMotionViewModel: ObservableObject {
         }
     }
 
-    func buildSpatialDisparityMaps() async {
+    func buildSpatialDisparityDebugFrame() async {
+        guard !isBuildingSpatialDisparity else {
+            diagnostics.log("Disparity debug build ignored: already building.")
+            return
+        }
+
+        guard captureMode == .spatialVideo else {
+            spatialDisparityDebugStatus = "Disparity debug requires spatial video."
+            status = spatialDisparityDebugStatus
+            diagnostics.log(spatialDisparityDebugStatus)
+            updateSpatialSolveReadiness()
+            return
+        }
+
+        guard !spatialLeftEyeFrames.isEmpty,
+              !spatialRightEyeFrames.isEmpty else {
+            spatialDisparityDebugStatus = "Disparity debug failed: missing decoded left/right eye frames."
+            status = spatialDisparityDebugStatus
+            diagnostics.log(spatialDisparityDebugStatus)
+            updateSpatialSolveReadiness()
+            return
+        }
+
+        guard spatialVideoMetadata != nil else {
+            spatialDisparityDebugStatus = "Disparity debug failed: missing spatial metadata."
+            status = spatialDisparityDebugStatus
+            diagnostics.log(spatialDisparityDebugStatus)
+            updateSpatialSolveReadiness()
+            return
+        }
+
+        let frameCount = min(spatialLeftEyeFrames.count, spatialRightEyeFrames.count)
+        let frameIndex = min(max(spatialDisparityDebugFrameIndex, 0), frameCount - 1)
+        let left = spatialLeftEyeFrames[frameIndex]
+        let right = spatialRightEyeFrames[frameIndex]
+        let metadata = effectiveSpatialMetadata()
+        let settings = stereoDisparitySettings
+
+        isWorking = true
+        isBuildingSpatialDisparity = true
+        resetSpatialDisparityDebugProof(status: "Building one-frame disparity debug...")
+        spatialDisparityBuildProgress = 0
+        spatialDisparityBuildProgressText = "Building one-frame disparity debug..."
+        status = spatialDisparityDebugStatus
+
+        diagnostics.log("""
+        Building ONE-FRAME disparity debug:
+          frameIndex: \(frameIndex)
+          leftFrames: \(spatialLeftEyeFrames.count)
+          rightFrames: \(spatialRightEyeFrames.count)
+          scale: \(settings.scale)
+          patchRadius: \(settings.patchRadius)
+          searchRadius: \(settings.searchRadius)
+          searchStep: \(settings.searchStep)
+          baselineMeters: \(metadata.baselineMeters ?? -1)
+          horizontalFOVDegrees: \(metadata.horizontalFOVDegrees ?? -1)
+        """)
+
+        defer {
+            isBuildingSpatialDisparity = false
+            isWorking = false
+            updateSpatialSolveReadiness()
+        }
+
+        do {
+            let disparityFrame = try await Task.detached(priority: .userInitiated) {
+                let leftLuminance = try StereoLuminanceConverter.makeLuminanceBuffer(
+                    from: left.cgImage,
+                    scale: settings.scale
+                )
+
+                let rightLuminance = try StereoLuminanceConverter.makeLuminanceBuffer(
+                    from: right.cgImage,
+                    scale: settings.scale
+                )
+
+                return try StereoDisparityComputer.computeFrame(
+                    frameIndex: left.frameIndex,
+                    timeSeconds: CMTimeGetSeconds(left.presentationTime),
+                    left: leftLuminance,
+                    right: rightLuminance,
+                    metadata: metadata,
+                    settings: settings
+                )
+            }.value
+
+            let debug = try SpatialDisparityDebugDumper.dumpDebugImages(
+                frame: disparityFrame
+            )
+            let stats = SpatialDisparityDebugStats.make(frame: disparityFrame)
+
+            spatialDisparityDepthPreviewImage = debug.depthImage
+            spatialDisparityConfidencePreviewImage = debug.confidenceImage
+            spatialDisparityRawPreviewImage = debug.rawDisparityImage
+            spatialDisparityDebugDirectoryPath = debug.directory.path
+
+            spatialDisparityDebugStatus = """
+            ONE-FRAME disparity debug SUCCESS:
+              frame: \(disparityFrame.frameIndex)
+              mapSize: \(disparityFrame.width)x\(disparityFrame.height)
+              validDepthPixels: \(stats.validDepthPixels)
+              totalPixels: \(stats.totalPixels)
+              validPercent: \(String(format: "%.2f", stats.validPercent))%
+              minDepth: \(String(format: "%.3f", stats.minDepthMeters))
+              medianDepth: \(String(format: "%.3f", stats.medianDepthMeters))
+              maxDepth: \(String(format: "%.3f", stats.maxDepthMeters))
+              dumpDir: \(debug.directory.path)
+            """
+            status = spatialDisparityDebugStatus
+            diagnostics.log(spatialDisparityDebugStatus)
+            finishSpatialDisparityProgress(
+                progress: 1,
+                text: "One-frame disparity debug complete."
+            )
+        } catch {
+            resetSpatialDisparityDebugProof(
+                status: "ONE-FRAME disparity debug FAILED: \(error.localizedDescription)"
+            )
+            status = spatialDisparityDebugStatus
+            diagnostics.log(spatialDisparityDebugStatus)
+            finishSpatialDisparityProgress(
+                progress: 0,
+                text: "One-frame disparity debug failed."
+            )
+        }
+    }
+
+    @discardableResult
+    func buildSpatialDisparityMaps() async -> Bool {
+        guard !isBuildingSpatialDisparity else {
+            diagnostics.log("Disparity build ignored: already building.")
+            return false
+        }
+
         guard captureMode == .spatialVideo else {
             spatialDisparityStatus = "Disparity build requires spatial video."
             status = spatialDisparityStatus
             diagnostics.log(spatialDisparityStatus)
-            return
+            updateSpatialSolveReadiness()
+            return false
         }
 
         guard !spatialLeftEyeFrames.isEmpty,
@@ -2948,24 +3406,49 @@ final class RotoMotionViewModel: ObservableObject {
             spatialDisparityStatus = "Disparity build failed: missing decoded left/right eye frames."
             status = spatialDisparityStatus
             diagnostics.log(spatialDisparityStatus)
-            return
+            updateSpatialSolveReadiness()
+            return false
         }
 
         guard spatialVideoMetadata != nil else {
             spatialDisparityStatus = "Disparity build failed: missing spatial metadata."
             status = spatialDisparityStatus
             diagnostics.log(spatialDisparityStatus)
-            return
+            updateSpatialSolveReadiness()
+            return false
         }
 
         let leftFrames = spatialLeftEyeFrames
         let rightFrames = spatialRightEyeFrames
         let metadata = effectiveSpatialMetadata()
         let settings = stereoDisparitySettings
+        let disparityFrameCount = max(min(leftFrames.count, rightFrames.count), 1)
+        let search = max(1, settings.searchRadius)
+        let step = max(1, settings.searchStep)
+        let searchStepCount = Array(stride(from: -search, through: search, by: step)).count + 1
+        let disparityProgressUnits = max(disparityFrameCount * searchStepCount, 1)
+        let totalProgressUnits = max(disparityProgressUnits + disparityFrameCount, 1)
+        let progressTracker = SpatialDisparityBuildProgressTracker()
 
         isWorking = true
+        isBuildingSpatialDisparity = true
+        spatialDisparityMapCapture = nil
+        spatialDisparityPreviewCapture = nil
+        jointDepthEvidenceCapture = nil
+        spatialRayPinDepthMode = .leftEyeRayPinningFallback
+        resetFusedStereoTargetState(status: "Fused target build unavailable: disparity rebuild in progress.")
+        resetSpatialDisparityDebugProof(status: "Building full disparity proof...")
         spatialDisparityStatus = "Building spatial disparity maps..."
         status = spatialDisparityStatus
+        spatialDisparityBuildProgress = 0
+        spatialDisparityBuildProgressText = "Preparing disparity maps: 0/\(totalProgressUnits)"
+        progressTracker.update(
+            stage: "Preparing disparity maps",
+            completedUnits: 0,
+            totalUnits: totalProgressUnits
+        )
+        startSpatialDisparityProgressPolling(progressTracker)
+        updateSpatialSolveReadiness()
 
         diagnostics.log("""
         Building spatial disparity maps:
@@ -2980,51 +3463,156 @@ final class RotoMotionViewModel: ObservableObject {
         """)
 
         do {
-            let disparity = try await Task.detached(priority: .userInitiated) {
-                try SpatialDisparityMapBuilder.build(
+            let buildResult = try await Task.detached(priority: .userInitiated) {
+                let disparity = try SpatialDisparityMapBuilder.build(
                     leftFrames: leftFrames,
                     rightFrames: rightFrames,
                     metadata: metadata,
-                    settings: settings
+                    settings: settings,
+                    progress: { stage, completedUnits, _ in
+                        progressTracker.update(
+                            stage: stage,
+                            completedUnits: completedUnits,
+                            totalUnits: totalProgressUnits
+                        )
+                    }
                 )
+
+                let preview = try SpatialDisparityPreviewBuilder.buildPreviewCapture(
+                    disparity: disparity,
+                    progress: { stage, completedFrames, _ in
+                        progressTracker.update(
+                            stage: stage,
+                            completedUnits: disparityProgressUnits + completedFrames,
+                            totalUnits: totalProgressUnits
+                        )
+                    }
+                )
+
+                return (disparity, preview)
             }.value
+            let disparity = buildResult.0
+            let previewResult = buildResult.1
 
             spatialDisparityMapCapture = disparity
+            spatialDisparityPreviewCapture = previewResult.previewCapture
 
-            if let stereo = stereoJointCapture,
-               let leftNorm = normalizedLeftCapture {
-                jointDepthEvidenceCapture = JointDepthEvidenceBuilder.build(
-                    stereo: stereo,
-                    disparity: disparity,
-                    normalizedLeft: leftNorm,
-                    settings: settings
+            guard let leftNorm = normalizedLeftCapture else {
+                throw NSError(
+                    domain: "RotoMotionSpatial",
+                    code: 9401,
+                    userInfo: [
+                        NSLocalizedDescriptionKey: "Disparity map built, but normalizedLeftCapture is missing."
+                    ]
                 )
-            } else {
-                jointDepthEvidenceCapture = nil
             }
 
-            let first = disparity.frames.first
-            let validPixels = first?.depthMeters.filter { $0.isFinite }.count ?? 0
+            let evidence = JointDepthEvidenceBuilder.buildCandidateBased(
+                disparity: disparity,
+                normalizedLeft: leftNorm,
+                normalizedRight: normalizedRightCapture,
+                stereo: stereoJointCapture,
+                conditioned: conditionedStereoJointCapture,
+                fused: fusedStereoJointTargetCapture,
+                metadata: metadata,
+                settings: settings
+            )
+
+            jointDepthEvidenceCapture = evidence
+
+            guard let first = disparity.frames.first else {
+                throw NSError(
+                    domain: "RotoMotionSpatial",
+                    code: 9402,
+                    userInfo: [
+                        NSLocalizedDescriptionKey: "Disparity build produced no frames."
+                    ]
+                )
+            }
+
+            let firstPreview = previewResult.previewCapture.frames.first
+            let debug = try SpatialDisparityDebugDumper.dumpDebugImages(frame: first)
+            let stats = SpatialDisparityDebugStats.make(frame: first)
+
+            spatialDisparityDepthPreviewImage = debug.depthImage
+            spatialDisparityConfidencePreviewImage = debug.confidenceImage
+            spatialDisparityRawPreviewImage = debug.rawDisparityImage
+            spatialDisparityDebugDirectoryPath = previewResult.dumpDirectory.path
+
+            spatialDisparityDebugStatus = """
+            Full disparity first-frame proof SUCCESS:
+              frame: \(first.frameIndex)
+              mapSize: \(first.width)x\(first.height)
+              validDepthPixels: \(stats.validDepthPixels)
+              totalPixels: \(stats.totalPixels)
+              validPercent: \(String(format: "%.2f", stats.validPercent))%
+              minDepth: \(String(format: "%.3f", stats.minDepthMeters))
+              medianDepth: \(String(format: "%.3f", stats.medianDepthMeters))
+              maxDepth: \(String(format: "%.3f", stats.maxDepthMeters))
+              dumpDir: \(previewResult.dumpDirectory.path)
+            """
+            diagnostics.log(spatialDisparityDebugStatus)
+            diagnostics.log("""
+            Full disparity first-frame proof:
+              frame: \(first.frameIndex)
+              mapSize: \(first.width)x\(first.height)
+              validDepthPixels: \(stats.validDepthPixels)
+              validPercent: \(String(format: "%.2f", stats.validPercent))%
+              minDepth: \(String(format: "%.3f", stats.minDepthMeters))
+              medianDepth: \(String(format: "%.3f", stats.medianDepthMeters))
+              maxDepth: \(String(format: "%.3f", stats.maxDepthMeters))
+              dumpDir: \(previewResult.dumpDirectory.path)
+            """)
 
             spatialDisparityStatus = """
-            Spatial disparity built:
+            Spatial disparity build SUCCESS:
               frames: \(disparity.frames.count)
-              mapSize: \(first?.width ?? 0)x\(first?.height ?? 0)
-              firstFrameValidDepthPixels: \(validPixels)
-              jointEvidenceFrames: \(jointDepthEvidenceCapture?.frames.count ?? 0)
+              firstMap: \(first.width)x\(first.height)
+              previewFrames: \(previewResult.previewCapture.frames.count)
+              firstValidDepthPixels: \(firstPreview?.validDepthPixels ?? stats.validDepthPixels)
+              jointDepthEvidenceFrames: \(evidence.frames.count)
+              dumpDir: \(previewResult.dumpDirectory.path)
             """
             status = spatialDisparityStatus
             diagnostics.log(spatialDisparityStatus)
             logFirstJointDepthEvidenceFrame()
+            buildFusedStereoTargets()
+            isBuildingSpatialDisparity = false
+            isWorking = false
+            finishSpatialDisparityProgress(
+                progress: 1,
+                text: "Disparity maps complete: \(disparity.frames.count) frames."
+            )
+            updateSpatialSolveReadiness()
+            diagnostics.log("""
+            Spatial disparity build SUCCESS:
+              frames: \(disparity.frames.count)
+              previewFrames: \(previewResult.previewCapture.frames.count)
+              jointDepthEvidenceFrames: \(evidence.frames.count)
+            """)
+            return true
         } catch {
             spatialDisparityMapCapture = nil
+            spatialDisparityPreviewCapture = nil
             jointDepthEvidenceCapture = nil
-            spatialDisparityStatus = "Spatial disparity build failed: \(error.localizedDescription)"
+            spatialRayPinDepthMode = .leftEyeRayPinningFallback
+            resetFusedStereoTargetState(status: "Fused target build unavailable: disparity build failed.")
+            spatialDisparityStatus = "Spatial disparity build FAILED: \(error.localizedDescription)"
             status = spatialDisparityStatus
             diagnostics.log(spatialDisparityStatus)
+            isBuildingSpatialDisparity = false
+            isWorking = false
+            finishSpatialDisparityProgress(
+                progress: 0,
+                text: "Disparity build failed."
+            )
+            updateSpatialSolveReadiness()
+            diagnostics.log("""
+            Spatial disparity build FAILED:
+              error: \(error.localizedDescription)
+            """)
+            return false
         }
-
-        isWorking = false
     }
 
     private func logFirstJointDepthEvidenceFrame() {
@@ -3038,20 +3626,102 @@ final class RotoMotionViewModel: ObservableObject {
         let noSample = first.joints.values.filter { $0.disparityDepthMeters == nil }.count
         let examples = first.joints
             .sorted { $0.key < $1.key }
-            .prefix(8)
+            .prefix(12)
             .map {
-                let stereo = $0.value.stereoJointDepthMeters.map { String(format: "%.3f", $0) } ?? "nil"
                 let disparity = $0.value.disparityDepthMeters.map { String(format: "%.3f", $0) } ?? "nil"
-                return "\($0.key): stereo=\(stereo) disparity=\(disparity) pass=\($0.value.passesDepthValidation) dir=\($0.value.depthDirectionStatus)"
+                return "\($0.key): winner=\($0.value.winningCandidateSource ?? "nil") depth=\(disparity) conf=\(String(format: "%.2f", $0.value.disparityConfidence)) candidates=\($0.value.candidates.count) status=\($0.value.status)"
             }
             .joined(separator: "\n")
 
         diagnostics.log("""
-        Joint depth evidence first frame:
+        Candidate disparity evidence first frame:
           joints: \(first.joints.count)
           pass: \(pass)
           fail: \(fail)
           noDisparitySample: \(noSample)
+          examples:
+          \(examples)
+        """)
+    }
+
+    func buildFusedStereoTargets() {
+        guard let left = normalizedLeftCapture,
+              let right = normalizedRightCapture else {
+            fusedStereoTargetStatus = "Fused target build failed: missing left/right normalized captures."
+            diagnostics.log(fusedStereoTargetStatus)
+            return
+        }
+
+        let metadata = effectiveSpatialMetadata()
+
+        guard metadata.baselineMeters != nil,
+              metadata.horizontalFOVDegrees != nil,
+              metadata.imageWidth > 0,
+              metadata.imageHeight > 0 else {
+            fusedStereoTargetStatus = """
+            Fused target build failed: missing spatial camera metadata.
+              baselineMeters: \(metadata.baselineMeters.map { "\($0)" } ?? "nil")
+              horizontalFOVDegrees: \(metadata.horizontalFOVDegrees.map { "\($0)" } ?? "nil")
+              imageWidth: \(metadata.imageWidth)
+              imageHeight: \(metadata.imageHeight)
+            """
+            diagnostics.log(fusedStereoTargetStatus)
+            return
+        }
+
+        let stereo = stereoJointCapture
+        let evidence = jointDepthEvidenceCapture
+
+        let fused = StereoJointTargetFuser.fuse(
+            left: left,
+            right: right,
+            stereo: stereo,
+            depthEvidence: evidence,
+            metadata: metadata,
+            yConvention: stereoYConvention,
+            settings: stereoTargetFusionSettings,
+            rigProfile: referenceRigProfile
+        )
+
+        guard !fused.frames.isEmpty else {
+            fusedStereoJointTargetCapture = nil
+            fusedStereoTargetStatus = "Fused target build failed: no fused frames were produced."
+            diagnostics.log(fusedStereoTargetStatus)
+            return
+        }
+
+        fusedStereoJointTargetCapture = fused
+
+        let first = fused.frames.first
+        let accepted = first?.joints.values.filter { !$0.rejected }.count ?? 0
+        let rejected = first?.joints.values.filter(\.rejected).count ?? 0
+        let held = first?.joints.values.filter { $0.status.contains("held") }.count ?? 0
+        let examples = first?.joints
+            .sorted { $0.key < $1.key }
+            .prefix(10)
+            .map {
+                let depthDelta = $0.value.visionDisparityDepthDeltaMeters
+                    .map { String(format: "%.3f", $0) } ?? "nil"
+                return "\($0.key): status=\($0.value.status) conf=\(String(format: "%.2f", $0.value.confidence)) depthDelta=\(depthDelta)"
+            }
+            .joined(separator: "\n") ?? ""
+
+        fusedStereoTargetStatus = """
+        Fused stereo targets built:
+          frames: \(fused.frames.count)
+          firstFrameJoints: \(first?.joints.count ?? 0)
+          stereoFrames: \(stereo?.frames.count ?? 0)
+          depthEvidenceFrames: \(evidence?.frames.count ?? 0)
+          activeSolveTargetMode: \(solveTargetMode.rawValue)
+        """
+        status = fusedStereoTargetStatus
+
+        diagnostics.log(fusedStereoTargetStatus)
+        diagnostics.log("""
+        Fused target first frame:
+          accepted: \(accepted)
+          rejected: \(rejected)
+          held: \(held)
           examples:
           \(examples)
         """)
@@ -3814,8 +4484,9 @@ final class RotoMotionViewModel: ObservableObject {
         sessionJointPaths = []
         sessionJointLeafNames = []
         sessionSkeletonStatus = "No session skeleton captured."
-        skinnedRigSession = nil
-        skinnedRigStatus = "Reference skinned rig cleared because reference USDZ changed."
+            skinnedRigSession = nil
+            invalidateStereoToRigAlignment("reference USDZ changed")
+            skinnedRigStatus = "Reference skinned rig cleared because reference USDZ changed."
         referenceRigPlacementStatus = "Reference rig not placed."
         referenceRigVisibilityStatus = "Reference rig not fitted."
         useCalibratedRigDepth = false
@@ -3914,6 +4585,7 @@ final class RotoMotionViewModel: ObservableObject {
 
             skinnedRigSession = session
             showSkinnedRig = true
+            showSkinnedGeometry = true
             if targetCharacterUSDZURL == nil {
                 targetCharacterUSDZURL = url
             }
@@ -3950,8 +4622,10 @@ final class RotoMotionViewModel: ObservableObject {
             diagnostics.log(sessionPoseStatus)
 
             fitReferenceRigHipsSpineIfPossible()
+            calibrateStereoToRigAlignmentIfPossible()
         } catch {
             skinnedRigSession = nil
+            invalidateStereoToRigAlignment("skinned rig load failed")
             sessionArmaturePoseBuffer = nil
             sessionArmatureSnapshot = nil
             skinnedRigStatus = """

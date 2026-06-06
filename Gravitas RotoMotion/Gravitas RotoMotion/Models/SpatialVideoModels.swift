@@ -76,7 +76,38 @@ enum NormalizedImageYConvention: String, CaseIterable, Identifiable, Codable {
 
 enum RotoSolveTargetMode: String, Codable {
     case monocularRayPinned
-    case spatialStereo3D
+    case spatialDepthGuidedRayPinned
+}
+
+enum SpatialRayPinDepthMode: String, Codable {
+    case disparityDepthGuided
+    case leftEyeRayPinningFallback
+}
+
+enum SpatialSolveReadiness: String, Codable {
+    case notSpatial
+    case needsVision
+    case needsDisparityMap
+    case needsJointDepthEvidence
+    case ready
+}
+
+struct StereoToRigAlignment: Codable, Equatable {
+    var isValid: Bool
+
+    /// Converts stereo camera-space meters into the current visible rig scene space.
+    var scale: Float
+    var translation: SIMD3Codable
+
+    /// Reserved for future calibration. Kept at identity for this patch.
+    var rotationYRadians: Float
+
+    static let invalid = StereoToRigAlignment(
+        isValid: false,
+        scale: 1,
+        translation: SIMD3Codable(x: 0, y: 0, z: 0),
+        rotationYRadians: 0
+    )
 }
 
 struct SpatialEyeLayerMap: Codable, Equatable {
@@ -245,6 +276,67 @@ struct SpatialDisparityMapCapture: Codable, Sendable {
     }
 }
 
+enum DisparityPlateOverlayKind: String, CaseIterable, Codable, Identifiable {
+    case depth
+    case confidence
+    case rawDisparity
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .depth:
+            return "Depth"
+        case .confidence:
+            return "Confidence"
+        case .rawDisparity:
+            return "Raw"
+        }
+    }
+}
+
+struct SpatialDisparityPreviewCapture: Codable, Sendable {
+    static let currentSchema = "com.gravitas.rotomotion.spatial_disparity_preview.v0"
+
+    let schema: String
+    let frames: [Frame]
+
+    struct Frame: Codable, Identifiable, Sendable {
+        var id: Int { frameIndex }
+
+        let frameIndex: Int
+        let timeSeconds: Double
+
+        let depthPreviewPNGPath: String?
+        let confidencePreviewPNGPath: String?
+        let rawDisparityPreviewPNGPath: String?
+
+        let validDepthPixels: Int
+        let totalPixels: Int
+        let minDepthMeters: Double
+        let medianDepthMeters: Double
+        let maxDepthMeters: Double
+    }
+}
+
+enum DisparityDepthCandidateSource: String, Codable {
+    case leftEyeVision
+    case rightEyeVisionOnLeftPlate
+    case leftRightLerp
+    case stereoReprojectedLeft
+    case conditionedReprojectedLeft
+    case fusedReprojectedLeft
+}
+
+struct DisparityDepthCandidate: Codable {
+    let source: DisparityDepthCandidateSource
+    let x: Double
+    let y: Double
+    let depthMeters: Double?
+    let confidence: Double
+    let status: String
+}
+
 struct JointDepthEvidenceCapture: Codable {
     static let currentSchema = "com.gravitas.rotomotion.joint_depth_evidence.v0"
 
@@ -269,6 +361,8 @@ struct JointDepthEvidenceCapture: Codable {
         /// From local image disparity map sampling around the left-eye joint.
         let disparityDepthMeters: Double?
         let disparityConfidence: Double
+        let winningCandidateSource: String?
+        let candidates: [DisparityDepthCandidate]
 
         /// Difference: disparityDepth - stereoJointDepth.
         let depthDeltaMeters: Double?
@@ -280,5 +374,81 @@ struct JointDepthEvidenceCapture: Codable {
         let depthDirectionStatus: String
 
         let status: String
+    }
+}
+
+struct StereoTargetFusionSettings: Codable {
+    /// How far sparse Vision stereo depth may disagree with disparity before suspect.
+    var maxVisionDisparityDepthDeltaMeters: Double = 0.75
+
+    /// Hard temporal pop threshold in meters.
+    var maxTemporalJointJumpMeters: Double = 0.85
+
+    /// Joint can be held for this many frames if Vision pops.
+    var maxHoldFrames: Int = 6
+
+    /// Envelope width tolerance between left/right reprojections in pixels.
+    var maxStereoEnvelopeWidthPixels: Double = 80
+
+    /// Ray-envelope closest-approach tolerance in camera-space meters.
+    var maxRaySeparationMeters: Double = 0.35
+
+    /// If disparity is valid, blend target depth toward disparity.
+    var disparityDepthBlend: Double = 0.65
+
+    /// Minimum confidence to accept a target without holding.
+    var minFusedConfidence: Double = 0.25
+
+    static let `default` = StereoTargetFusionSettings()
+}
+
+struct FusedStereoJointTargetCapture: Codable {
+    static let currentSchema = "com.gravitas.rotomotion.fused_stereo_targets.v0"
+
+    let schema: String
+    let frames: [Frame]
+
+    struct Frame: Codable, Identifiable {
+        var id: Int { frameIndex }
+
+        let frameIndex: Int
+        let timeSeconds: Double
+        let joints: [String: JointTarget]
+    }
+
+    struct JointTarget: Codable {
+        let jointName: String
+
+        /// Final target used by solver, camera-space meters.
+        let positionCameraXYZ: [Double]?
+
+        /// Preferred 2D target on left-eye plate.
+        let leftX: Double?
+        let leftY: Double?
+
+        /// Preferred 2D target on right-eye plate.
+        let rightX: Double?
+        let rightY: Double?
+
+        /// Vision stereo triangulation estimate, if valid.
+        let visionStereoPositionCameraXYZ: [Double]?
+
+        /// Disparity-derived depth, if valid.
+        let disparityDepthMeters: Double?
+
+        /// 0...1 confidence after fusion.
+        let confidence: Double
+
+        /// The target should be ignored for this frame.
+        let rejected: Bool
+
+        /// Why this target was accepted/rejected/held.
+        let status: String
+
+        /// Useful debug signals.
+        let visionDisparityDepthDeltaMeters: Double?
+        let temporalPopDistanceMeters: Double?
+        let stereoEnvelopeWidthPixels: Double?
+        let stereoEnvelopeSeparationMeters: Double?
     }
 }

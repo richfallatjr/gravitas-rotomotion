@@ -174,6 +174,8 @@ struct ContentView: View {
                 stereoJointFrame: roto.spatialStereoAvailable ? roto.currentStereoJointFrame : nil,
                 conditionedStereoFrame: roto.currentConditionedStereoFrame,
                 jointDepthEvidenceFrame: roto.currentJointDepthEvidenceFrame,
+                disparityPreviewFrame: roto.currentSpatialDisparityPreviewFrame,
+                fusedStereoTargetFrame: roto.currentFusedStereoTargetFrame,
                 groundPlane: roto.groundPlane,
                 raySolveResult: roto.currentRaySolveResult,
                 raySolvedFrame: roto.currentRaySolvedFrame,
@@ -202,13 +204,20 @@ struct ContentView: View {
                 showConditionedStereoSkeleton: roto.showConditionedStereoSkeleton && roto.conditionedStereoJointCapture != nil,
                 showStereoReprojectionOverlay: roto.spatialStereoAvailable,
                 showJointDepthValidationOverlay: roto.showJointDepthValidationOverlay && roto.jointDepthEvidenceCapture != nil,
+                showDisparityOnImagePlane: roto.showDisparityOnImagePlane && roto.spatialDisparityPreviewCapture != nil,
+                selectedDisparityPlateOverlay: roto.selectedDisparityPlateOverlay,
+                disparityPlateOverlayOpacity: roto.disparityPlateOverlayOpacity,
+                showFusedStereoTargets: roto.showFusedStereoTargets && roto.fusedStereoJointTargetCapture != nil,
                 showGroundPlane: roto.groundPlane.visible,
                 showVisionRays: roto.showVisionRays,
                 showRaySolvedRig: roto.showDebugSolvedSkeleton,
                 showSkinnedRig: roto.showSkinnedRig,
+                showSkinnedGeometry: roto.showSkinnedGeometry,
                 showRotationGizmo: roto.showRotationGizmo,
                 stereoMetersToRigSceneUnits: roto.stereoMetersToRigSceneUnits,
+                stereoToRigAlignment: roto.stereoToRigAlignment,
                 solveTargetMode: roto.solveTargetMode,
+                spatialRayPinDepthMode: roto.spatialRayPinDepthMode,
                 rotationGizmoSpace: roto.rotationGizmoSpace,
                 selectedRotationJoint: roto.selectedRotationJoint,
                 onRotationGizmoEulerChanged: { joint, euler in
@@ -505,17 +514,137 @@ struct ContentView: View {
                 }
                 .disabled(
                     roto.isWorking ||
+                    roto.isBuildingSpatialDisparity ||
                     roto.captureMode != .spatialVideo ||
                     roto.spatialLeftEyeFrames.isEmpty ||
                     roto.spatialRightEyeFrames.isEmpty ||
                     roto.spatialVideoMetadata == nil
                 )
 
+                if roto.isBuildingSpatialDisparity ||
+                    roto.spatialDisparityBuildProgress > 0 ||
+                    roto.spatialDisparityBuildProgressText != "No disparity build running." {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ProgressView(
+                            value: roto.spatialDisparityBuildProgress,
+                            total: 1.0
+                        )
+                        .progressViewStyle(.linear)
+
+                        Text(roto.spatialDisparityBuildProgressText)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                }
+
+                GroupBox("Disparity Map Proof") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Button("Build Disparity Debug Frame") {
+                                Task {
+                                    await roto.buildSpatialDisparityDebugFrame()
+                                    uiStatus = roto.status
+                                }
+                            }
+                            .disabled(
+                                roto.isWorking ||
+                                roto.isBuildingSpatialDisparity ||
+                                roto.captureMode != .spatialVideo ||
+                                roto.spatialLeftEyeFrames.isEmpty ||
+                                roto.spatialRightEyeFrames.isEmpty ||
+                                roto.spatialVideoMetadata == nil
+                            )
+
+                            TextField(
+                                "Frame",
+                                value: $roto.spatialDisparityDebugFrameIndex,
+                                format: .number
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 64)
+                        }
+
+                        Text(roto.spatialDisparityDebugStatus)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        if let image = roto.spatialDisparityDepthPreviewImage {
+                            Text("Depth Preview")
+                                .font(.caption)
+
+                            Image(nsImage: image)
+                                .resizable()
+                                .interpolation(.none)
+                                .scaledToFit()
+                                .frame(maxHeight: 160)
+                        }
+
+                        if let image = roto.spatialDisparityConfidencePreviewImage {
+                            Text("Confidence Preview")
+                                .font(.caption)
+
+                            Image(nsImage: image)
+                                .resizable()
+                                .interpolation(.none)
+                                .scaledToFit()
+                                .frame(maxHeight: 120)
+                        }
+
+                        if let image = roto.spatialDisparityRawPreviewImage {
+                            Text("Raw Disparity Preview")
+                                .font(.caption)
+
+                            Image(nsImage: image)
+                                .resizable()
+                                .interpolation(.none)
+                                .scaledToFit()
+                                .frame(maxHeight: 120)
+                        }
+
+                        Text("Dump: \(roto.spatialDisparityDebugDirectoryPath)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                GroupBox("Disparity Plate Overlay") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Toggle("Show Disparity On Plate", isOn: $roto.showDisparityOnImagePlane)
+                            .disabled(roto.spatialDisparityPreviewCapture == nil)
+
+                        Picker("Map", selection: $roto.selectedDisparityPlateOverlay) {
+                            ForEach(DisparityPlateOverlayKind.allCases) { kind in
+                                Text(kind.displayName).tag(kind)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .disabled(roto.spatialDisparityPreviewCapture == nil)
+
+                        Slider(
+                            value: $roto.disparityPlateOverlayOpacity,
+                            in: 0...1
+                        )
+                        .disabled(roto.spatialDisparityPreviewCapture == nil)
+
+                        Text(roto.spatialDisparityStatus)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
                 Toggle("Stereo 3D Skeleton", isOn: $roto.showStereo3DSkeleton)
                     .disabled(!roto.spatialStereoAvailable)
 
                 Toggle("Joint Depth Validation", isOn: $roto.showJointDepthValidationOverlay)
                     .disabled(roto.jointDepthEvidenceCapture == nil)
+
+                Toggle("Fused Stereo Targets", isOn: $roto.showFusedStereoTargets)
+                    .disabled(roto.fusedStereoJointTargetCapture == nil)
 
                 Text("Left frames: \(roto.leftEyeFrames.count), right frames: \(roto.rightEyeFrames.count)")
                     .font(.caption2)
@@ -531,6 +660,21 @@ struct ContentView: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 Text(roto.spatialDisparityStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(roto.spatialSolveStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(roto.fusedStereoTargetStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(roto.stereoAlignmentStatus)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -578,6 +722,9 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
 
                 Toggle("Reference Visible", isOn: $roto.showSkinnedRig)
+
+                Toggle("Reference Geometry", isOn: $roto.showSkinnedGeometry)
+                    .disabled(!roto.showSkinnedRig)
 
                 Text(roto.skinnedRigStatus)
                     .font(.caption)
@@ -887,11 +1034,20 @@ struct ContentView: View {
                 }
 
                 Button("Solve Full Animation") {
-                    roto.solveFullAnimationWithCameraRays()
-                    uiStatus = roto.status
-                    pipelineRenderToken += 1
+                    Task {
+                        await roto.solveFullAnimationWithCameraRays()
+                        uiStatus = roto.status
+                        pipelineRenderToken += 1
+                    }
                 }
-                .disabled(roto.normalizedCapture == nil || roto.currentVideoPlaneSize == nil)
+                .disabled(
+                    roto.currentVideoPlaneSize == nil ||
+                    (
+                        roto.captureMode == .spatialVideo
+                            ? roto.normalizedLeftCapture == nil
+                            : roto.normalizedCapture == nil
+                    )
+                )
 
                 Button("Clear Ray Animation") {
                     roto.rayAnimationSolveResult = nil

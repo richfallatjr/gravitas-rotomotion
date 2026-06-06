@@ -1,0 +1,285 @@
+Spatial Bake Rig For Export Integration Context
+================================================
+
+Purpose
+-------
+This note is for the architect wiring the spatial ray-pinning solve into the existing Bake Rig Animation For Export flow.
+
+Do not add another bake/export button. The existing UI button already exists:
+
+- UI/ContentView.swift
+  Button label: "Bake Rig Animation For Export"
+  Calls: RotoMotionViewModel.bakeLiveRigAnimationForExport()
+
+The spatial pipeline should feed that existing bake function.
+
+
+Current Relevant Pipeline
+-------------------------
+Spatial video pipeline:
+
+1. Open spatial video.
+2. Run both-eye Vision.
+3. Build stereo triangulation and conditioning for diagnostics.
+4. Build disparity maps and joint depth evidence.
+5. Solve Full Animation activates:
+   solveTargetMode = .spatialDepthGuidedRayPinned
+   spatialRayPinDepthMode = .disparityDepthGuided or .leftEyeRayPinningFallback
+   applySolvedPoseToReferenceRig = true
+
+The live viewport currently applies spatial rig motion here:
+
+- UI/RotoSceneVideoViewport.swift
+  In updateSkinnedRig/update path:
+
+    if applySolvedPoseToReferenceRig,
+       solveTargetMode == .spatialDepthGuidedRayPinned,
+       let normalizedFrame {
+        SkinnedRigRotomationDriver.rotomateFrameWithDepthGuidedRayPins(
+            normalizedFrame: normalizedFrame,
+            jointDepthEvidenceFrame: spatialRayPinDepthMode == .disparityDepthGuided ? jointDepthEvidenceFrame : nil,
+            depthMode: spatialRayPinDepthMode,
+            session: session,
+            cameraOrigin: SIMD3<Float>(0, 0, 0),
+            videoPlaneSize: videoPlaneSize,
+            videoPlaneZ: currentVideoPlaneZ
+        )
+
+        applyViewportRotationOverrides(...)
+    }
+
+That is the correct solver driver for spatial export baking.
+
+
+Current Bake Blocker
+--------------------
+The existing bake function is:
+
+- UI/RotoMotionViewModel.swift
+  func bakeLiveRigAnimationForExport()
+
+It currently requires:
+
+    guard let solve = rayAnimationSolveResult else {
+        bakedRigAnimationStatus = "Run Solve Full Animation first."
+        return
+    }
+
+That works for the monocular ray solve because solveFullAnimationWithCameraRays() creates rayAnimationSolveResult.
+
+But spatial solve currently does this:
+
+    solveTargetMode = .spatialDepthGuidedRayPinned
+    applySolvedPoseToReferenceRig = true
+    rayAnimationSolveResult = nil
+
+So the live viewport can animate spatial frames, but Bake Rig Animation For Export cannot sample them yet.
+
+
+Required Architecture
+---------------------
+Keep one bake button. Branch inside bakeLiveRigAnimationForExport():
+
+    if captureMode == .spatialVideo,
+       solveTargetMode == .spatialDepthGuidedRayPinned {
+        bakeSpatialDepthGuidedRayPinnedRigAnimationForExport()
+        return
+    }
+
+    // Existing monocular bake path stays unchanged.
+
+The spatial bake path should:
+
+1. Require skinnedRigSession.
+2. Require currentVideoPlaneSize.
+3. Require normalizedLeftCapture.
+4. Use normalizedLeftCapture.frames as the bake timeline.
+5. For each left-eye normalized frame:
+   - Find nearest JointDepthEvidenceCapture.Frame by timeSeconds.
+   - Call SkinnedRigRotomationDriver.rotomateFrameWithDepthGuidedRayPins().
+   - Apply authored/manual rotation overrides for that frame.
+   - Sample local bone transforms with BakedRigAnimationSampler.sample().
+6. Store the result in bakedRigAnimation.
+7. Set sessionArmaturePoseBuffer = baked.asSessionArmaturePoseBuffer().
+8. Leave exportAnimatedTargetUSDZFromRaySolve() and USDZ writer paths unchanged.
+
+
+Spatial Bake Pseudocode
+-----------------------
+Add this branch at the start of RotoMotionViewModel.bakeLiveRigAnimationForExport():
+
+    if captureMode == .spatialVideo,
+       solveTargetMode == .spatialDepthGuidedRayPinned {
+        bakeSpatialDepthGuidedRayPinnedRigAnimationForExport()
+        return
+    }
+
+Add a helper:
+
+    private func bakeSpatialDepthGuidedRayPinnedRigAnimationForExport() {
+        guard let session = skinnedRigSession else {
+            bakedRigAnimationStatus = "Load reference skinned rig first."
+            status = bakedRigAnimationStatus
+            diagnostics.log(bakedRigAnimationStatus)
+            return
+        }
+
+        guard let leftCapture = normalizedLeftCapture else {
+            bakedRigAnimationStatus = "Run spatial Vision before baking."
+            status = bakedRigAnimationStatus
+            diagnostics.log(bakedRigAnimationStatus)
+            return
+        }
+
+        guard let videoPlaneSize = currentVideoPlaneSize else {
+            bakedRigAnimationStatus = "Video plane size unavailable. Show the viewport before baking."
+            status = bakedRigAnimationStatus
+            diagnostics.log(bakedRigAnimationStatus)
+            return
+        }
+
+        let savedRootPosition = session.displayRootNode.simdPosition
+        let savedRootOrientation = session.displayRootNode.simdOrientation
+        let savedRootScale = session.displayRootNode.simdScale
+        let savedBoneTransforms = session.jointOrder.reduce(into: [String: simd_float4x4]()) { result, joint in
+            if let bone = session.bonesByCanonicalName[joint] {
+                result[joint] = bone.simdTransform
+            }
+        }
+
+        defer {
+            session.displayRootNode.simdPosition = savedRootPosition
+            session.displayRootNode.simdOrientation = savedRootOrientation
+            session.displayRootNode.simdScale = savedRootScale
+
+            for (joint, transform) in savedBoneTransforms {
+                session.bonesByCanonicalName[joint]?.simdTransform = transform
+            }
+        }
+
+        var frames: [BakedRigAnimation.Frame] = []
+
+        for leftFrame in leftCapture.frames {
+            let evidenceFrame = jointDepthEvidenceFrameClosestTo(
+                timeSeconds: leftFrame.timeSeconds
+            )
+
+            SkinnedRigRotomationDriver.rotomateFrameWithDepthGuidedRayPins(
+                normalizedFrame: leftFrame,
+                jointDepthEvidenceFrame: spatialRayPinDepthMode == .disparityDepthGuided ? evidenceFrame : nil,
+                depthMode: spatialRayPinDepthMode,
+                session: session,
+                cameraOrigin: SIMD3<Float>(0, 0, 0),
+                videoPlaneSize: videoPlaneSize,
+                videoPlaneZ: currentVideoPlaneZ
+            )
+
+            applyAuthoredRotationOverridesForBake(
+                session: session,
+                frameIndex: leftFrame.frameIndex,
+                timeSeconds: leftFrame.timeSeconds
+            )
+
+            var bakedFrame = BakedRigAnimationSampler.sample(
+                session: session,
+                frameIndex: leftFrame.frameIndex,
+                timeSeconds: leftFrame.timeSeconds,
+                jointNames: session.jointOrder
+            )
+
+            bakedFrame = replaceAuthoredJointRotations(
+                bakedFrame,
+                authoredJoints: authoredRotationJoints(),
+                frameIndex: leftFrame.frameIndex,
+                timeSeconds: leftFrame.timeSeconds
+            )
+
+            frames.append(bakedFrame)
+        }
+
+        let baked = BakedRigAnimation(
+            schema: "com.gravitas.rotomotion.baked_rig_animation.v0",
+            clipID: retargetClipID,
+            fps: inferredFPSFromNormalizedFrames(leftCapture.frames),
+            jointNames: session.jointOrder,
+            frames: frames
+        )
+
+        bakedRigAnimation = baked
+        sessionArmaturePoseBuffer = baked.asSessionArmaturePoseBuffer()
+        sessionPoseSource = .posedArmatureLocalTransforms
+        sessionPoseStatus = "Baked immutable rig animation from spatial depth-guided ray pins: \(frames.count) frames."
+        bakedRigAnimationStatus = "Baked spatial depth-guided ray-pinned rig animation: \(frames.count) frames."
+        usdzRetargetStatus = bakedRigAnimationStatus
+        status = bakedRigAnimationStatus
+        diagnostics.log(bakedRigAnimationStatus)
+    }
+
+
+Needed Helper: Nearest Evidence Frame
+-------------------------------------
+The viewport has currentJointDepthEvidenceFrame, but bake needs random access by frame time.
+
+Add:
+
+    private func jointDepthEvidenceFrameClosestTo(
+        timeSeconds: Double
+    ) -> JointDepthEvidenceCapture.Frame? {
+        guard let frames = jointDepthEvidenceCapture?.frames,
+              !frames.isEmpty else {
+            return nil
+        }
+
+        return frames.min {
+            abs($0.timeSeconds - timeSeconds) < abs($1.timeSeconds - timeSeconds)
+        }
+    }
+
+
+Needed Helper: Bake Rotation Overrides
+--------------------------------------
+The viewport uses applyViewportRotationOverrides(), but that is inside RotoSceneVideoViewport.Coordinator.
+Bake needs the same authored/manual rotation intent applied before sampling.
+
+Option A:
+- Move the override application logic into a shared service/helper.
+- Use it in both viewport and bake.
+
+Option B:
+- Keep the current bake behavior:
+  1. Sample the rig.
+  2. Apply replaceAuthoredJointRotations() to the sampled frame.
+
+Current bake already does Option B for authored keys. If live held overrides also need export support, extract a shared helper instead of duplicating viewport code.
+
+
+Important Rules
+---------------
+- Do not add another button.
+- Do not reintroduce point-cloud rig solve for export.
+- Do not bake from ConditionedStereoTargetRigRotomationDriver.
+- Do not bake from FusedStereoTargetRigRotomationDriver.
+- Do not use metersToSceneUnits target snapping.
+- Do not use Hips-Spine initial fitting for spatial bake.
+- Bake should call the same spatial ray-pinning driver used by the live viewport:
+
+    SkinnedRigRotomationDriver.rotomateFrameWithDepthGuidedRayPins()
+
+- Disparity is only depth guidance for choosing points along left-eye rays.
+- The rig solver must preserve bone lengths by rotating parent bones, then bake samples local bone transforms.
+
+
+Expected End State
+------------------
+User flow should remain:
+
+1. Open spatial video.
+2. Run Vision.
+3. Build Disparity Map.
+4. Solve Full Animation.
+5. Bake Rig Animation For Export.
+6. Export Animated Target USDZ.
+
+No additional bake/export UI is required.
+
+The existing export pipeline already consumes bakedRigAnimation/sessionArmaturePoseBuffer. Once spatial bake fills bakedRigAnimation using the depth-guided ray-pinning driver, the existing animated USDZ export path should be able to continue unchanged.

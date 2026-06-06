@@ -1,0 +1,635 @@
+RotoMotion Ray-Pinning Technique Context
+=======================================
+
+Purpose
+-------
+This note explains the monocular "ray-pinned" skinned-rig solve used in
+RotoMotion before the spatial stereo target path.
+
+The important idea is:
+
+    A Vision/Meshy24 2D joint is not treated as a final 3D point.
+    It becomes a camera ray through the video plate.
+    The rig is rotated so each child bone lands on that ray while preserving
+    the rig's own bone length.
+
+This keeps the skinned rig visually pinned to the 2D plate without inventing
+arbitrary per-joint depth. Depth is inferred only by the rig hierarchy, bone
+lengths, and the current/previous placement.
+
+Current source of truth:
+
+    Gravitas RotoMotion/Gravitas RotoMotion/Services/SkinnedRigRotomationDriver.swift
+    Gravitas RotoMotion/Gravitas RotoMotion/UI/RotoSceneVideoViewport.swift
+
+
+High-Level Pipeline
+-------------------
+
+For each viewport frame in monocular solve mode:
+
+    normalized Meshy24 2D joints
+    -> point on video plane
+    -> camera ray per joint
+    -> reset skinned rig bones to rest
+    -> place pelvis from LeftUpLeg + RightUpLeg rays
+    -> solve ordered chains with ray constraints
+    -> for every parent->child:
+          choose a target point on child's ray at the current bone length
+          rotate parent so child moves toward that point
+    -> log ray-distance fit error over session.jointOrder
+
+The solve is live in the SceneKit viewport. The skinned rig's real SCNSkinner
+bone nodes are posed; this is not only a debug skeleton.
+
+
+Viewport Entry Point
+--------------------
+
+The viewport chooses the ray-pinned path only when solveTargetMode is
+monocularRayPinned. Spatial target modes are separate.
+
+Code shape:
+
+```swift
+// RotoSceneVideoViewport.updateSkinnedRig(...)
+} else if applySolvedPoseToReferenceRig,
+          solveTargetMode == .monocularRayPinned,
+          let frame,
+          let normalizedFrame {
+    SkinnedRigRotomationDriver.rotomateFrameWithCurvePins(
+        frame,
+        normalizedFrame: normalizedFrame,
+        session: session,
+        cameraOrigin: SIMD3<Float>(0, 0, 0),
+        videoPlaneSize: videoPlaneSize,
+        videoPlaneZ: currentVideoPlaneZ
+    )
+
+    applyViewportRotationOverrides(
+        session: session,
+        overrideLayer: rotationOverrideLayer,
+        liveOverridesActive: liveRotationOverridesActive,
+        frameIndex: frame.frameIndex,
+        timeSeconds: frame.timeSeconds
+    )
+}
+```
+
+
+Step 1: Convert 2D Meshy24 Joints Into Rays
+-------------------------------------------
+
+Each normalized 2D joint is mapped onto the current video card. The camera ray
+starts at the perspective camera origin and points through that video-plane
+location.
+
+This is the core 2D pinning representation.
+
+```swift
+struct JointRay {
+    let jointName: String
+    let origin: SIMD3<Float>
+    let direction: SIMD3<Float>
+
+    func point(at t: Float) -> SIMD3<Float> {
+        origin + direction * t
+    }
+}
+
+enum JointRayBuilder {
+    static func buildRays(
+        normalizedFrame: NormalizedMeshyPoseCapture.Frame,
+        cameraOrigin: SIMD3<Float>,
+        videoPlaneSize: CGSize,
+        videoPlaneZ: Float
+    ) -> [String: JointRay] {
+        var rays: [String: JointRay] = [:]
+
+        for (jointName, joint) in normalizedFrame.joints {
+            guard !joint.missing else {
+                continue
+            }
+
+            let planePoint = SIMD3<Float>(
+                (Float(joint.x) - 0.5) * Float(videoPlaneSize.width),
+                (Float(joint.y) - 0.5) * Float(videoPlaneSize.height),
+                videoPlaneZ
+            )
+
+            let direction = normalizeSafe(planePoint - cameraOrigin)
+
+            rays[jointName] = JointRay(
+                jointName: jointName,
+                origin: cameraOrigin,
+                direction: direction
+            )
+        }
+
+        return rays
+    }
+}
+```
+
+Equivalent shared ray-builder code exists in `RotoCameraRayBuilder`:
+
+```swift
+static func pointOnVideoPlane(
+    x: Double,
+    y: Double,
+    videoPlaneSize: CGSize,
+    videoPlaneZ: Float
+) -> SIMD3<Float> {
+    let px = (CGFloat(x) - 0.5) * videoPlaneSize.width
+    let py = (CGFloat(y) - 0.5) * videoPlaneSize.height
+
+    return SIMD3<Float>(
+        Float(px),
+        Float(py),
+        videoPlaneZ
+    )
+}
+```
+
+
+Step 2: Reset Rig Bones Before Each Frame
+-----------------------------------------
+
+Before solving a frame, the live skinned rig bones are reset to rest local
+transforms. This prevents pose drift and makes the frame solve deterministic.
+
+This is one of the important places where we loop through `session.jointOrder`.
+That order is the rig/session's canonical bone order.
+
+```swift
+private static func resetBonesToRestOnly(session: SkinnedRigSession) {
+    for jointName in session.jointOrder {
+        guard let bone = session.bonesByCanonicalName[jointName],
+              let restPosition = session.restLocalPositions[jointName],
+              let restOrientation = session.restLocalOrientations[jointName],
+              let restScale = session.restLocalScales[jointName] else {
+            continue
+        }
+
+        bone.simdPosition = restPosition
+        bone.simdOrientation = restOrientation
+        bone.simdScale = restScale
+    }
+}
+```
+
+
+Step 3: Main Ray-Pinned Solve Entry
+-----------------------------------
+
+The main monocular solve function:
+
+1. Opens an immediate SceneKit transaction.
+2. Resets bones to rest.
+3. Builds rays from the normalized 2D joints.
+4. Places/rotates the pelvis from the upper-leg rays.
+5. Solves limbs and torso in a deliberate chain order.
+6. Logs ray-distance fit error.
+
+```swift
+static func rotomateFrameWithCurvePins(
+    _ frame: RotoRayAnimationSolveResult.Frame,
+    normalizedFrame: NormalizedMeshyPoseCapture.Frame,
+    session: SkinnedRigSession,
+    cameraOrigin: SIMD3<Float>,
+    videoPlaneSize: CGSize,
+    videoPlaneZ: Float,
+    settings: CurvePinnedSettings = .default
+) {
+    SCNTransaction.begin()
+    SCNTransaction.animationDuration = 0
+
+    resetBonesToRestOnly(session: session)
+
+    let rays = JointRayBuilder.buildRays(
+        normalizedFrame: normalizedFrame,
+        cameraOrigin: cameraOrigin,
+        videoPlaneSize: videoPlaneSize,
+        videoPlaneZ: videoPlaneZ
+    )
+
+    solvePelvisFromUpperLegRays(
+        session: session,
+        rays: rays
+    )
+
+    solvePinnedJointSequence(
+        ["LeftUpLeg", "LeftLeg", "LeftFoot", "LeftToeBase"],
+        rays: rays,
+        session: session
+    )
+
+    solvePinnedJointSequence(
+        ["RightUpLeg", "RightLeg", "RightFoot", "RightToeBase"],
+        rays: rays,
+        session: session
+    )
+
+    solvePinnedJointSequence(
+        ["Hips", "Spine", "neck", "Head", "headfront"],
+        rays: rays,
+        session: session
+    )
+
+    solvePinnedJointSequence(
+        ["LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand"],
+        rays: rays,
+        session: session
+    )
+
+    solvePinnedJointSequence(
+        ["RightShoulder", "RightArm", "RightForeArm", "RightHand"],
+        rays: rays,
+        session: session
+    )
+
+    SCNTransaction.commit()
+
+    logPinnedFitError(
+        session: session,
+        rays: rays,
+        frameIndex: frame.frameIndex
+    )
+}
+```
+
+Why this order matters:
+
+- The pelvis is first moved from the upper-leg rays, because Hips itself is not
+  ray pinned as a hard 2D point.
+- Legs are solved before torso/arms so the body root has a grounded placement.
+- Torso/head then aligns up the body.
+- Arms solve last, because shoulders depend on torso placement.
+
+
+Step 4: Pelvis Placement From Upper-Leg Rays
+--------------------------------------------
+
+The pelvis/root is not pinned directly to the Hips ray. Instead, we use the
+left and right upper-leg rays as the pelvis driver.
+
+This avoids overtrusting the 2D Hips marker and gives a more stable pelvis
+from the visible hip sockets.
+
+```swift
+private static func solvePelvisFromUpperLegRays(
+    session: SkinnedRigSession,
+    rays: [String: JointRay]
+) {
+    guard let leftHipNode = session.bonesByCanonicalName["LeftUpLeg"],
+          let rightHipNode = session.bonesByCanonicalName["RightUpLeg"],
+          let hipsNode = session.bonesByCanonicalName["Hips"],
+          let leftRay = rays["LeftUpLeg"],
+          let rightRay = rays["RightUpLeg"] else {
+        return
+    }
+
+    let leftCurrent = leftHipNode.simdWorldPosition
+    let rightCurrent = rightHipNode.simdWorldPosition
+
+    let leftTarget = closestPointOnRay(
+        ray: leftRay,
+        to: leftCurrent
+    )
+    let rightTarget = closestPointOnRay(
+        ray: rightRay,
+        to: rightCurrent
+    )
+
+    let averageDelta = ((leftTarget - leftCurrent) + (rightTarget - rightCurrent)) * 0.5
+    session.displayRootNode.simdPosition += averageDelta
+
+    let currentWidth = rightHipNode.simdWorldPosition - leftHipNode.simdWorldPosition
+    let targetWidth = rightTarget - leftTarget
+
+    guard simd_length(currentWidth) > 0.0001,
+          simd_length(targetWidth) > 0.0001 else {
+        return
+    }
+
+    let deltaWorld = simd_quatf(
+        from: simd_normalize(currentWidth),
+        to: simd_normalize(targetWidth)
+    )
+
+    applyWorldRotationDelta(
+        deltaWorld,
+        to: hipsNode
+    )
+}
+```
+
+
+Step 5: Ordered Joint Loop That Pins Each Chain In 2D Space
+-----------------------------------------------------------
+
+This is the core ray-pinning loop.
+
+For each parent->child pair in a chain:
+
+1. Read the child's 2D ray.
+2. Measure the current rig bone length from parent to child.
+3. Find a point on the child's ray that is exactly that bone length away from
+   the parent.
+4. Rotate the parent bone so the child moves toward that ray point.
+
+The key is that the child does not jump to an arbitrary 3D coordinate. It moves
+to a point on its 2D ray while preserving the physical bone length.
+
+```swift
+private static func solvePinnedJointSequence(
+    _ chain: [String],
+    rays: [String: JointRay],
+    session: SkinnedRigSession,
+    passes: Int = 4
+) {
+    guard chain.count >= 2 else {
+        return
+    }
+
+    for _ in 0..<passes {
+        for i in 0..<(chain.count - 1) {
+            let parentName = chain[i]
+            let childName = chain[i + 1]
+
+            guard let parentNode = session.bonesByCanonicalName[parentName],
+                  let childNode = session.bonesByCanonicalName[childName],
+                  let childRay = rays[childName] else {
+                continue
+            }
+
+            let parentWorld = parentNode.simdWorldPosition
+            let childWorld = childNode.simdWorldPosition
+            let boneLength = max(
+                simd_length(childWorld - parentWorld),
+                0.0001
+            )
+            let childTarget = pointOnRayAtDistanceFromParent(
+                ray: childRay,
+                parent: parentWorld,
+                distance: boneLength,
+                currentChild: childWorld
+            )
+
+            rotateParentToMoveChild(
+                parentNode: parentNode,
+                childNode: childNode,
+                childTarget: childTarget
+            )
+        }
+    }
+}
+```
+
+This is the "loop through joint order" idea in practice. The solver uses fixed
+canonical chains rather than blindly iterating every joint. That gives stable
+parent-before-child hierarchy:
+
+```swift
+["LeftUpLeg", "LeftLeg", "LeftFoot", "LeftToeBase"]
+["RightUpLeg", "RightLeg", "RightFoot", "RightToeBase"]
+["Hips", "Spine", "neck", "Head", "headfront"]
+["LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand"]
+["RightShoulder", "RightArm", "RightForeArm", "RightHand"]
+```
+
+Separately, `session.jointOrder` is used when every rig bone must be processed,
+such as reset and fit-error reporting.
+
+
+Step 6: Choosing The Ray Target At The Correct Bone Length
+----------------------------------------------------------
+
+This helper intersects:
+
+    child camera ray
+    with sphere centered on parent, radius = current bone length
+
+If the exact intersection exists, it chooses the candidate closest to the
+current child position, which reduces popping. If no clean intersection exists,
+it falls back to the closest point on the ray and preserves length toward that
+direction.
+
+```swift
+private static func pointOnRayAtDistanceFromParent(
+    ray: JointRay,
+    parent: SIMD3<Float>,
+    distance: Float,
+    currentChild: SIMD3<Float>
+) -> SIMD3<Float> {
+    let origin = ray.origin
+    let direction = ray.direction
+    let offset = origin - parent
+
+    let a = simd_dot(direction, direction)
+    let b = 2.0 * simd_dot(offset, direction)
+    let c = simd_dot(offset, offset) - distance * distance
+    let discriminant = b * b - 4.0 * a * c
+
+    if discriminant >= 0 {
+        let root = sqrt(discriminant)
+        let t0 = (-b - root) / (2.0 * a)
+        let t1 = (-b + root) / (2.0 * a)
+
+        let candidates = [t0, t1]
+            .filter { $0.isFinite && $0 >= 0 }
+            .map { origin + direction * $0 }
+
+        if let best = candidates.min(by: {
+            simd_length_squared($0 - currentChild) < simd_length_squared($1 - currentChild)
+        }) {
+            return best
+        }
+    }
+
+    let closest = closestPointOnRay(
+        ray: ray,
+        to: currentChild
+    )
+    let childDirection = closest - parent
+
+    guard simd_length(childDirection) > 0.0001 else {
+        return currentChild
+    }
+
+    return parent + simd_normalize(childDirection) * distance
+}
+```
+
+Closest point on ray:
+
+```swift
+private static func closestPointOnRay(
+    ray: JointRay,
+    to point: SIMD3<Float>
+) -> SIMD3<Float> {
+    let t = max(
+        0,
+        simd_dot(point - ray.origin, ray.direction)
+    )
+
+    return ray.point(at: t)
+}
+```
+
+
+Step 7: Rotate Parent So Child Moves Toward The Pinned Target
+-------------------------------------------------------------
+
+The solver does not directly set child world position. It rotates the parent
+bone so the child bone endpoint moves toward the target.
+
+This preserves the rig hierarchy and produces real local rotations for the
+skinned armature.
+
+```swift
+private static func rotateParentToMoveChild(
+    parentNode: SCNNode,
+    childNode: SCNNode,
+    childTarget: SIMD3<Float>
+) {
+    let parentWorld = parentNode.simdWorldPosition
+    let childWorld = childNode.simdWorldPosition
+
+    let current = normalizeSafe(
+        childWorld - parentWorld,
+        fallback: SIMD3<Float>(0, 1, 0)
+    )
+
+    let target = normalizeSafe(
+        childTarget - parentWorld,
+        fallback: current
+    )
+
+    let deltaWorld = simd_quatf(
+        from: current,
+        to: target
+    )
+
+    applyWorldRotationDelta(
+        deltaWorld,
+        to: parentNode
+    )
+}
+```
+
+World-space delta is converted into the node's local space before being applied:
+
+```swift
+private static func applyWorldRotationDelta(
+    _ deltaWorld: simd_quatf,
+    to node: SCNNode
+) {
+    guard let parent = node.parent else {
+        node.simdOrientation = deltaWorld * node.simdOrientation
+        return
+    }
+
+    let parentWorldRotation = parent.simdWorldOrientation
+    let localDelta = simd_inverse(parentWorldRotation) * deltaWorld * parentWorldRotation
+
+    node.simdOrientation = localDelta * node.simdOrientation
+}
+```
+
+
+Step 8: Fit Error Loop Through session.jointOrder
+-------------------------------------------------
+
+After solving, the diagnostic error is not "distance to a 3D target." It is
+distance from each bone's final world position to that joint's camera ray.
+
+This tells us how well the rig is pinned to the 2D evidence.
+
+This is another important `session.jointOrder` loop:
+
+```swift
+private static func logPinnedFitError(
+    session: SkinnedRigSession,
+    rays: [String: JointRay],
+    frameIndex: Int
+) {
+    var worst = "none"
+    var worstError: Float = 0
+    var sum: Float = 0
+    var count: Float = 0
+
+    for jointName in session.jointOrder {
+        guard jointName != "Hips" else {
+            continue
+        }
+
+        guard let bone = session.bonesByCanonicalName[jointName],
+              let ray = rays[jointName] else {
+            continue
+        }
+
+        let point = bone.simdWorldPosition
+        let closest = closestPointOnRay(
+            ray: ray,
+            to: point
+        )
+        let error = simd_length(point - closest)
+
+        sum += error
+        count += 1
+
+        if error > worstError {
+            worstError = error
+            worst = jointName
+        }
+    }
+
+    if frameIndex == 0 || frameIndex % 30 == 0 {
+        print(
+            """
+            [CurvePinnedRotomation] fit error
+              frame: \(frameIndex)
+              avgRayDistance: \(String(format: "%.5f", count > 0 ? sum / count : 0))
+              worst: \(worst)
+              worstRayDistance: \(String(format: "%.5f", worstError))
+            """
+        )
+    }
+}
+```
+
+
+Why The Technique Works
+-----------------------
+
+The 2D Vision/Meshy24 point gives a line of possible 3D locations, not a single
+3D location. Ray pinning respects that:
+
+    2D evidence says: "this joint must appear here on the image."
+    Rig constraint says: "this child must stay one bone-length from parent."
+    Solver action says: "rotate parent so the child lies on the image ray."
+
+This is why it pins visually in 2D while keeping the rig physical enough to
+avoid simple limb stretching.
+
+
+Known Limits
+------------
+
+- It is monocular: depth is underconstrained.
+- It can still choose the wrong depth along a ray during foreshortening.
+- It is sensitive to bad 2D markers, because a bad marker creates a bad ray.
+- It does not use stereo disparity or true left/right triangulation.
+
+That is why the newer spatial pipeline adds:
+
+    left/right Vision
+    -> stereo triangulation
+    -> disparity depth validation
+    -> conditioned/fused stereo targets
+    -> stereo-to-rig alignment
+
+Ray pinning remains useful as the monocular fallback/legacy solve path and as a
+clear architectural reference: Vision points are evidence, not final truth.
+

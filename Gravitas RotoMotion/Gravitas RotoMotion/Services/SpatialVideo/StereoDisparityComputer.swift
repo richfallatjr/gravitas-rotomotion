@@ -7,7 +7,8 @@ enum StereoDisparityComputer {
         left: StereoLuminanceBuffer,
         right: StereoLuminanceBuffer,
         metadata: SpatialVideoCameraMetadata,
-        settings: StereoDisparitySettings
+        settings: StereoDisparitySettings,
+        progress: ((_ completedSearchSteps: Int, _ totalSearchSteps: Int) -> Void)? = nil
     ) throws -> SpatialDisparityMapCapture.Frame {
         guard left.width == right.width,
               left.height == right.height else {
@@ -45,6 +46,9 @@ enum StereoDisparityComputer {
         let radius = max(1, settings.patchRadius)
         let search = max(1, settings.searchRadius)
         let step = max(1, settings.searchStep)
+        let searchOffsets = Array(stride(from: -search, through: search, by: step))
+        let totalSearchSteps = searchOffsets.count + 1
+        progress?(0, totalSearchSteps)
 
         guard width > radius * 2 + search * 2,
               height > radius * 2 else {
@@ -62,7 +66,7 @@ enum StereoDisparityComputer {
         var bestCost = [Double](repeating: .greatestFiniteMagnitude, count: width * height)
         var secondBest = [Double](repeating: .greatestFiniteMagnitude, count: width * height)
 
-        for dx in stride(from: -search, through: search, by: step) {
+        for (searchIndex, dx) in searchOffsets.enumerated() {
             let integral = absoluteDifferenceIntegral(
                 left: left,
                 right: right,
@@ -97,6 +101,8 @@ enum StereoDisparityComputer {
                     }
                 }
             }
+
+            progress?(searchIndex + 1, totalSearchSteps)
         }
 
         for y in radius..<(height - radius) {
@@ -121,6 +127,7 @@ enum StereoDisparityComputer {
                 confidence[index] = Float(max(0.0, min(1.0, (1.0 - normalizedCost) * (0.5 + uniqueness))))
             }
         }
+        progress?(totalSearchSteps, totalSearchSteps)
 
         return SpatialDisparityMapCapture.Frame(
             frameIndex: frameIndex,

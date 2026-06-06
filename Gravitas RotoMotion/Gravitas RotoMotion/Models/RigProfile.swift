@@ -48,6 +48,18 @@ struct SIMD3Codable: Codable, Equatable {
     let y: Double
     let z: Double
 
+    init(x: Double, y: Double, z: Double) {
+        self.x = x
+        self.y = y
+        self.z = z
+    }
+
+    init(_ value: SIMD3<Float>) {
+        x = Double(value.x)
+        y = Double(value.y)
+        z = Double(value.z)
+    }
+
     var simdFloat: SIMD3<Float> {
         SIMD3<Float>(Float(x), Float(y), Float(z))
     }
