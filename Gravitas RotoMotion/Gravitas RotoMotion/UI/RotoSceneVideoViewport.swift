@@ -90,6 +90,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
 
     let rawFrame: RawVisionPoseCapture.PoseFrame?
     let normalizedFrame: NormalizedMeshyPoseCapture.Frame?
+    let vision3DFrame: NormalizedVision3DMeshyCapture.Frame?
     let rightRawFrame: RawVisionPoseCapture.PoseFrame?
     let rightNormalizedFrame: NormalizedMeshyPoseCapture.Frame?
     let smoothedFrame: SmoothedMeshyPoseCapture.Frame?
@@ -118,6 +119,10 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>]
     let liveRotationPreviewFrameIndexByJoint: [String: Int]
     let liveRotationOverridesActive: Bool
+    let liveRigPoseSource: LiveRigPoseSource
+    let skin3DApplyRevision: Int
+    let skin3DViewportRefreshRevision: Int
+    let vision3DSkinningAlignmentState: Vision3DSkinningAlignmentState
     let viewportRefreshRevision: Int
     let rotationOverrideRevision: Int
     let rotationKeyRevision: Int
@@ -132,6 +137,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
 
     let showRawVision: Bool
     let showNormalizedMeshy: Bool
+    let showVision3DSkeleton: Bool
+    let showVision3DProjectionOverlay: Bool
     let showRightEyeVisionOverlay: Bool
     let showRightEyeNormalizedOverlay: Bool
     let showSmoothedMeshy: Bool
@@ -197,6 +204,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             frameIndex: frameIndex,
             rawFrame: rawFrame,
             normalizedFrame: normalizedFrame,
+            vision3DFrame: vision3DFrame,
             rightRawFrame: rightRawFrame,
             rightNormalizedFrame: rightNormalizedFrame,
             smoothedFrame: smoothedFrame,
@@ -224,6 +232,10 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             liveRotationOverrideEulerXYZByJoint: liveRotationOverrideEulerXYZByJoint,
             liveRotationPreviewFrameIndexByJoint: liveRotationPreviewFrameIndexByJoint,
             liveRotationOverridesActive: liveRotationOverridesActive,
+            liveRigPoseSource: liveRigPoseSource,
+            skin3DApplyRevision: skin3DApplyRevision,
+            skin3DViewportRefreshRevision: skin3DViewportRefreshRevision,
+            vision3DSkinningAlignmentState: vision3DSkinningAlignmentState,
             viewportRefreshRevision: viewportRefreshRevision,
             rotationOverrideRevision: rotationOverrideRevision,
             rotationKeyRevision: rotationKeyRevision,
@@ -237,6 +249,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             lastViewportRefreshReason: lastViewportRefreshReason,
             showRawVision: showRawVision,
             showNormalizedMeshy: showNormalizedMeshy,
+            showVision3DSkeleton: showVision3DSkeleton,
+            showVision3DProjectionOverlay: showVision3DProjectionOverlay,
             showRightEyeVisionOverlay: showRightEyeVisionOverlay,
             showRightEyeNormalizedOverlay: showRightEyeNormalizedOverlay,
             showSmoothedMeshy: showSmoothedMeshy,
@@ -277,6 +291,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private let disparityPlateOverlayNode = SCNNode()
         private let rawOverlayRoot = SCNNode()
         private let normalizedOverlayRoot = SCNNode()
+        private let vision3DSkeletonRoot = SCNNode()
+        private let vision3DProjectionOverlayRoot = SCNNode()
         private let rightRawOverlayRoot = SCNNode()
         private let rightNormalizedOverlayRoot = SCNNode()
         private let smoothedOverlayRoot = SCNNode()
@@ -342,6 +358,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private var currentDisparityOverlaySignature: String?
         private var lastFrameApplicationSignature: FrameApplicationSignature?
         private var lastSpatialSolveSignature: SpatialSolveSignature?
+        private var lastSkin3DApplyRevision: Int = -1
 
         private struct FrameApplicationSignature: Equatable {
             let frameIndex: Int
@@ -363,6 +380,12 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             let panYRounded: Int
             let depthZRounded: Int
             let autoDepthFitEnabled: Bool
+            let liveRigPoseSource: String
+            let skin3DApplyRevision: Int
+            let skin3DViewportRefreshRevision: Int
+            let vision3DFrameIndex: Int?
+            let vision3DAlignmentValid: Bool
+            let vision3DAlignmentScaleRounded: Int
         }
 
         private struct SpatialSolveSignature: Equatable {
@@ -446,6 +469,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
 
             rawOverlayRoot.name = "RawVisionOverlayRoot"
             normalizedOverlayRoot.name = "NormalizedMeshyOverlayRoot"
+            vision3DSkeletonRoot.name = "Vision3DSkeletonRoot"
+            vision3DProjectionOverlayRoot.name = "Vision3DProjectionOverlayRoot"
             rightRawOverlayRoot.name = "RightEyeRawVisionOverlayRoot"
             rightNormalizedOverlayRoot.name = "RightEyeNormalizedMeshyOverlayRoot"
             smoothedOverlayRoot.name = "SmoothedMeshyOverlayRoot"
@@ -465,6 +490,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             scene.rootNode.addChildNode(groundRoot)
             scene.rootNode.addChildNode(rawOverlayRoot)
             scene.rootNode.addChildNode(normalizedOverlayRoot)
+            scene.rootNode.addChildNode(vision3DSkeletonRoot)
+            scene.rootNode.addChildNode(vision3DProjectionOverlayRoot)
             scene.rootNode.addChildNode(rightRawOverlayRoot)
             scene.rootNode.addChildNode(rightNormalizedOverlayRoot)
             scene.rootNode.addChildNode(smoothedOverlayRoot)
@@ -515,6 +542,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             frameIndex: Int,
             rawFrame: RawVisionPoseCapture.PoseFrame?,
             normalizedFrame: NormalizedMeshyPoseCapture.Frame?,
+            vision3DFrame: NormalizedVision3DMeshyCapture.Frame?,
             rightRawFrame: RawVisionPoseCapture.PoseFrame?,
             rightNormalizedFrame: NormalizedMeshyPoseCapture.Frame?,
             smoothedFrame: SmoothedMeshyPoseCapture.Frame?,
@@ -542,6 +570,10 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
             liveRotationPreviewFrameIndexByJoint: [String: Int],
             liveRotationOverridesActive: Bool,
+            liveRigPoseSource: LiveRigPoseSource,
+            skin3DApplyRevision: Int,
+            skin3DViewportRefreshRevision: Int,
+            vision3DSkinningAlignmentState: Vision3DSkinningAlignmentState,
             viewportRefreshRevision: Int,
             rotationOverrideRevision: Int,
             rotationKeyRevision: Int,
@@ -555,6 +587,8 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             lastViewportRefreshReason: String,
             showRawVision: Bool,
             showNormalizedMeshy: Bool,
+            showVision3DSkeleton: Bool,
+            showVision3DProjectionOverlay: Bool,
             showRightEyeVisionOverlay: Bool,
             showRightEyeNormalizedOverlay: Bool,
             showSmoothedMeshy: Bool,
@@ -642,7 +676,13 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 panXRounded: Int((manualSpatialCameraPanX * 10000).rounded()),
                 panYRounded: Int((manualSpatialCameraPanY * 10000).rounded()),
                 depthZRounded: Int((manualSpatialCameraDepthZ * 10000).rounded()),
-                autoDepthFitEnabled: autoSpatialDepthFitEnabled
+                autoDepthFitEnabled: autoSpatialDepthFitEnabled,
+                liveRigPoseSource: liveRigPoseSource.rawValue,
+                skin3DApplyRevision: skin3DApplyRevision,
+                skin3DViewportRefreshRevision: skin3DViewportRefreshRevision,
+                vision3DFrameIndex: vision3DFrame?.frameIndex,
+                vision3DAlignmentValid: vision3DSkinningAlignmentState.valid,
+                vision3DAlignmentScaleRounded: Int((vision3DSkinningAlignmentState.scale * 10000).rounded())
             )
             let previousFrameApplicationSignature = lastFrameApplicationSignature
             let mustReapplyFrame = frameApplicationSignature != previousFrameApplicationSignature
@@ -685,10 +725,15 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 frame: raySolvedFrame,
                 frameIndex: frameIndex,
                 normalizedFrame: normalizedFrame,
+                vision3DFrame: vision3DFrame,
                 rightNormalizedFrame: rightNormalizedFrame,
                 jointDepthEvidenceFrame: jointDepthEvidenceFrame,
                 conditionedStereoFrame: conditionedStereoFrame,
                 fusedStereoTargetFrame: fusedStereoTargetFrame,
+                liveRigPoseSource: liveRigPoseSource,
+                skin3DApplyRevision: skin3DApplyRevision,
+                skin3DViewportRefreshRevision: skin3DViewportRefreshRevision,
+                vision3DSkinningAlignmentState: vision3DSkinningAlignmentState,
                 solveTargetMode: solveTargetMode,
                 spatialRayPinDepthMode: spatialRayPinDepthMode,
                 spatialRayPinDepthFitSettings: spatialRayPinDepthFitSettings,
@@ -734,6 +779,14 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
 
             updateRawOverlay(rawFrame, visible: showRawVision)
             updateNormalizedOverlay(normalizedFrame, visible: showNormalizedMeshy)
+            updateVision3DSkeleton(
+                vision3DFrame,
+                visible: showVision3DSkeleton
+            )
+            updateVision3DProjectionOverlay(
+                vision3DFrame,
+                visible: showVision3DProjectionOverlay
+            )
             updateRightRawVisionOverlay(
                 rightRawFrame,
                 visible: showRightEyeVisionOverlay
@@ -1067,6 +1120,148 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 color: NSColor.yellow,
                 zOffset: 0.05
             )
+        }
+
+        private func updateVision3DSkeleton(
+            _ frame: NormalizedVision3DMeshyCapture.Frame?,
+            visible: Bool
+        ) {
+            vision3DSkeletonRoot.isHidden = !visible
+            removeAllChildren(from: vision3DSkeletonRoot)
+
+            guard visible,
+                  let frame,
+                  let hips = frame.joints["Hips"],
+                  hips.confidence > 0 else {
+                return
+            }
+
+            let rootOnPlate: SIMD3<Float>
+
+            if let projectedX = hips.projectedX,
+               let projectedY = hips.projectedY {
+                rootOnPlate = pointOnCurrentVideoPlane(
+                    x: projectedX,
+                    y: projectedY,
+                    zOffsetTowardCamera: 1.55
+                )
+            } else {
+                rootOnPlate = SIMD3<Float>(
+                    0,
+                    -Float(videoPlaneSize.height) * 0.18,
+                    currentVideoPlaneZ + 1.55
+                )
+            }
+
+            let rootMeters = SIMD3<Float>(
+                Float(hips.x),
+                Float(hips.y),
+                Float(hips.z)
+            )
+            let scale = Float(max(videoPlaneSize.width, videoPlaneSize.height)) * 0.28
+            let color = NSColor.systemPurple
+            var positions: [String: SIMD3<Float>] = [:]
+
+            for (jointName, joint) in frame.joints where joint.confidence > 0 {
+                let meters = SIMD3<Float>(
+                    Float(joint.x),
+                    Float(joint.y),
+                    Float(joint.z)
+                )
+                let local = meters - rootMeters
+                positions[jointName] = rootOnPlate + SIMD3<Float>(
+                    local.x * scale,
+                    local.y * scale,
+                    -local.z * scale
+                )
+            }
+
+            var boneCount = 0
+
+            for (a, b) in meshySkeletonBones {
+                guard let pa = positions[a],
+                      let pb = positions[b] else {
+                    continue
+                }
+
+                let line = makeLineNode(
+                    from: SCNVector3(pa.x, pa.y, pa.z),
+                    to: SCNVector3(pb.x, pb.y, pb.z),
+                    color: color.withAlphaComponent(0.85)
+                )
+                line.renderingOrder = 1080
+                vision3DSkeletonRoot.addChildNode(line)
+                boneCount += 1
+            }
+
+            var jointCount = 0
+
+            for (_, position) in positions {
+                let node = makePointNode(
+                    color: color.withAlphaComponent(0.9),
+                    radius: currentRawVisionPointRadius() * 0.9
+                )
+                node.simdPosition = position
+                node.renderingOrder = 1090
+                vision3DSkeletonRoot.addChildNode(node)
+                jointCount += 1
+            }
+
+            if frame.frameIndex == 0 || frame.frameIndex % 30 == 0 {
+                print("""
+                [RotoSceneVideoViewport] Vision 3D skeleton updated
+                  frame: \(frame.frameIndex)
+                  jointsDrawn: \(jointCount)
+                  bonesDrawn: \(boneCount)
+                  anchoredToProjectedHips: \(hips.projectedX != nil && hips.projectedY != nil)
+                """)
+            }
+        }
+
+        private func updateVision3DProjectionOverlay(
+            _ frame: NormalizedVision3DMeshyCapture.Frame?,
+            visible: Bool
+        ) {
+            vision3DProjectionOverlayRoot.isHidden = !visible
+            removeAllChildren(from: vision3DProjectionOverlayRoot)
+
+            guard visible,
+                  let frame else {
+                return
+            }
+
+            var jointCount = 0
+
+            for (_, joint) in frame.joints {
+                guard joint.confidence > 0,
+                      let x = joint.projectedX,
+                      let y = joint.projectedY else {
+                    continue
+                }
+
+                let p = pointOnCurrentVideoPlane(
+                    x: x,
+                    y: y,
+                    zOffsetTowardCamera: 1.62
+                )
+                let node = makePointNode(
+                    color: NSColor.systemBlue.withAlphaComponent(0.9),
+                    radius: currentRawVisionPointRadius() * 0.75
+                )
+
+                node.simdPosition = p
+                node.renderingOrder = 1100
+                vision3DProjectionOverlayRoot.addChildNode(node)
+                jointCount += 1
+            }
+
+            if frame.frameIndex == 0 || frame.frameIndex % 30 == 0 {
+                print("""
+                [RotoSceneVideoViewport] Vision 3D projection overlay updated
+                  frame: \(frame.frameIndex)
+                  jointsDrawn: \(jointCount)
+                """)
+            }
         }
 
         private func updateRightRawVisionOverlay(
@@ -2141,10 +2336,15 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             frame: RotoRayAnimationSolveResult.Frame?,
             frameIndex: Int,
             normalizedFrame: NormalizedMeshyPoseCapture.Frame?,
+            vision3DFrame: NormalizedVision3DMeshyCapture.Frame?,
             rightNormalizedFrame: NormalizedMeshyPoseCapture.Frame?,
             jointDepthEvidenceFrame: JointDepthEvidenceCapture.Frame?,
             conditionedStereoFrame: ConditionedStereoJointCapture.Frame?,
             fusedStereoTargetFrame: FusedStereoJointTargetCapture.Frame?,
+            liveRigPoseSource: LiveRigPoseSource,
+            skin3DApplyRevision: Int,
+            skin3DViewportRefreshRevision: Int,
+            vision3DSkinningAlignmentState: Vision3DSkinningAlignmentState,
             solveTargetMode: RotoSolveTargetMode,
             spatialRayPinDepthMode: SpatialRayPinDepthMode,
             spatialRayPinDepthFitSettings: SpatialRayPinDepthFitSettings,
@@ -2213,6 +2413,65 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 session: session,
                 visible: visible && showSkinnedGeometry
             )
+
+            if applySolvedPoseToReferenceRig,
+               liveRigPoseSource == .skin3DVision3D,
+               let vision3DFrame {
+                let alignment = vision3DSkinningAlignmentState.driverAlignment
+                let stats = Vision3DSkinningDriver.skinFrame(
+                    vision3DFrame,
+                    session: session,
+                    alignment: alignment,
+                    iterations: 10
+                )
+
+                applyViewportRotationOverrides(
+                    session: session,
+                    overrideLayer: rotationOverrideLayer,
+                    liveOverridesActive: liveRotationOverridesActive,
+                    liveRotationPreviewFrameIndexByJoint: liveRotationPreviewFrameIndexByJoint,
+                    frameIndex: vision3DFrame.frameIndex,
+                    timeSeconds: vision3DFrame.timeSeconds
+                )
+
+                session.displayRootNode.isHidden = !visible
+                updateSkinnedGeometryVisibility(
+                    session: session,
+                    visible: visible && showSkinnedGeometry
+                )
+
+                if vision3DFrame.frameIndex == 0 ||
+                    vision3DFrame.frameIndex % 30 == 0 ||
+                    skin3DApplyRevision != lastSkin3DApplyRevision {
+                    print("""
+                    [RotoSceneVideoViewport] Skin3D Vision3D LIVE CONNECTED APPLY
+                      frame: \(vision3DFrame.frameIndex)
+                      time: \(String(format: "%.3f", vision3DFrame.timeSeconds))
+                      targets: \(stats.targetCount)
+                      avgError: \(String(format: "%.5f", stats.avgTargetError))
+                      worst: \(stats.worstJoint)
+                      worstError: \(String(format: "%.5f", stats.worstError))
+                      alignmentValid: \(stats.alignmentValid)
+                      alignmentScale: \(String(format: "%.5f", stats.alignmentScale))
+                      displayRoot: \(session.displayRootNode.simdPosition)
+                      meshHidden: \(session.skinnedMeshNode.isHidden)
+                      skin3DApplyRevision: \(skin3DApplyRevision)
+                      skin3DViewportRefreshRevision: \(skin3DViewportRefreshRevision)
+                    """)
+
+                    print("""
+                    [RotoSceneVideoViewport] Skin3D live session identity
+                      sessionObject: \(ObjectIdentifier(session as AnyObject))
+                      displayRoot: \(session.displayRootNode.name ?? "unnamed")
+                      skinnedMesh: \(session.skinnedMeshNode.name ?? "unnamed")
+                    """)
+                }
+
+                lastSkin3DApplyRevision = skin3DApplyRevision
+                view.setNeedsDisplay(view.bounds)
+                view.needsDisplay = true
+                return
+            }
 
             if applySolvedPoseToReferenceRig,
                solveTargetMode == .spatialDepthGuidedRayPinned,

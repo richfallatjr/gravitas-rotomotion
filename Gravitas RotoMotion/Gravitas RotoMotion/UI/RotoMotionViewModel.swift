@@ -383,6 +383,18 @@ final class RotoMotionViewModel: ObservableObject {
         }
     }
     @Published var stereoVisionStatus = "No stereo Vision solve yet."
+    @Published var poseExtractionMode: PoseExtractionMode = .vision2D
+    @Published var vision3DStatus = "No Vision 3D extraction yet."
+    @Published var showVision3DSkeleton = true {
+        didSet { visibilityToggleChanged(name: "showVision3DSkeleton", value: showVision3DSkeleton) }
+    }
+    @Published var showVision3DProjectionOverlay = true {
+        didSet { visibilityToggleChanged(name: "showVision3DProjectionOverlay", value: showVision3DProjectionOverlay) }
+    }
+    @Published var showSkin3DTargetSkeletonOverlay = false
+    @Published var showSkin3DRigBoneDebugOverlay = false
+    @Published var vision3DCapture: Vision3DBodyPoseCapture?
+    @Published var normalizedVision3DCapture: NormalizedVision3DMeshyCapture?
 
     @Published var currentSessionURL: URL? {
         didSet { persistURL(currentSessionURL, forKey: AppStorageKeys.currentSessionURL) }
@@ -617,6 +629,16 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var bakedRigAnimationStatus = "No baked rig animation." {
         didSet { persist(bakedRigAnimationStatus, AppStorageKeys.bakedRigAnimationStatus) }
     }
+    @Published var skin3DSource: Skin3DSource = .auto
+    @Published var isSkinning3D = false
+    @Published var skin3DStatus = "Skin3D idle."
+    @Published var skin3DProgressFraction: Double = 0.0
+    @Published var skin3DProgressDetail = ""
+    @Published var liveRigPoseSource: LiveRigPoseSource = .none
+    @Published private(set) var skin3DApplyRevision: Int = 0
+    @Published private(set) var skin3DViewportRefreshRevision: Int = 0
+    @Published var skin3DActiveFrameStatus = "Skin3D not active."
+    @Published var vision3DSkinningAlignmentState: Vision3DSkinningAlignmentState = .invalid
     @Published var rotationOverrideLayer = JointRotationOverrideLayer.default
     @Published var selectedRotationJoint = "Head" {
         didSet {
@@ -1571,6 +1593,32 @@ final class RotoMotionViewModel: ObservableObject {
         }
     }
 
+    var currentVision3DFrame: Vision3DBodyPoseCapture.Frame? {
+        guard let frames = vision3DCapture?.frames,
+              !frames.isEmpty else {
+            return nil
+        }
+
+        let time = currentVideoTimeSeconds
+
+        return frames.min {
+            abs($0.timeSeconds - time) < abs($1.timeSeconds - time)
+        }
+    }
+
+    var currentNormalizedVision3DFrame: NormalizedVision3DMeshyCapture.Frame? {
+        guard let frames = normalizedVision3DCapture?.frames,
+              !frames.isEmpty else {
+            return nil
+        }
+
+        let time = currentVideoTimeSeconds
+
+        return frames.min {
+            abs($0.timeSeconds - time) < abs($1.timeSeconds - time)
+        }
+    }
+
     var shouldShowRightEyeVisionOverlay: Bool {
         captureMode == .spatialVideo &&
         !(rawRightVisionCapture?.frames.isEmpty ?? true)
@@ -2175,7 +2223,7 @@ final class RotoMotionViewModel: ObservableObject {
         sessionArmatureSnapshot = nil
         sessionArmaturePoseBuffer = nil
         bakedRigAnimation = nil
-        bakedRigAnimationStatus = "Solve changed. Bake rig animation before export."
+        bakedRigAnimationStatus = "Solve changed. Run Skin3D before export."
 
         if skinnedRigSession != nil {
             sessionPoseSource = .posedArmatureLocalTransforms
@@ -2315,7 +2363,7 @@ final class RotoMotionViewModel: ObservableObject {
         sessionArmatureSnapshot = nil
         sessionArmaturePoseBuffer = nil
         bakedRigAnimation = nil
-        bakedRigAnimationStatus = "Spatial depth-guided ray-pinned solve changed. Bake rig animation before export."
+        bakedRigAnimationStatus = "Spatial depth-guided ray-pinned solve changed. Run Skin3D before export."
         sessionPoseSource = .posedArmatureLocalTransforms
         sessionPoseStatus = """
         The actual skinned rig is rotomated live from depth-guided ray pins.
@@ -2385,7 +2433,8 @@ final class RotoMotionViewModel: ObservableObject {
             }
             sessionArmaturePoseBuffer = nil
             bakedRigAnimation = nil
-            bakedRigAnimationStatus = "Reference rig loaded. Bake rig animation before export."
+            bakedRigAnimationStatus = "Reference rig loaded. Run Skin3D before export."
+            skin3DStatus = "Skin3D stale: reference rig loaded."
             sessionArmatureSnapshot = nil
             referenceRigPlacementStatus = """
             Reference rig loaded.
@@ -2434,13 +2483,485 @@ final class RotoMotionViewModel: ObservableObject {
         }
     }
 
-    func bakeLiveRigAnimationForExport() {
-        if captureMode == .spatialVideo,
-           solveTargetMode == .spatialDepthGuidedRayPinned {
-            bakeSpatialDepthGuidedRayPinnedRigAnimationForExport()
+    @MainActor
+    private func resolvedSkin3DSource() -> Skin3DSource? {
+        switch skin3DSource {
+        case .vision3D:
+            return (normalizedVision3DCapture?.frames.isEmpty ?? true) ? nil : .vision3D
+
+        case .spatialDepthGuidedRayPin:
+            guard captureMode == .spatialVideo,
+                  !(normalizedLeftCapture?.frames.isEmpty ?? true) else {
+                return nil
+            }
+
+            return .spatialDepthGuidedRayPin
+
+        case .monocularRayPinLegacy:
+            return rayAnimationSolveResult == nil ? nil : .monocularRayPinLegacy
+
+        case .auto:
+            if !(normalizedVision3DCapture?.frames.isEmpty ?? true) {
+                return .vision3D
+            }
+
+            if captureMode == .spatialVideo,
+               !(normalizedLeftCapture?.frames.isEmpty ?? true) {
+                return .spatialDepthGuidedRayPin
+            }
+
+            if rayAnimationSolveResult != nil {
+                return .monocularRayPinLegacy
+            }
+
+            return nil
+        }
+    }
+
+    @MainActor
+    func skin3DForExport() async {
+        guard !isSkinning3D else {
+            diagnostics.log("Skin3D ignored: already running.")
             return
         }
 
+        guard let session = skinnedRigSession else {
+            skin3DStatus = "Skin3D failed: no skinned rig session."
+            diagnostics.log(skin3DStatus)
+            return
+        }
+
+        guard let source = resolvedSkin3DSource() else {
+            skin3DStatus = """
+            Skin3D failed: no valid pose source.
+            Run Vision 3D, or run the spatial Vision/disparity setup first.
+            """
+            diagnostics.log(skin3DStatus)
+            return
+        }
+
+        isSkinning3D = true
+        skin3DProgressFraction = 0
+        skin3DProgressDetail = "Starting Skin3D..."
+        bakedRigAnimation = nil
+        bakedRigAnimationStatus = "Skin3D running..."
+        sessionIsDirty = true
+
+        diagnostics.log("""
+        Skin3D START:
+          source: \(source.rawValue)
+          selectedSource: \(skin3DSource.rawValue)
+          skinnedRigSession: true
+          jointOrder: \(session.jointOrder.count)
+          authoredKeyedJoints: \(authoredRotationJoints().sorted().joined(separator: ", "))
+        """)
+
+        diagnostics.log("""
+        Skin3D session identity:
+          sessionObject: \(ObjectIdentifier(session as AnyObject))
+          displayRoot: \(session.displayRootNode.name ?? "unnamed")
+          skinnedMesh: \(session.skinnedMeshNode.name ?? "unnamed")
+        """)
+
+        switch source {
+        case .vision3D:
+            await skin3DVision3DForExport(session: session)
+        case .spatialDepthGuidedRayPin:
+            await skin3DSpatialDepthGuidedRayPinForExport(session: session)
+        case .monocularRayPinLegacy:
+            await skin3DMonocularLegacyForExport(session: session)
+        case .auto:
+            break
+        }
+
+        isSkinning3D = false
+    }
+
+    @MainActor
+    func activateSkin3DLiveRigSource(
+        _ source: LiveRigPoseSource,
+        reason: String
+    ) {
+        liveRigPoseSource = source
+        applySolvedPoseToReferenceRig = true
+
+        skin3DApplyRevision &+= 1
+        skin3DViewportRefreshRevision &+= 1
+        viewportRefreshRevision &+= 1
+
+        skin3DActiveFrameStatus = """
+        Skin3D live source active:
+          source: \(source.rawValue)
+          reason: \(reason)
+          currentFrame: \(currentFrameIndex)
+        """
+
+        diagnostics.log(skin3DActiveFrameStatus)
+
+        objectWillChange.send()
+        applyCurrentFrameToLiveRig()
+    }
+
+    @MainActor
+    func snapSkin3DToCurrentFrame() {
+        skin3DViewportRefreshRevision &+= 1
+        viewportRefreshRevision &+= 1
+
+        diagnostics.log("""
+        Skin3D snap requested:
+          liveRigPoseSource: \(liveRigPoseSource.rawValue)
+          currentFrame: \(currentFrameIndex)
+          currentTime: \(currentVideoTimeSeconds)
+          skin3DApplyRevision: \(skin3DApplyRevision)
+          skin3DViewportRefreshRevision: \(skin3DViewportRefreshRevision)
+        """)
+
+        objectWillChange.send()
+        applyCurrentFrameToLiveRig()
+    }
+
+    @MainActor
+    private func skin3DVision3DForExport(
+        session: SkinnedRigSession
+    ) async {
+        guard let capture = normalizedVision3DCapture,
+              !capture.frames.isEmpty else {
+            skin3DStatus = "Skin3D Vision3D failed: no normalized Vision3D capture."
+            diagnostics.log(skin3DStatus)
+            return
+        }
+
+        let snapshot = makeSkinnedRigPoseSnapshot(session: session)
+        var shouldRestoreSnapshot = true
+        defer {
+            if shouldRestoreSnapshot {
+                restoreSkinnedRigPoseSnapshot(snapshot, session: session)
+            }
+        }
+
+        let alignment = Vision3DSkinningDriver.solveInitialAlignment(
+            firstFrame: capture.frames[0],
+            session: session
+        )
+
+        guard alignment.valid else {
+            skin3DStatus = "Skin3D Vision3D failed: could not align Vision3D skeleton to rig."
+            diagnostics.log(skin3DStatus)
+            return
+        }
+
+        let authoredJoints = authoredRotationJoints()
+        var frames: [BakedRigAnimation.Frame] = []
+        frames.reserveCapacity(capture.frames.count)
+
+        diagnostics.log("""
+        Skin3D Vision3D START:
+          frames: \(capture.frames.count)
+          alignmentScale: \(alignment.scale)
+          jointOrder: \(session.jointOrder.count)
+        """)
+
+        for (index, frame) in capture.frames.enumerated() {
+            let stats = Vision3DSkinningDriver.skinFrame(
+                frame,
+                session: session,
+                alignment: alignment,
+                iterations: 10
+            )
+
+            applyRotationOverridesToRigForBakeFrame(
+                session: session,
+                frameIndex: frame.frameIndex,
+                timeSeconds: frame.timeSeconds
+            )
+
+            var bakedFrame = BakedRigAnimationSampler.sample(
+                session: session,
+                frameIndex: frame.frameIndex,
+                timeSeconds: frame.timeSeconds,
+                jointNames: session.jointOrder
+            )
+
+            bakedFrame = replaceAuthoredJointRotations(
+                bakedFrame,
+                authoredJoints: authoredJoints,
+                frameIndex: frame.frameIndex,
+                timeSeconds: frame.timeSeconds
+            )
+
+            frames.append(bakedFrame)
+            skin3DProgressFraction = Double(index + 1) / Double(capture.frames.count)
+            skin3DProgressDetail = "Vision3D frame \(index + 1)/\(capture.frames.count)"
+
+            if frame.frameIndex == 0 || frame.frameIndex % 30 == 0 {
+                diagnostics.log("""
+                Skin3D Vision3D frame:
+                  frame: \(frame.frameIndex)
+                  targets: \(stats.targetCount)
+                  avgError: \(String(format: "%.5f", stats.avgTargetError))
+                  worst: \(stats.worstJoint)
+                  worstError: \(String(format: "%.5f", stats.worstError))
+                """)
+            }
+        }
+
+        let baked = BakedRigAnimation(
+            schema: "com.gravitas.rotomotion.baked_rig_animation.v0",
+            clipID: retargetClipID,
+            fps: inferredFPSFromVision3DFrames(capture.frames),
+            jointNames: session.jointOrder,
+            frames: frames
+        )
+
+        bakedRigAnimation = baked
+        sessionArmaturePoseBuffer = baked.asSessionArmaturePoseBuffer()
+        sessionPoseSource = .posedArmatureLocalTransforms
+        sessionPoseStatus = "Baked immutable rig animation from Skin3D Vision3D: \(frames.count) frames."
+        bakedRigAnimationStatus = "Skin3D Vision3D complete: \(frames.count) frames."
+        skin3DStatus = bakedRigAnimationStatus
+        skin3DProgressFraction = 1
+        skin3DProgressDetail = "Vision3D complete."
+        usdzRetargetStatus = bakedRigAnimationStatus
+        status = bakedRigAnimationStatus
+        diagnostics.log(skin3DStatus)
+
+        vision3DSkinningAlignmentState = alignment.state
+        restoreSkinnedRigPoseSnapshot(snapshot, session: session)
+        shouldRestoreSnapshot = false
+
+        activateSkin3DLiveRigSource(
+            .skin3DVision3D,
+            reason: "Skin3D Vision3D complete"
+        )
+        snapSkin3DToCurrentFrame()
+
+        diagnostics.log("""
+        Skin3D Vision3D live rig activated:
+          frames: \(capture.frames.count)
+          currentFrame: \(currentFrameIndex)
+          alignmentValid: \(alignment.valid)
+          alignmentScale: \(alignment.scale)
+        """)
+    }
+
+    @MainActor
+    private func skin3DSpatialDepthGuidedRayPinForExport(
+        session: SkinnedRigSession
+    ) async {
+        guard let leftCapture = normalizedLeftCapture,
+              !leftCapture.frames.isEmpty else {
+            skin3DStatus = "Skin3D spatial failed: no normalized left-eye capture."
+            diagnostics.log(skin3DStatus)
+            return
+        }
+
+        guard let videoPlaneSize = currentVideoPlaneSize else {
+            skin3DStatus = "Skin3D spatial failed: no current video plane size."
+            diagnostics.log(skin3DStatus)
+            return
+        }
+
+        let snapshot = makeSkinnedRigPoseSnapshot(session: session)
+        var shouldRestoreSnapshot = true
+        defer {
+            if shouldRestoreSnapshot {
+                restoreSkinnedRigPoseSnapshot(snapshot, session: session)
+            }
+        }
+
+        let useDisparity = jointDepthEvidenceCapture != nil
+        spatialRayPinDepthMode = useDisparity ? .disparityDepthGuided : .leftEyeRayPinningFallback
+        solveTargetMode = .spatialDepthGuidedRayPinned
+
+        let authoredJoints = authoredRotationJoints()
+        let manualOffsetWorld = SIMD3<Float>(
+            Float(manualSpatialCameraPanX),
+            Float(manualSpatialCameraPanY),
+            Float(manualSpatialCameraDepthZ)
+        )
+        var frames: [BakedRigAnimation.Frame] = []
+        frames.reserveCapacity(leftCapture.frames.count)
+
+        diagnostics.log("""
+        Skin3D spatial START:
+          mode: \(spatialRayPinDepthMode.rawValue)
+          frames: \(leftCapture.frames.count)
+          jointDepthEvidenceFrames: \(jointDepthEvidenceCapture?.frames.count ?? 0)
+          usesLeftEyeRayPinning: true
+          usesDisparityDepth: \(useDisparity)
+          usesConditionedStereoPointCloud: false
+          usesMetersToSceneUnits: false
+          manualCameraOffsetWorld: \(manualOffsetWorld)
+        """)
+
+        for (index, normalizedFrame) in leftCapture.frames.enumerated() {
+            let evidenceFrame = useDisparity
+                ? nearestJointDepthEvidenceFrame(timeSeconds: normalizedFrame.timeSeconds)
+                : nil
+
+            let stats = SkinnedRigRotomationDriver.rotomateFrameWithDepthGuidedRayPins(
+                normalizedFrame: normalizedFrame,
+                jointDepthEvidenceFrame: evidenceFrame,
+                depthMode: spatialRayPinDepthMode,
+                session: session,
+                cameraOrigin: SIMD3<Float>(0, 0, 0),
+                videoPlaneSize: videoPlaneSize,
+                videoPlaneZ: currentVideoPlaneZ,
+                depthFitSettings: spatialRayPinDepthFitSettings,
+                autoDepthFitEnabled: autoSpatialDepthFitEnabled,
+                manualCameraOffsetWorld: manualOffsetWorld
+            )
+
+            applyRotationOverridesToRigForBakeFrame(
+                session: session,
+                frameIndex: normalizedFrame.frameIndex,
+                timeSeconds: normalizedFrame.timeSeconds
+            )
+
+            var bakedFrame = BakedRigAnimationSampler.sample(
+                session: session,
+                frameIndex: normalizedFrame.frameIndex,
+                timeSeconds: normalizedFrame.timeSeconds,
+                jointNames: session.jointOrder
+            )
+
+            bakedFrame = replaceAuthoredJointRotations(
+                bakedFrame,
+                authoredJoints: authoredJoints,
+                frameIndex: normalizedFrame.frameIndex,
+                timeSeconds: normalizedFrame.timeSeconds
+            )
+
+            frames.append(bakedFrame)
+            skin3DProgressFraction = Double(index + 1) / Double(leftCapture.frames.count)
+            skin3DProgressDetail = "Spatial frame \(index + 1)/\(leftCapture.frames.count)"
+
+            if normalizedFrame.frameIndex == 0 || normalizedFrame.frameIndex % 30 == 0 {
+                diagnostics.log("""
+                Skin3D spatial frame:
+                  frame: \(normalizedFrame.frameIndex)
+                  evidence: \(evidenceFrame == nil ? "none" : "yes")
+                  mode: \(spatialRayPinDepthMode.rawValue)
+                  exactTargets: \(stats.exactDepthTargets)
+                  avgRayDistance: \(String(format: "%.5f", stats.avgRayDistance))
+                  worst: \(stats.worstJoint)
+                  worstRayDistance: \(String(format: "%.5f", stats.worstRayDistance))
+                """)
+            }
+        }
+
+        let baked = BakedRigAnimation(
+            schema: "com.gravitas.rotomotion.baked_rig_animation.v0",
+            clipID: retargetClipID,
+            fps: inferredFPSFromNormalizedFrames(leftCapture.frames),
+            jointNames: session.jointOrder,
+            frames: frames
+        )
+
+        bakedRigAnimation = baked
+        sessionArmaturePoseBuffer = baked.asSessionArmaturePoseBuffer()
+        sessionPoseSource = .posedArmatureLocalTransforms
+        sessionPoseStatus = "Baked immutable rig animation from Skin3D spatial depth-guided ray pins: \(frames.count) frames."
+        bakedRigAnimationStatus = "Skin3D spatial complete: \(frames.count) frames."
+        skin3DStatus = bakedRigAnimationStatus
+        skin3DProgressFraction = 1
+        skin3DProgressDetail = "Spatial complete."
+        usdzRetargetStatus = bakedRigAnimationStatus
+        status = bakedRigAnimationStatus
+        diagnostics.log(skin3DStatus)
+
+        restoreSkinnedRigPoseSnapshot(snapshot, session: session)
+        shouldRestoreSnapshot = false
+
+        activateSkin3DLiveRigSource(
+            .skin3DSpatialDepthGuidedRayPin,
+            reason: "Skin3D spatial complete"
+        )
+        snapSkin3DToCurrentFrame()
+    }
+
+    @MainActor
+    private func skin3DMonocularLegacyForExport(
+        session: SkinnedRigSession
+    ) async {
+        diagnostics.log("Skin3D legacy monocular path requested.")
+        skin3DStatus = "Skin3D legacy monocular running..."
+        bakeMonocularRigAnimationForExport()
+        skin3DStatus = bakedRigAnimationStatus
+        skin3DProgressFraction = bakedRigAnimation == nil ? 0 : 1
+        skin3DProgressDetail = bakedRigAnimation == nil ? "Legacy monocular failed." : "Legacy monocular complete."
+
+        if bakedRigAnimation != nil {
+            activateSkin3DLiveRigSource(
+                .skin3DMonocularLegacy,
+                reason: "Skin3D legacy monocular complete"
+            )
+            snapSkin3DToCurrentFrame()
+        }
+    }
+
+    @MainActor
+    func setSkin3DSource(_ source: Skin3DSource) {
+        guard skin3DSource != source else {
+            return
+        }
+
+        skin3DSource = source
+        invalidateSkin3D(reason: "Skin3D source changed to \(source.rawValue)")
+    }
+
+    @MainActor
+    func invalidateSkin3D(reason: String) {
+        bakedRigAnimation = nil
+        bakedRigAnimationStatus = "Skin3D bake is stale. Run Skin3D again."
+        skin3DStatus = "Skin3D stale: \(reason)"
+        sessionIsDirty = true
+
+        diagnostics.log("""
+        Skin3D invalidated:
+          reason: \(reason)
+        """)
+    }
+
+    private struct SkinnedRigPoseSnapshot {
+        let displayRootTransform: simd_float4x4
+        let boneTransforms: [String: simd_float4x4]
+    }
+
+    private func makeSkinnedRigPoseSnapshot(
+        session: SkinnedRigSession
+    ) -> SkinnedRigPoseSnapshot {
+        let bones = session.jointOrder.reduce(into: [String: simd_float4x4]()) { result, joint in
+            if let bone = session.bonesByCanonicalName[joint] {
+                result[joint] = bone.simdTransform
+            }
+        }
+
+        return SkinnedRigPoseSnapshot(
+            displayRootTransform: session.displayRootNode.simdTransform,
+            boneTransforms: bones
+        )
+    }
+
+    private func restoreSkinnedRigPoseSnapshot(
+        _ snapshot: SkinnedRigPoseSnapshot,
+        session: SkinnedRigSession
+    ) {
+        session.displayRootNode.simdTransform = snapshot.displayRootTransform
+
+        for (joint, transform) in snapshot.boneTransforms {
+            session.bonesByCanonicalName[joint]?.simdTransform = transform
+        }
+    }
+
+    @MainActor
+    func bakeLiveRigAnimationForExport() {
+        Task {
+            await skin3DForExport()
+        }
+    }
+
+    private func bakeMonocularRigAnimationForExport() {
         guard let session = skinnedRigSession else {
             bakedRigAnimationStatus = "Load reference skinned rig first."
             status = bakedRigAnimationStatus
@@ -2921,6 +3442,19 @@ final class RotoMotionViewModel: ObservableObject {
         return Double(frames.count - 1) / duration
     }
 
+    private func inferredFPSFromVision3DFrames(
+        _ frames: [NormalizedVision3DMeshyCapture.Frame]
+    ) -> Double {
+        guard let first = frames.first,
+              let last = frames.last,
+              frames.count > 1 else {
+            return 24.0
+        }
+
+        let duration = max(last.timeSeconds - first.timeSeconds, 0.0001)
+        return Double(frames.count - 1) / duration
+    }
+
     func openVideo() {
         diagnostics.log("Open Video requested.")
 
@@ -2950,6 +3484,10 @@ final class RotoMotionViewModel: ObservableObject {
         rawCapture = nil
         normalizedCapture = nil
         smoothedCapture = nil
+        vision3DCapture = nil
+        normalizedVision3DCapture = nil
+        vision3DStatus = "No Vision 3D extraction yet."
+        poseExtractionMode = .vision2D
         fitResult = nil
         project = nil
         lastVisionError = nil
@@ -2961,7 +3499,7 @@ final class RotoMotionViewModel: ObservableObject {
         sessionArmaturePoseBuffer = nil
         resetRotationAuthoringForNewSession()
         bakedRigAnimation = nil
-        bakedRigAnimationStatus = "Reference changed. Bake rig animation before export."
+        bakedRigAnimationStatus = "Reference changed. Run Skin3D before export."
         sessionPoseSource = .none
         sessionPoseStatus = "No session pose source detected."
         currentVideoPlaneSize = nil
@@ -3079,6 +3617,9 @@ final class RotoMotionViewModel: ObservableObject {
         normalizedRightCapture = nil
         stereoJointCapture = nil
         conditionedStereoJointCapture = nil
+        vision3DCapture = nil
+        normalizedVision3DCapture = nil
+        vision3DStatus = "No Vision 3D extraction yet."
         resetSpatialDisparityState(status: "No disparity map built.")
         spatialVideoMetadata = nil
         spatialStereoAvailable = false
@@ -3304,7 +3845,8 @@ final class RotoMotionViewModel: ObservableObject {
     @MainActor
     func invalidateBakeAndRefresh(reason: String) {
         bakedRigAnimation = nil
-        bakedRigAnimationStatus = "Bake is stale. Re-bake rig animation for export."
+        bakedRigAnimationStatus = "Skin3D bake is stale. Run Skin3D again."
+        skin3DStatus = "Skin3D stale: \(reason)"
         sessionIsDirty = true
         solveInputRevision &+= 1
         requestViewportRefresh(reason: reason)
@@ -3331,7 +3873,8 @@ final class RotoMotionViewModel: ObservableObject {
         }
 
         bakedRigAnimation = nil
-        bakedRigAnimationStatus = "Bake is stale. Re-bake rig animation for export."
+        bakedRigAnimationStatus = "Skin3D bake is stale. Run Skin3D again."
+        skin3DStatus = "Skin3D stale: \(reason)"
         sessionIsDirty = true
 
         diagnostics.log("""
@@ -3565,6 +4108,10 @@ final class RotoMotionViewModel: ObservableObject {
         rawCapture = nil
         normalizedCapture = nil
         smoothedCapture = nil
+        vision3DCapture = nil
+        normalizedVision3DCapture = nil
+        vision3DStatus = "No Vision 3D extraction yet."
+        poseExtractionMode = .vision2D
         fitResult = nil
         currentRaySolveResult = nil
         rayAnimationSolveResult = nil
@@ -3572,7 +4119,7 @@ final class RotoMotionViewModel: ObservableObject {
         sessionArmaturePoseBuffer = nil
         resetRotationAuthoringForNewSession()
         bakedRigAnimation = nil
-        bakedRigAnimationStatus = "Spatial video changed. Bake rig animation before export."
+        bakedRigAnimationStatus = "Spatial video changed. Run Skin3D before export."
         sessionPoseSource = .none
         sessionPoseStatus = "No session pose source detected."
         currentVideoPlaneSize = nil
@@ -3794,7 +4341,7 @@ final class RotoMotionViewModel: ObservableObject {
             sessionArmatureSnapshot = nil
             sessionArmaturePoseBuffer = nil
             bakedRigAnimation = nil
-            bakedRigAnimationStatus = "Spatial Vision changed. Bake rig animation before export."
+            bakedRigAnimationStatus = "Spatial Vision changed. Run Skin3D before export."
             maxFrameIndex = max(maxFrameIndex, max(0, left.frames.count - 1))
 
             guard spatialVideoMetadata != nil else {
@@ -4621,6 +5168,13 @@ final class RotoMotionViewModel: ObservableObject {
           depthZ: \(manualSpatialCameraDepthZ)
         """)
 
+        diagnostics.log("""
+        Playback started:
+          liveRigPoseSource: \(liveRigPoseSource.rawValue)
+          applySolvedPoseToReferenceRig: \(applySolvedPoseToReferenceRig)
+          skin3DApplyRevision: \(skin3DApplyRevision)
+        """)
+
         playbackTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 self?.updatePlaybackFrameFromClock()
@@ -4877,6 +5431,121 @@ final class RotoMotionViewModel: ObservableObject {
             """)
         }
 
+    }
+
+    func runVision3D() async {
+        let inputFrames: [Vision3DInputFrame]
+        let sourceDescription: String
+
+        if captureMode == .spatialVideo, !leftEyeFrames.isEmpty {
+            inputFrames = leftEyeFrames.map {
+                Vision3DInputFrame(
+                    frameIndex: $0.frameIndex,
+                    timeSeconds: $0.timeSeconds,
+                    image: $0.image
+                )
+            }
+            sourceDescription = "spatial left eye"
+        } else {
+            inputFrames = decodedFrames.map {
+                Vision3DInputFrame(
+                    frameIndex: $0.frameIndex,
+                    timeSeconds: $0.timeSeconds,
+                    image: $0.image
+                )
+            }
+            sourceDescription = "decoded frames"
+        }
+
+        guard !inputFrames.isEmpty else {
+            vision3DStatus = "Vision 3D failed: no frames."
+            diagnostics.log(vision3DStatus)
+            return
+        }
+
+        isWorking = true
+        poseExtractionMode = .vision3D
+        vision3DStatus = "Running Vision 3D..."
+        status = vision3DStatus
+
+        diagnostics.log("""
+        Running Vision 3D:
+          frames: \(inputFrames.count)
+          captureMode: \(captureMode.rawValue)
+          source: \(sourceDescription)
+        """)
+
+        do {
+            let capture = try await Vision3DBodyPoseExtractor.extract(frames: inputFrames)
+            let normalized = Vision3DToMeshy24Normalizer.normalize(capture)
+
+            vision3DCapture = capture
+            normalizedVision3DCapture = normalized
+            invalidateSkin3D(reason: "Vision 3D extraction success")
+
+            logVision3DComparison(
+                normalized: normalized
+            )
+
+            vision3DStatus = """
+            Vision 3D success:
+              frames: \(capture.frames.count)
+              firstFrameJoints: \(capture.frames.first?.joints.count ?? 0)
+              normalizedFirstFrameJoints: \(normalized.frames.first?.joints.count ?? 0)
+              firstBodyHeightMeters: \(capture.frames.first?.bodyHeightMeters ?? -1)
+            """
+            status = "Vision 3D complete: \(capture.frames.count) frames."
+            isWorking = false
+            requestViewportRefresh(reason: "Vision 3D extraction complete")
+            diagnostics.log(vision3DStatus)
+
+        } catch {
+            vision3DCapture = nil
+            normalizedVision3DCapture = nil
+            vision3DStatus = "Vision 3D failed: \(error.localizedDescription)"
+            status = vision3DStatus
+            isWorking = false
+            diagnostics.log("""
+            Vision 3D failed:
+              error: \(error)
+              frames: \(inputFrames.count)
+              source: \(sourceDescription)
+            """)
+        }
+    }
+
+    private func logVision3DComparison(
+        normalized: NormalizedVision3DMeshyCapture
+    ) {
+        for frame in normalized.frames where frame.frameIndex == 0 || frame.frameIndex % 30 == 0 {
+            let normalized2DFrame: NormalizedMeshyPoseCapture.Frame?
+
+            if captureMode == .spatialVideo,
+               let frames = normalizedLeftCapture?.frames,
+               !frames.isEmpty {
+                normalized2DFrame = frames.min {
+                    abs($0.timeSeconds - frame.timeSeconds) < abs($1.timeSeconds - frame.timeSeconds)
+                }
+            } else {
+                normalized2DFrame = nearestNormalizedFrame(forTime: frame.timeSeconds)
+            }
+
+            let report = Vision3DComparisonEvaluator.report(
+                frame: frame,
+                normalized2DFrame: normalized2DFrame,
+                capture: normalized
+            )
+
+            diagnostics.log("""
+            Vision 3D comparison:
+              frame: \(report.frameIndex)
+              valid joints: \(report.validVision3DJoints)
+              avg projected 2D error: \(report.averageProjected2DError.map { String(format: "%.5f", $0) } ?? "nil")
+              avg bone length variation: \(report.averageBoneLengthVariation.map { String(format: "%.5f", $0) } ?? "nil")
+              worst bone: \(report.worstBone ?? "nil")
+              worst bone variation: \(report.worstBoneVariation.map { String(format: "%.5f", $0) } ?? "nil")
+            """)
+        }
     }
 
     func normalize() {
@@ -5394,7 +6063,7 @@ final class RotoMotionViewModel: ObservableObject {
             }
             sessionArmaturePoseBuffer = nil
             bakedRigAnimation = nil
-            bakedRigAnimationStatus = "Reference rig loaded. Bake rig animation before export."
+            bakedRigAnimationStatus = "Reference rig loaded. Run Skin3D before export."
             sessionArmatureSnapshot = nil
             referenceRigPlacementStatus = """
             Reference rig loaded.
@@ -5515,7 +6184,8 @@ final class RotoMotionViewModel: ObservableObject {
 
     private func invalidateBakedAnimationBecauseRotationOverridesChanged() {
         bakedRigAnimation = nil
-        bakedRigAnimationStatus = "Bake is stale. Re-bake animation."
+        bakedRigAnimationStatus = "Skin3D bake is stale. Run Skin3D again."
+        skin3DStatus = "Skin3D stale: rotation overrides changed"
         sessionIsDirty = true
     }
 
@@ -5843,21 +6513,76 @@ final class RotoMotionViewModel: ObservableObject {
     }
 
     func applyCurrentFrameToLiveRig() {
-        guard let session = skinnedRigSession,
-              let solvedFrame = currentRaySolvedFrame,
-              let normalizedFrame = currentNormalizedFrame,
-              let videoPlaneSize = currentVideoPlaneSize else {
+        guard let session = skinnedRigSession else {
             return
         }
 
-        SkinnedRigRotomationDriver.rotomateFrameWithCurvePins(
-            solvedFrame,
-            normalizedFrame: normalizedFrame,
-            session: session,
-            cameraOrigin: SIMD3<Float>(0, 0, 0),
-            videoPlaneSize: videoPlaneSize,
-            videoPlaneZ: currentVideoPlaneZ
-        )
+        switch liveRigPoseSource {
+        case .skin3DVision3D:
+            guard let frame = currentNormalizedVision3DFrame else {
+                return
+            }
+
+            let stats = Vision3DSkinningDriver.skinFrame(
+                frame,
+                session: session,
+                alignment: vision3DSkinningAlignmentState.driverAlignment,
+                iterations: 10
+            )
+
+            skin3DActiveFrameStatus = """
+            Skin3D live source active:
+              source: \(liveRigPoseSource.rawValue)
+              frame: \(frame.frameIndex)
+              targets: \(stats.targetCount)
+              avgError: \(String(format: "%.5f", stats.avgTargetError))
+            """
+
+        case .skin3DSpatialDepthGuidedRayPin:
+            guard let normalizedFrame = currentNormalizedFrame,
+                  let videoPlaneSize = currentVideoPlaneSize else {
+                return
+            }
+
+            let evidenceFrame = spatialRayPinDepthMode == .disparityDepthGuided
+                ? nearestJointDepthEvidenceFrame(timeSeconds: normalizedFrame.timeSeconds)
+                : nil
+
+            _ = SkinnedRigRotomationDriver.rotomateFrameWithDepthGuidedRayPins(
+                normalizedFrame: normalizedFrame,
+                jointDepthEvidenceFrame: evidenceFrame,
+                depthMode: spatialRayPinDepthMode,
+                session: session,
+                cameraOrigin: SIMD3<Float>(0, 0, 0),
+                videoPlaneSize: videoPlaneSize,
+                videoPlaneZ: currentVideoPlaneZ,
+                depthFitSettings: spatialRayPinDepthFitSettings,
+                autoDepthFitEnabled: autoSpatialDepthFitEnabled,
+                manualCameraOffsetWorld: SIMD3<Float>(
+                    Float(manualSpatialCameraPanX),
+                    Float(manualSpatialCameraPanY),
+                    Float(manualSpatialCameraDepthZ)
+                )
+            )
+
+        case .skin3DMonocularLegacy,
+             .bakedRigAnimationPlayback,
+             .none:
+            guard let solvedFrame = currentRaySolvedFrame,
+                  let normalizedFrame = currentNormalizedFrame,
+                  let videoPlaneSize = currentVideoPlaneSize else {
+                return
+            }
+
+            SkinnedRigRotomationDriver.rotomateFrameWithCurvePins(
+                solvedFrame,
+                normalizedFrame: normalizedFrame,
+                session: session,
+                cameraOrigin: SIMD3<Float>(0, 0, 0),
+                videoPlaneSize: videoPlaneSize,
+                videoPlaneZ: currentVideoPlaneZ
+            )
+        }
 
         applyRotationOverridesToLiveRig()
     }
@@ -6390,11 +7115,17 @@ final class RotoMotionViewModel: ObservableObject {
         """)
 
         guard let bakedRigAnimation else {
-            usdzRetargetStatus = "Bake Rig Animation For Export before exporting. No baked rig animation is available."
+            usdzRetargetStatus = "Run Skin3D before export. No baked rig animation is available."
             status = usdzRetargetStatus
             diagnostics.log(usdzRetargetStatus)
             return
         }
+
+        diagnostics.log("""
+        Export using bakedRigAnimation from Skin3D.
+          frames: \(bakedRigAnimation.frames.count)
+          clipID: \(bakedRigAnimation.clipID)
+        """)
 
         guard sessionPoseSource == .posedArmatureLocalTransforms else {
             usdzRetargetStatus = """

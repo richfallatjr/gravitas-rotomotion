@@ -28,16 +28,22 @@ struct ContentView: View {
 
             Divider()
 
-            HStack(spacing: 12) {
-                videoPanel
-                    .frame(minWidth: 680)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            GeometryReader { proxy in
+                let outerPadding: CGFloat = 12
+                let columnSpacing: CGFloat = 18
+                let inspectorWidth = min(560, max(500, proxy.size.width * 0.28))
 
-                controlPanel
-                    .frame(width: 360)
-                    .frame(maxHeight: .infinity)
+                HStack(alignment: .top, spacing: columnSpacing) {
+                    videoPanel
+                        .frame(minWidth: 560, maxWidth: .infinity)
+                        .frame(maxHeight: .infinity)
+
+                    controlPanel
+                        .frame(width: inspectorWidth)
+                        .frame(maxHeight: .infinity)
+                }
+                .padding(outerPadding)
             }
-            .padding(12)
 
             Divider()
 
@@ -113,6 +119,15 @@ struct ContentView: View {
             }
             .disabled(runVisionDisabledReason != nil)
 
+            Button("Run Vision 3D") {
+                Task {
+                    await roto.runVision3D()
+                    pipelineRenderToken += 1
+                    uiStatus = roto.status
+                }
+            }
+            .disabled(roto.decodedFrames.isEmpty && roto.leftEyeFrames.isEmpty)
+
             Button("Solve Full Animation") {
                 Task {
                     await roto.solveFullAnimationWithCameraRays()
@@ -122,12 +137,15 @@ struct ContentView: View {
             }
             .disabled(!canSolveFullAnimation)
 
-            Button("Bake Rig Animation For Export") {
-                roto.bakeLiveRigAnimationForExport()
-                uiStatus = roto.status
-                pipelineRenderToken += 1
+            Button("Skin3D") {
+                Task {
+                    await roto.skin3DForExport()
+                    uiStatus = roto.status
+                    pipelineRenderToken += 1
+                }
             }
-            .disabled(!canBakeRigAnimationForExport)
+            .disabled(!canBakeRigAnimationForExport || roto.isSkinning3D)
+            .help("Skin the current 3D pose source onto the reference rig and prepare baked animation for export.")
 
             Spacer()
         }
@@ -169,6 +187,7 @@ struct ContentView: View {
                 frameIndex: uiCurrentFrameIndex,
                 rawFrame: currentRawFrame,
                 normalizedFrame: currentNormalizedFrame,
+                vision3DFrame: roto.currentNormalizedVision3DFrame,
                 rightRawFrame: currentRightRawFrame,
                 rightNormalizedFrame: currentRightNormalizedFrame,
                 smoothedFrame: nil,
@@ -196,6 +215,10 @@ struct ContentView: View {
                 liveRotationOverrideEulerXYZByJoint: roto.liveRotationOverrideEulerXYZByJoint,
                 liveRotationPreviewFrameIndexByJoint: roto.liveRotationPreviewFrameIndexByJoint,
                 liveRotationOverridesActive: roto.isRotationGizmoDragging,
+                liveRigPoseSource: roto.liveRigPoseSource,
+                skin3DApplyRevision: roto.skin3DApplyRevision,
+                skin3DViewportRefreshRevision: roto.skin3DViewportRefreshRevision,
+                vision3DSkinningAlignmentState: roto.vision3DSkinningAlignmentState,
                 viewportRefreshRevision: roto.viewportRefreshRevision,
                 rotationOverrideRevision: roto.rotationOverrideRevision,
                 rotationKeyRevision: roto.rotationKeyRevision,
@@ -209,6 +232,8 @@ struct ContentView: View {
                 lastViewportRefreshReason: roto.lastViewportRefreshReason,
                 showRawVision: roto.showRawVisionPoints,
                 showNormalizedMeshy: roto.showNormalizedMeshyPoints,
+                showVision3DSkeleton: roto.showVision3DSkeleton,
+                showVision3DProjectionOverlay: roto.showVision3DProjectionOverlay,
                 showRightEyeVisionOverlay: roto.shouldShowRightEyeVisionOverlay,
                 showRightEyeNormalizedOverlay: roto.shouldShowRightEyeNormalizedOverlay,
                 showSmoothedMeshy: false,
@@ -336,7 +361,7 @@ struct ContentView: View {
     }
 
     private var controlPanel: some View {
-        ScrollView {
+        ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 14) {
                 GroupBox("Video") {
                     VStack(alignment: .leading, spacing: 4) {
@@ -367,6 +392,24 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Raw Vision: \(roto.rawCapture?.frames.count ?? 0) frames")
                         Text("Normalized Meshy24: \(roto.normalizedCapture?.frames.count ?? 0) frames")
+                        Text("Vision 3D: \(roto.vision3DCapture?.frames.count ?? 0) frames")
+                        Text("Vision 3D Meshy24: \(roto.normalizedVision3DCapture?.frames.count ?? 0) frames")
+
+                        Picker("Pose Source", selection: $roto.poseExtractionMode) {
+                            ForEach(PoseExtractionMode.allCases) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.menu)
+
+                        Button("Run Vision 3D") {
+                            Task {
+                                await roto.runVision3D()
+                                uiStatus = roto.status
+                                pipelineRenderToken += 1
+                            }
+                        }
+                        .disabled(roto.decodedFrames.isEmpty && roto.leftEyeFrames.isEmpty)
 
                         HStack {
                             Button("Save Raw") {
@@ -393,6 +436,11 @@ struct ContentView: View {
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
+
+                        Text(roto.vision3DStatus)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     .font(.caption)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -402,6 +450,8 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Toggle("Raw Vision Points", isOn: $roto.showRawVisionPoints)
                         Toggle("Normalized Meshy24 Skeleton", isOn: $roto.showNormalizedMeshyPoints)
+                        Toggle("Vision 3D Skeleton", isOn: $roto.showVision3DSkeleton)
+                        Toggle("Vision 3D Projection", isOn: $roto.showVision3DProjectionOverlay)
                     }
                     .font(.caption)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -420,7 +470,13 @@ struct ContentView: View {
                 diagnosticsPanel
             }
             .padding(10)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
+        .scrollIndicators(.visible)
+        .background(
+            Color(nsColor: .windowBackgroundColor).opacity(0.35),
+            in: RoundedRectangle(cornerRadius: 8)
+        )
     }
 
     private var viewportPanel: some View {
@@ -1166,12 +1222,75 @@ struct ContentView: View {
                     .foregroundStyle(roto.openUSDToolStatus?.ready == true ? Color.green : Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Button("Bake Rig Animation For Export") {
-                    roto.bakeLiveRigAnimationForExport()
-                    uiStatus = roto.status
-                    pipelineRenderToken += 1
+                Picker(
+                    "Skin3D Source",
+                    selection: Binding(
+                        get: { roto.skin3DSource },
+                        set: { roto.setSkin3DSource($0) }
+                    )
+                ) {
+                    ForEach(Skin3DSource.allCases) { source in
+                        Text(source.displayName).tag(source)
+                    }
                 }
-                .disabled(!canBakeRigAnimationForExport)
+                .pickerStyle(.segmented)
+
+                Button("Skin3D") {
+                    Task {
+                        await roto.skin3DForExport()
+                        uiStatus = roto.status
+                        pipelineRenderToken += 1
+                    }
+                }
+                .disabled(!canBakeRigAnimationForExport || roto.isSkinning3D)
+                .help("Skin the current 3D pose source onto the reference rig and prepare baked animation for export.")
+
+                GroupBox("Skin3D") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(roto.skin3DStatus)
+                                .font(.caption)
+                                .bold()
+
+                            Spacer()
+
+                            Text("\(Int(roto.skin3DProgressFraction * 100))%")
+                                .font(.caption)
+                                .monospacedDigit()
+                        }
+
+                        ProgressView(value: roto.skin3DProgressFraction)
+                            .tint(.green)
+
+                        Text(roto.skin3DProgressDetail)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Button("Apply Skin3D Current Frame") {
+                            roto.snapSkin3DToCurrentFrame()
+                            uiStatus = roto.status
+                            pipelineRenderToken += 1
+                        }
+                        .disabled(roto.liveRigPoseSource == .none)
+
+                        Text(roto.skin3DActiveFrameStatus)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Text("""
+                        Live source: \(roto.liveRigPoseSource.rawValue)
+                        Apply rev: \(roto.skin3DApplyRevision)
+                        Viewport rev: \(roto.skin3DViewportRefreshRevision)
+                        """)
+                        .font(.caption2)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
 
                 Text(roto.bakedRigAnimationStatus)
                     .font(.caption2)
@@ -1204,8 +1323,8 @@ struct ContentView: View {
 
                 if !hasBakeSourceForCurrentMode {
                     Text(roto.captureMode == .spatialVideo
-                        ? "Run spatial Solve Full Animation before baking/exporting."
-                        : "Run Solve Full Animation before exporting.")
+                        ? "Run Vision 3D or spatial Vision/disparity setup before Skin3D/exporting."
+                        : "Run Vision 3D or Solve Full Animation before exporting.")
                         .font(.caption2)
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1231,9 +1350,7 @@ struct ContentView: View {
         var needs: [String] = []
 
         if !hasBakeSourceForCurrentMode {
-            needs.append(roto.captureMode == .spatialVideo
-                ? "spatial depth-guided ray-pinned solve"
-                : "solved ray IK animation")
+            needs.append("Skin3D pose source")
         }
 
         if roto.bakedRigAnimation == nil {
@@ -1249,6 +1366,7 @@ struct ContentView: View {
         }
 
         let frames = roto.bakedRigAnimation?.frames.count
+            ?? roto.normalizedVision3DCapture?.frames.count
             ?? roto.rayAnimationSolveResult?.frames.count
             ?? roto.normalizedLeftCapture?.frames.count
             ?? 0
@@ -1261,22 +1379,41 @@ struct ContentView: View {
 
     private var spatialRayPinBakeSourceReady: Bool {
         roto.captureMode == .spatialVideo &&
-            roto.solveTargetMode == .spatialDepthGuidedRayPinned &&
             !(roto.normalizedLeftCapture?.frames.isEmpty ?? true) &&
-            (
-                roto.spatialRayPinDepthMode == .leftEyeRayPinningFallback ||
-                    !(roto.jointDepthEvidenceCapture?.frames.isEmpty ?? true)
-            )
+            roto.currentVideoPlaneSize != nil
+    }
+
+    private var vision3DSkinSourceReady: Bool {
+        !(roto.normalizedVision3DCapture?.frames.isEmpty ?? true)
+    }
+
+    private var monocularRayPinBakeSourceReady: Bool {
+        roto.rayAnimationSolveResult != nil &&
+            roto.currentVideoPlaneSize != nil
     }
 
     private var hasBakeSourceForCurrentMode: Bool {
-        roto.rayAnimationSolveResult != nil || spatialRayPinBakeSourceReady
+        vision3DSkinSourceReady ||
+            spatialRayPinBakeSourceReady ||
+            monocularRayPinBakeSourceReady
+    }
+
+    private var selectedSkin3DSourceReady: Bool {
+        switch roto.skin3DSource {
+        case .auto:
+            return hasBakeSourceForCurrentMode
+        case .vision3D:
+            return vision3DSkinSourceReady
+        case .spatialDepthGuidedRayPin:
+            return spatialRayPinBakeSourceReady
+        case .monocularRayPinLegacy:
+            return monocularRayPinBakeSourceReady
+        }
     }
 
     private var canBakeRigAnimationForExport: Bool {
         roto.skinnedRigSession != nil &&
-            roto.currentVideoPlaneSize != nil &&
-            hasBakeSourceForCurrentMode
+            selectedSkin3DSourceReady
     }
 
     private var canSolveFullAnimation: Bool {
@@ -1341,7 +1478,7 @@ struct ContentView: View {
                     roto.sessionArmatureSnapshot = nil
                     roto.sessionArmaturePoseBuffer = nil
                     roto.bakedRigAnimation = nil
-                    roto.bakedRigAnimationStatus = "Ray animation cleared. Bake rig animation before export."
+                    roto.bakedRigAnimationStatus = "Ray animation cleared. Run Skin3D before export."
                     roto.sessionPoseSource = .none
                     roto.sessionPoseStatus = "No session pose source detected."
                     roto.rayAnimationSolveStatus = "Ray animation solve cleared."
@@ -1587,7 +1724,7 @@ struct ContentView: View {
         roto.sessionArmaturePoseBuffer = nil
         roto.resetRotationAuthoringForNewSession()
         roto.bakedRigAnimation = nil
-        roto.bakedRigAnimationStatus = "Video changed. Bake rig animation before export."
+        roto.bakedRigAnimationStatus = "Video changed. Run Skin3D before export."
         roto.sessionPoseSource = .none
         roto.sessionPoseStatus = "No session pose source detected."
         roto.currentVideoPlaneSize = nil
