@@ -964,11 +964,7 @@ struct ContentView: View {
                     uiStatus = roto.status
                     pipelineRenderToken += 1
                 }
-                .disabled(
-                    roto.skinnedRigSession == nil ||
-                    roto.rayAnimationSolveResult == nil ||
-                    roto.currentVideoPlaneSize == nil
-                )
+                .disabled(!canBakeRigAnimationForExport)
 
                 Text(roto.bakedRigAnimationStatus)
                     .font(.caption2)
@@ -980,7 +976,7 @@ struct ContentView: View {
                     uiStatus = roto.status
                     pipelineRenderToken += 1
                 }
-                .disabled(roto.rayAnimationSolveResult == nil || roto.bakedRigAnimation == nil)
+                .disabled(!canExportAnimatedTargetUSDZ)
 
                 Button("Reveal Last Export") {
                     roto.revealLastAnimatedUSDZExport()
@@ -999,8 +995,10 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                if roto.rayAnimationSolveResult == nil {
-                    Text("Run Solve Full Animation before exporting.")
+                if !hasBakeSourceForCurrentMode {
+                    Text(roto.captureMode == .spatialVideo
+                        ? "Run spatial Solve Full Animation before baking/exporting."
+                        : "Run Solve Full Animation before exporting.")
                         .font(.caption2)
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1025,8 +1023,10 @@ struct ContentView: View {
     private var usdzRetargetReadinessText: String {
         var needs: [String] = []
 
-        if roto.rayAnimationSolveResult == nil {
-            needs.append("solved ray IK animation")
+        if !hasBakeSourceForCurrentMode {
+            needs.append(roto.captureMode == .spatialVideo
+                ? "spatial depth-guided ray-pinned solve"
+                : "solved ray IK animation")
         }
 
         if roto.bakedRigAnimation == nil {
@@ -1041,12 +1041,40 @@ struct ContentView: View {
             return "Blocked for skinned USDZ: current pose source is \(roto.sessionPoseSource.rawValue), not posed armature local transforms."
         }
 
-        let frames = roto.rayAnimationSolveResult?.frames.count ?? 0
+        let frames = roto.bakedRigAnimation?.frames.count
+            ?? roto.rayAnimationSolveResult?.frames.count
+            ?? roto.normalizedLeftCapture?.frames.count
+            ?? 0
         let referenceHeight = roto.referenceRigProfile?.estimatedHeightMeters
             .map { String(format: "%.3f m", $0) }
             ?? "default/reference not selected"
         let targetText = roto.targetCharacterUSDZURL?.lastPathComponent ?? "target chosen during export"
         return "Exports animated target USDZ: \(frames) frames, reference \(referenceHeight), target \(targetText)."
+    }
+
+    private var spatialRayPinBakeSourceReady: Bool {
+        roto.captureMode == .spatialVideo &&
+            roto.solveTargetMode == .spatialDepthGuidedRayPinned &&
+            !(roto.normalizedLeftCapture?.frames.isEmpty ?? true) &&
+            (
+                roto.spatialRayPinDepthMode == .leftEyeRayPinningFallback ||
+                    !(roto.jointDepthEvidenceCapture?.frames.isEmpty ?? true)
+            )
+    }
+
+    private var hasBakeSourceForCurrentMode: Bool {
+        roto.rayAnimationSolveResult != nil || spatialRayPinBakeSourceReady
+    }
+
+    private var canBakeRigAnimationForExport: Bool {
+        roto.skinnedRigSession != nil &&
+            roto.currentVideoPlaneSize != nil &&
+            hasBakeSourceForCurrentMode
+    }
+
+    private var canExportAnimatedTargetUSDZ: Bool {
+        roto.bakedRigAnimation != nil &&
+            roto.sessionPoseSource == .posedArmatureLocalTransforms
     }
 
     private var rayRigSolvePanel: some View {
