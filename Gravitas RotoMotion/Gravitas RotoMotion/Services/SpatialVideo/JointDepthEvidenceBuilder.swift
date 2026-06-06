@@ -151,13 +151,13 @@ enum JointDisparityCandidateSampler {
 
         values.sort()
 
-        let median = values[values.count / 2]
+        let nearest = values[0]
         let averageConfidence = confidences.reduce(0, +) / Float(confidences.count)
 
         return DepthSample(
-            depthMeters: Double(median),
+            depthMeters: Double(nearest),
             confidence: Double(averageConfidence),
-            status: "sampled_median"
+            status: "nearest_valid_depth"
         )
     }
 
@@ -195,8 +195,7 @@ enum JointDisparityCandidateSampler {
 
 enum DisparityCandidateSelector {
     static func selectWinner(
-        candidates: [DisparityDepthCandidate],
-        frameBodyDepthBand: ClosedRange<Double>?
+        candidates: [DisparityDepthCandidate]
     ) -> DisparityDepthCandidate? {
         let valid = candidates.filter { candidate in
             guard let depth = candidate.depthMeters,
@@ -204,10 +203,6 @@ enum DisparityCandidateSelector {
                   depth > 0,
                   candidate.confidence > 0 else {
                 return false
-            }
-
-            if let frameBodyDepthBand {
-                return frameBodyDepthBand.contains(depth)
             }
 
             return true
@@ -305,14 +300,12 @@ enum JointDepthEvidenceBuilder {
                 )
             }
 
-            let band = bodyDepthBand(from: allCandidates)
             var joints: [String: JointDepthEvidenceCapture.JointEvidence] = [:]
 
             for jointName in CanonicalRig.jointNames {
                 let candidates = allCandidates[jointName] ?? []
                 let winner = DisparityCandidateSelector.selectWinner(
-                    candidates: candidates,
-                    frameBodyDepthBand: band
+                    candidates: candidates
                 )
                 let stereoJoint = stereoFrame?.joints[jointName]
                 let stereoDepth = stereoJoint?.validStereo == true

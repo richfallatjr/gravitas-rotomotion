@@ -104,6 +104,48 @@ enum SpatialDisparityBuildPhase: String, Codable {
     case cancelled
 }
 
+enum SpatialSolvePhase: String, Codable {
+    case idle
+    case preparing
+    case applyingFrame
+    case rayPinPass
+    case depthCalibration
+    case exactDepthPass
+    case applyingManualOverrides
+    case visibilityCheck
+    case frameAccepted
+    case frameRejected
+    case failed
+}
+
+struct SpatialSolveTrace: Codable {
+    var phase: SpatialSolvePhase = .idle
+    var frameIndex: Int = 0
+    var timeSeconds: Double = 0
+    var solveTargetMode: String = ""
+    var depthMode: String = ""
+    var depthEvidenceJoints: Int = 0
+    var exactDepthTargets: Int = 0
+    var depthCalibrationValid: Bool = false
+    var affineScale: Float = 0
+    var affineOffset: Float = 0
+    var affineAnchorCount: Int = 0
+    var affineMedianResidual: Float = 0
+    var displayRootPosition = SIMD3Codable(SIMD3<Float>(0, 0, 0))
+    var meshWorldBoundsMin = SIMD3Codable(SIMD3<Float>(0, 0, 0))
+    var meshWorldBoundsMax = SIMD3Codable(SIMD3<Float>(0, 0, 0))
+    var meshHidden: Bool = false
+    var meshProjectedOnScreen: Bool = false
+    var projectedBounds: String = "none"
+    var avgRayDistance: Float = 0
+    var worstJoint: String = "none"
+    var worstRayDistance: Float = 0
+    var lastAcceptedFrame: Int = -1
+    var lastRejectedFrame: Int = -1
+    var rejectionReason: String = ""
+    var message: String = ""
+}
+
 struct StereoToRigAlignment: Codable, Equatable {
     var isValid: Bool
 

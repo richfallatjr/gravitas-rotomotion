@@ -151,6 +151,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let onRotationGizmoDragEnded: (() -> Void)?
     let onVideoPlaneSizeChanged: ((CGSize) -> Void)?
     let onReferenceRigVisibilityStatusChanged: ((String) -> Void)?
+    let onSpatialSolveTrace: (SpatialSolveTrace) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -166,6 +167,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         context.coordinator.onRotationGizmoDragEnded = onRotationGizmoDragEnded
         context.coordinator.onVideoPlaneSizeChanged = onVideoPlaneSizeChanged
         context.coordinator.onReferenceRigVisibilityStatusChanged = onReferenceRigVisibilityStatusChanged
+        context.coordinator.onSpatialSolveTrace = onSpatialSolveTrace
         context.coordinator.update(
             view: view,
             image: image,
@@ -257,6 +259,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         var onRotationGizmoDragEnded: (() -> Void)?
         var onVideoPlaneSizeChanged: ((CGSize) -> Void)?
         var onReferenceRigVisibilityStatusChanged: ((String) -> Void)?
+        var onSpatialSolveTrace: ((SpatialSolveTrace) -> Void)?
 
         private var lastImageToken = -1
         private var lastImageObjectID: ObjectIdentifier?
@@ -506,6 +509,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             }
             updateGroundPlane(groundPlane: groundPlane, visible: showGroundPlane)
             updateSkinnedRig(
+                view: view,
                 session: skinnedRigSession,
                 frame: raySolvedFrame,
                 frameIndex: frameIndex,
@@ -1703,7 +1707,246 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             ]
         }
 
+        private struct RigPoseSnapshot {
+            let displayRootTransform: simd_float4x4
+            let boneTransforms: [String: simd_float4x4]
+        }
+
+        private struct SpatialSolveVisibilityCheck {
+            let accepted: Bool
+            let reason: String
+            let meshHidden: Bool
+            let projectedOnScreen: Bool
+            let projectedBounds: String
+            let worldMin: SIMD3<Float>
+            let worldMax: SIMD3<Float>
+        }
+
+        private func makeRigPoseSnapshot(
+            session: SkinnedRigSession
+        ) -> RigPoseSnapshot {
+            var bones: [String: simd_float4x4] = [:]
+
+            for jointName in session.jointOrder {
+                if let bone = session.bonesByCanonicalName[jointName] {
+                    bones[jointName] = bone.simdTransform
+                }
+            }
+
+            return RigPoseSnapshot(
+                displayRootTransform: session.displayRootNode.simdTransform,
+                boneTransforms: bones
+            )
+        }
+
+        private func restoreRigPoseSnapshot(
+            _ snapshot: RigPoseSnapshot,
+            session: SkinnedRigSession
+        ) {
+            session.displayRootNode.simdTransform = snapshot.displayRootTransform
+
+            for (jointName, transform) in snapshot.boneTransforms {
+                session.bonesByCanonicalName[jointName]?.simdTransform = transform
+            }
+        }
+
+        private func checkSolvedRigVisibility(
+            session: SkinnedRigSession,
+            view: SCNView
+        ) -> SpatialSolveVisibilityCheck {
+            if session.displayRootNode.isHidden {
+                return SpatialSolveVisibilityCheck(
+                    accepted: false,
+                    reason: "displayRootNode is hidden",
+                    meshHidden: true,
+                    projectedOnScreen: false,
+                    projectedBounds: "hidden",
+                    worldMin: SIMD3<Float>(0, 0, 0),
+                    worldMax: SIMD3<Float>(0, 0, 0)
+                )
+            }
+
+            if session.skinnedMeshNode.isHidden {
+                return SpatialSolveVisibilityCheck(
+                    accepted: false,
+                    reason: "skinnedMeshNode is hidden",
+                    meshHidden: true,
+                    projectedOnScreen: false,
+                    projectedBounds: "mesh hidden",
+                    worldMin: SIMD3<Float>(0, 0, 0),
+                    worldMax: SIMD3<Float>(0, 0, 0)
+                )
+            }
+
+            guard rigTransformsAreFinite(session: session) else {
+                return SpatialSolveVisibilityCheck(
+                    accepted: false,
+                    reason: "non-finite rig transform",
+                    meshHidden: false,
+                    projectedOnScreen: false,
+                    projectedBounds: "non-finite transform",
+                    worldMin: SIMD3<Float>(0, 0, 0),
+                    worldMax: SIMD3<Float>(0, 0, 0)
+                )
+            }
+
+            guard let bounds = worldBoundingBox(node: session.displayRootNode),
+                  bounds.min.x.isFinite,
+                  bounds.min.y.isFinite,
+                  bounds.min.z.isFinite,
+                  bounds.max.x.isFinite,
+                  bounds.max.y.isFinite,
+                  bounds.max.z.isFinite else {
+                return SpatialSolveVisibilityCheck(
+                    accepted: false,
+                    reason: "invalid world bounds",
+                    meshHidden: false,
+                    projectedOnScreen: false,
+                    projectedBounds: "invalid",
+                    worldMin: SIMD3<Float>(0, 0, 0),
+                    worldMax: SIMD3<Float>(0, 0, 0)
+                )
+            }
+
+            let corners = [
+                SIMD3<Float>(bounds.min.x, bounds.min.y, bounds.min.z),
+                SIMD3<Float>(bounds.min.x, bounds.min.y, bounds.max.z),
+                SIMD3<Float>(bounds.min.x, bounds.max.y, bounds.min.z),
+                SIMD3<Float>(bounds.min.x, bounds.max.y, bounds.max.z),
+                SIMD3<Float>(bounds.max.x, bounds.min.y, bounds.min.z),
+                SIMD3<Float>(bounds.max.x, bounds.min.y, bounds.max.z),
+                SIMD3<Float>(bounds.max.x, bounds.max.y, bounds.min.z),
+                SIMD3<Float>(bounds.max.x, bounds.max.y, bounds.max.z)
+            ]
+            var projectedXs: [CGFloat] = []
+            var projectedYs: [CGFloat] = []
+
+            for corner in corners {
+                let p = view.projectPoint(SCNVector3(corner.x, corner.y, corner.z))
+
+                if p.x.isFinite,
+                   p.y.isFinite,
+                   p.z.isFinite {
+                    projectedXs.append(CGFloat(p.x))
+                    projectedYs.append(CGFloat(p.y))
+                }
+            }
+
+            guard let minX = projectedXs.min(),
+                  let maxX = projectedXs.max(),
+                  let minY = projectedYs.min(),
+                  let maxY = projectedYs.max() else {
+                return SpatialSolveVisibilityCheck(
+                    accepted: false,
+                    reason: "projection failed",
+                    meshHidden: false,
+                    projectedOnScreen: false,
+                    projectedBounds: "projection failed",
+                    worldMin: bounds.min,
+                    worldMax: bounds.max
+                )
+            }
+
+            let viewRect = view.bounds.insetBy(
+                dx: -view.bounds.width * 2,
+                dy: -view.bounds.height * 2
+            )
+            let projectedRect = CGRect(
+                x: minX,
+                y: minY,
+                width: max(maxX - minX, 0),
+                height: max(maxY - minY, 0)
+            )
+            let intersects = projectedRect.intersects(viewRect)
+
+            return SpatialSolveVisibilityCheck(
+                accepted: intersects,
+                reason: intersects ? "visible" : "projected bounds outside guard rect",
+                meshHidden: false,
+                projectedOnScreen: intersects,
+                projectedBounds: String(
+                    format: "x %.1f..%.1f y %.1f..%.1f",
+                    Double(minX),
+                    Double(maxX),
+                    Double(minY),
+                    Double(maxY)
+                ),
+                worldMin: bounds.min,
+                worldMax: bounds.max
+            )
+        }
+
+        private func rigTransformsAreFinite(
+            session: SkinnedRigSession
+        ) -> Bool {
+            guard matrixIsFinite(session.displayRootNode.simdTransform) else {
+                return false
+            }
+
+            for jointName in session.jointOrder {
+                if let bone = session.bonesByCanonicalName[jointName],
+                   !matrixIsFinite(bone.simdTransform) {
+                    return false
+                }
+            }
+
+            return true
+        }
+
+        private func matrixIsFinite(_ m: simd_float4x4) -> Bool {
+            let values = [
+                m.columns.0.x, m.columns.0.y, m.columns.0.z, m.columns.0.w,
+                m.columns.1.x, m.columns.1.y, m.columns.1.z, m.columns.1.w,
+                m.columns.2.x, m.columns.2.y, m.columns.2.z, m.columns.2.w,
+                m.columns.3.x, m.columns.3.y, m.columns.3.z, m.columns.3.w
+            ]
+
+            return values.allSatisfy { $0.isFinite }
+        }
+
+        private func makeSpatialSolveTrace(
+            phase: SpatialSolvePhase,
+            normalizedFrame: NormalizedMeshyPoseCapture.Frame,
+            solveTargetMode: RotoSolveTargetMode,
+            spatialRayPinDepthMode: SpatialRayPinDepthMode,
+            stats: DepthGuidedRayPinSolveStats,
+            session: SkinnedRigSession,
+            visibility: SpatialSolveVisibilityCheck,
+            lastAcceptedFrame: Int,
+            lastRejectedFrame: Int,
+            rejectionReason: String
+        ) -> SpatialSolveTrace {
+            SpatialSolveTrace(
+                phase: phase,
+                frameIndex: normalizedFrame.frameIndex,
+                timeSeconds: normalizedFrame.timeSeconds,
+                solveTargetMode: solveTargetMode.rawValue,
+                depthMode: spatialRayPinDepthMode.rawValue,
+                depthEvidenceJoints: stats.depthEvidenceJoints,
+                exactDepthTargets: stats.exactDepthTargets,
+                depthCalibrationValid: stats.depthCalibrationValid,
+                affineScale: stats.affineScale,
+                affineOffset: stats.affineOffset,
+                affineAnchorCount: stats.affineAnchorCount,
+                affineMedianResidual: stats.affineMedianResidual,
+                displayRootPosition: SIMD3Codable(session.displayRootNode.simdPosition),
+                meshWorldBoundsMin: SIMD3Codable(visibility.worldMin),
+                meshWorldBoundsMax: SIMD3Codable(visibility.worldMax),
+                meshHidden: visibility.meshHidden,
+                meshProjectedOnScreen: visibility.projectedOnScreen,
+                projectedBounds: visibility.projectedBounds,
+                avgRayDistance: stats.avgRayDistance,
+                worstJoint: stats.worstJoint,
+                worstRayDistance: stats.worstRayDistance,
+                lastAcceptedFrame: lastAcceptedFrame,
+                lastRejectedFrame: lastRejectedFrame,
+                rejectionReason: rejectionReason,
+                message: visibility.reason
+            )
+        }
+
         private func updateSkinnedRig(
+            view: SCNView,
             session: SkinnedRigSession?,
             frame: RotoRayAnimationSolveResult.Frame?,
             frameIndex: Int,
@@ -1774,7 +2017,15 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             if applySolvedPoseToReferenceRig,
                solveTargetMode == .spatialDepthGuidedRayPinned,
                let normalizedFrame {
-                SkinnedRigRotomationDriver.rotomateFrameWithDepthGuidedRayPins(
+                session.displayRootNode.isHidden = !visible
+                updateSkinnedGeometryVisibility(
+                    session: session,
+                    visible: visible && showSkinnedGeometry
+                )
+
+                let snapshot = makeRigPoseSnapshot(session: session)
+
+                let stats = SkinnedRigRotomationDriver.rotomateFrameWithDepthGuidedRayPins(
                     normalizedFrame: normalizedFrame,
                     jointDepthEvidenceFrame: spatialRayPinDepthMode == .disparityDepthGuided ? jointDepthEvidenceFrame : nil,
                     depthMode: spatialRayPinDepthMode,
@@ -1792,7 +2043,94 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                     timeSeconds: normalizedFrame.timeSeconds
                 )
 
-                if frameIndex % 30 == 0,
+                session.displayRootNode.isHidden = !visible
+                updateSkinnedGeometryVisibility(
+                    session: session,
+                    visible: visible && showSkinnedGeometry
+                )
+
+                let visibility = checkSolvedRigVisibility(
+                    session: session,
+                    view: view
+                )
+                var solvedFrameAccepted = true
+
+                if visible && showSkinnedGeometry && !visibility.accepted {
+                    solvedFrameAccepted = false
+                    restoreRigPoseSnapshot(snapshot, session: session)
+                    session.displayRootNode.isHidden = !visible
+                    updateSkinnedGeometryVisibility(
+                        session: session,
+                        visible: visible && showSkinnedGeometry
+                    )
+
+                    let trace = makeSpatialSolveTrace(
+                        phase: .frameRejected,
+                        normalizedFrame: normalizedFrame,
+                        solveTargetMode: solveTargetMode,
+                        spatialRayPinDepthMode: spatialRayPinDepthMode,
+                        stats: stats,
+                        session: session,
+                        visibility: visibility,
+                        lastAcceptedFrame: -1,
+                        lastRejectedFrame: normalizedFrame.frameIndex,
+                        rejectionReason: visibility.reason
+                    )
+
+                    onSpatialSolveTrace?(trace)
+
+                    print("""
+                    [SpatialSolveVisibilityGuard] frame rejected
+                      frame: \(normalizedFrame.frameIndex)
+                      reason: \(visibility.reason)
+                      projected: \(visibility.projectedBounds)
+                      root: \(session.displayRootNode.simdPosition)
+                      restoredPreviousPose: true
+                    """)
+                } else {
+                    let phase: SpatialSolvePhase = visibility.accepted || !visible || !showSkinnedGeometry
+                        ? .frameAccepted
+                        : .frameRejected
+                    let rejectionReason = phase == .frameAccepted ? "" : visibility.reason
+                    let trace = makeSpatialSolveTrace(
+                        phase: phase,
+                        normalizedFrame: normalizedFrame,
+                        solveTargetMode: solveTargetMode,
+                        spatialRayPinDepthMode: spatialRayPinDepthMode,
+                        stats: stats,
+                        session: session,
+                        visibility: visibility,
+                        lastAcceptedFrame: phase == .frameAccepted ? normalizedFrame.frameIndex : -1,
+                        lastRejectedFrame: phase == .frameRejected ? normalizedFrame.frameIndex : -1,
+                        rejectionReason: rejectionReason
+                    )
+
+                    onSpatialSolveTrace?(trace)
+
+                    if frameIndex % 30 == 0 {
+                        print("""
+                        [SpatialSolveVisibilityGuard] frame accepted
+                          frame: \(normalizedFrame.frameIndex)
+                          reason: \(visibility.reason)
+                          projected: \(visibility.projectedBounds)
+                          root: \(session.displayRootNode.simdPosition)
+                          meshHidden: \(visibility.meshHidden)
+                        """)
+                    }
+                }
+
+                if frameIndex == 0 || frameIndex % 30 == 0 {
+                    print("""
+                    [RotoMotion Visibility Guard] skinned rig visibility
+                      showSkinnedRig: \(visible)
+                      showSkinnedGeometry: \(showSkinnedGeometry)
+                      displayRootHidden: \(session.displayRootNode.isHidden)
+                      meshHidden: \(session.skinnedMeshNode.isHidden)
+                    """)
+                }
+
+                if solvedFrameAccepted,
+                   frameIndex % 30 == 0,
                    lastCurvePinnedPlaybackLogFrame != frameIndex {
                     print("[RotoMotion Playback] Applied depth-guided ray-pinned rig frame \(frameIndex)")
                     lastCurvePinnedPlaybackLogFrame = frameIndex

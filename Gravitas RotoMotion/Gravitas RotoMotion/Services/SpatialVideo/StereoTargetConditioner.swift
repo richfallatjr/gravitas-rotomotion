@@ -146,7 +146,7 @@ enum StereoTargetConditioner {
                     position: previous,
                     confidence: rawConfidence,
                     holdCount: holdCount + 1,
-                    status: "held_pop_jump_\(String(format: "%.3f", jump))"
+                    status: "held_motion_outlier"
                 )
             }
 
@@ -206,7 +206,7 @@ enum StereoTargetConditioner {
             return nil
         }
 
-        return "held_relative_depth_jump_\(String(format: "%.3f", depthJump))"
+        return "held_relative_depth_outlier"
     }
 
     private static func rawPosition(

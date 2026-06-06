@@ -251,6 +251,11 @@ struct ContentView: View {
                             roto.diagnostics.log(status)
                         }
                     }
+                },
+                onSpatialSolveTrace: { trace in
+                    Task { @MainActor in
+                        roto.updateSpatialSolveTrace(trace)
+                    }
                 }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -574,6 +579,31 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                         .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                GroupBox("Spatial Solve") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text(roto.spatialSolveProgressTitle)
+                                .font(.caption)
+                                .bold()
+
+                            Spacer()
+
+                            Text("\(Int(roto.spatialSolveProgressFraction * 100))%")
+                                .font(.caption)
+                                .monospacedDigit()
+                        }
+
+                        ProgressView(value: roto.spatialSolveProgressFraction)
+                            .tint(.green)
+
+                        Text(roto.spatialSolveProgressDetail)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
 

@@ -236,6 +236,10 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var spatialSolveReadiness: SpatialSolveReadiness = .notSpatial
     @Published var spatialRayPinDepthMode: SpatialRayPinDepthMode = .leftEyeRayPinningFallback
     @Published var spatialSolveStatus = "No spatial solve ready."
+    @Published var spatialSolveTrace = SpatialSolveTrace()
+    @Published var spatialSolveProgressFraction: Double = 0
+    @Published var spatialSolveProgressTitle = "Spatial solve idle."
+    @Published var spatialSolveProgressDetail = ""
     @Published var showDisparityOnImagePlane = true
     @Published var disparityPlateOverlayOpacity: Double = 0.65
     @Published var selectedDisparityPlateOverlay: DisparityPlateOverlayKind = .depth
@@ -2132,6 +2136,22 @@ final class RotoMotionViewModel: ObservableObject {
             return
         }
 
+        spatialSolveProgressFraction = 0
+        var preparingTrace = SpatialSolveTrace()
+        preparingTrace.phase = .preparing
+        preparingTrace.solveTargetMode = solveTargetMode.rawValue
+        preparingTrace.depthMode = spatialRayPinDepthMode.rawValue
+        preparingTrace.depthEvidenceJoints = jointDepthEvidenceCapture?.frames.first?.joints.count ?? 0
+        preparingTrace.message = "Preparing spatial ray-pinned solve."
+        updateSpatialSolveTrace(preparingTrace)
+        spatialSolveProgressTitle = "Spatial Solve Preparing"
+        spatialSolveProgressDetail = """
+        mode: \(spatialRayPinDepthMode.rawValue)
+        left frames: \(normalizedLeftCapture?.frames.count ?? 0)
+        disparity frames: \(spatialDisparityMapCapture?.frames.count ?? 0)
+        evidence frames: \(jointDepthEvidenceCapture?.frames.count ?? 0)
+        """
+
         var disparityOK = spatialDisparityMapCapture != nil &&
             spatialDisparityPreviewCapture != nil &&
             jointDepthEvidenceCapture != nil
@@ -2192,6 +2212,8 @@ final class RotoMotionViewModel: ObservableObject {
           mode: \(spatialRayPinDepthMode.rawValue)
           solveTargetMode: \(solveTargetMode.rawValue)
         """
+        spatialSolveTrace.solveTargetMode = solveTargetMode.rawValue
+        spatialSolveTrace.depthMode = spatialRayPinDepthMode.rawValue
         status = rayAnimationSolveStatus
 
         diagnostics.log("""
@@ -3048,6 +3070,30 @@ final class RotoMotionViewModel: ObservableObject {
         spatialDisparityElapsedSeconds = elapsedSeconds
         spatialDisparityEstimatedRemainingSeconds = estimatedRemainingSeconds
         spatialDisparityLastFrameValidPercent = validPercent
+    }
+
+    @MainActor
+    func updateSpatialSolveTrace(_ trace: SpatialSolveTrace) {
+        spatialSolveTrace = trace
+
+        spatialSolveProgressTitle = "Spatial Solve: \(trace.phase.rawValue)"
+        spatialSolveProgressFraction = trace.phase == .frameAccepted ? 1 : spatialSolveProgressFraction
+        spatialSolveProgressDetail = """
+        frame: \(trace.frameIndex)
+        mode: \(trace.solveTargetMode)
+        depth: \(trace.depthMode)
+        evidence joints: \(trace.depthEvidenceJoints)
+        exact depth targets: \(trace.exactDepthTargets)
+        affine calibration: \(trace.depthCalibrationValid) scale \(String(format: "%.4f", trace.affineScale)) offset \(String(format: "%.4f", trace.affineOffset))
+        affine anchors/residual: \(trace.affineAnchorCount) / \(String(format: "%.4f", trace.affineMedianResidual))
+        root: \(trace.displayRootPosition.simdFloat)
+        mesh hidden: \(trace.meshHidden)
+        projected: \(trace.meshProjectedOnScreen)
+        bounds: \(trace.projectedBounds)
+        avg ray: \(String(format: "%.5f", trace.avgRayDistance))
+        worst: \(trace.worstJoint) \(String(format: "%.5f", trace.worstRayDistance))
+        rejected: \(trace.rejectionReason)
+        """
     }
 
     private func phaseForDisparityProgressStage(
