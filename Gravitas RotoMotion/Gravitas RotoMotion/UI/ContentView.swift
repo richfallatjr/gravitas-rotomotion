@@ -193,8 +193,15 @@ struct ContentView: View {
                 rotationOverrideLayer: roto.rotationOverrideLayer,
                 heldRotationOverrideEulerXYZByJoint: roto.heldRotationOverrideEulerXYZByJoint,
                 liveRotationOverrideEulerXYZByJoint: roto.liveRotationOverrideEulerXYZByJoint,
+                liveRotationPreviewFrameIndexByJoint: roto.liveRotationPreviewFrameIndexByJoint,
                 liveRotationOverridesActive: roto.isRotationGizmoDragging,
+                viewportRefreshRevision: roto.viewportRefreshRevision,
                 rotationOverrideRevision: roto.rotationOverrideRevision,
+                rotationKeyRevision: roto.rotationKeyRevision,
+                spatialDepthControlRevision: roto.spatialDepthControlRevision,
+                solveInputRevision: roto.solveInputRevision,
+                disparityProgressRevision: roto.disparityProgressRevision,
+                lastViewportRefreshReason: roto.lastViewportRefreshReason,
                 showRawVision: roto.showRawVisionPoints,
                 showNormalizedMeshy: roto.showNormalizedMeshyPoints,
                 showRightEyeVisionOverlay: roto.shouldShowRightEyeVisionOverlay,
@@ -585,7 +592,8 @@ struct ContentView: View {
                         row: \(roto.spatialDisparityCurrentRow)/\(roto.spatialDisparityTotalRows)
                         elapsed: \(String(format: "%.1f", roto.spatialDisparityElapsedSeconds))s
                         remaining: \(String(format: "%.1f", roto.spatialDisparityEstimatedRemainingSeconds))s
-                        last valid: \(String(format: "%.2f", roto.spatialDisparityLastFrameValidPercent))%
+                        valid: \(String(format: "%.2f", roto.spatialDisparityLastFrameValidPercent))%
+                        rev: \(roto.disparityProgressRevision)
                         """)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -596,7 +604,13 @@ struct ContentView: View {
 
                 GroupBox("Spatial Depth Pan / Zoom") {
                     VStack(alignment: .leading, spacing: 10) {
-                        Toggle("Auto Depth Fit", isOn: $roto.autoSpatialDepthFitEnabled)
+                        Toggle(
+                            "Auto Depth Fit",
+                            isOn: Binding(
+                                get: { roto.autoSpatialDepthFitEnabled },
+                                set: { roto.setAutoSpatialDepthFitEnabled($0) }
+                            )
+                        )
 
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
@@ -604,7 +618,10 @@ struct ContentView: View {
                                     .frame(width: 100, alignment: .leading)
 
                                 Slider(
-                                    value: $roto.manualSpatialDepthZoom,
+                                    value: Binding(
+                                        get: { roto.manualSpatialDepthZoom },
+                                        set: { roto.setManualSpatialDepthZoom($0) }
+                                    ),
                                     in: 0.35...2.0
                                 )
 
@@ -639,7 +656,10 @@ struct ContentView: View {
                                     .frame(width: 100, alignment: .leading)
 
                                 Slider(
-                                    value: $roto.manualSpatialDepthOffset,
+                                    value: Binding(
+                                        get: { roto.manualSpatialDepthOffset },
+                                        set: { roto.setManualSpatialDepthOffset($0) }
+                                    ),
                                     in: -8.0...8.0
                                 )
 
@@ -677,20 +697,12 @@ struct ContentView: View {
                         Auto offset: \(String(format: "%.3f", roto.lastAutoSpatialDepthOffset))
                         Fit score: \(String(format: "%.4f", roto.lastSpatialDepthFitScore))
                         Residual: \(String(format: "%.4f", roto.lastSpatialDepthFitResidual))
+                        Rev: \(roto.spatialDepthControlRevision)
                         """)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                         .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .onChange(of: roto.autoSpatialDepthFitEnabled) { _, _ in
-                        roto.spatialDepthControlsChanged()
-                    }
-                    .onChange(of: roto.manualSpatialDepthZoom) { _, _ in
-                        roto.spatialDepthControlsChanged()
-                    }
-                    .onChange(of: roto.manualSpatialDepthOffset) { _, _ in
-                        roto.spatialDepthControlsChanged()
                     }
                 }
 

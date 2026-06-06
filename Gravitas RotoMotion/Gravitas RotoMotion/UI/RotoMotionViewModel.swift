@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import Combine
+import Darwin
 import Foundation
 import SceneKit
 import SwiftUI
@@ -233,6 +234,12 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var spatialDisparityElapsedSeconds: Double = 0
     @Published var spatialDisparityEstimatedRemainingSeconds: Double = 0
     @Published var spatialDisparityLastFrameValidPercent: Double = 0
+    @Published private(set) var viewportRefreshRevision: Int = 0
+    @Published private(set) var rotationKeyRevision: Int = 0
+    @Published private(set) var spatialDepthControlRevision: Int = 0
+    @Published private(set) var disparityProgressRevision: Int = 0
+    @Published private(set) var solveInputRevision: Int = 0
+    @Published var lastViewportRefreshReason: String = ""
     @Published var spatialSolveReadiness: SpatialSolveReadiness = .notSpatial
     @Published var spatialRayPinDepthMode: SpatialRayPinDepthMode = .leftEyeRayPinningFallback
     @Published var spatialSolveStatus = "No spatial solve ready."
@@ -559,7 +566,8 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var rotationGizmoStatus = "No rotation gizmo interaction."
     @Published var heldRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>] = [:]
     @Published var liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>] = [:]
-    @Published var rotationOverrideRevision: Int = 0
+    @Published var liveRotationPreviewFrameIndexByJoint: [String: Int] = [:]
+    @Published private(set) var rotationOverrideRevision: Int = 0
     @Published var isRotationGizmoDragging = false
     @Published var selectedJointEulerDegreesX: Double = 0.0
     @Published var selectedJointEulerDegreesY: Double = 0.0
@@ -654,6 +662,8 @@ final class RotoMotionViewModel: ObservableObject {
     private var audioPlayer: AVPlayer?
     private var audioEndObserver: NSObjectProtocol?
     private var spatialDisparityProgressTask: Task<Void, Never>?
+    private var disparityUIHeartbeatTask: Task<Void, Never>?
+    private var lastDisparityProgressLogTime: Date = .distantPast
     private var suppressSessionDirtyTracking = false
 
     init() {
@@ -892,6 +902,7 @@ final class RotoMotionViewModel: ObservableObject {
         rotationOverrideLayer.cleanKeysEnabled = false
         heldRotationOverrideEulerXYZByJoint = [:]
         liveRotationOverrideEulerXYZByJoint = [:]
+        liveRotationPreviewFrameIndexByJoint = [:]
         rotationOverrideRevision += 1
         isRotationGizmoDragging = false
         rotationAuthoringStatus = "No held rotation override."
@@ -1244,6 +1255,7 @@ final class RotoMotionViewModel: ObservableObject {
             document.heldRotationOverrideEulerXYZByJoint
         )
         liveRotationOverrideEulerXYZByJoint = [:]
+        liveRotationPreviewFrameIndexByJoint = [:]
         rotationOverrideRevision += 1
         isRotationGizmoDragging = false
         refreshSelectedJointEulerFields()
@@ -2223,6 +2235,8 @@ final class RotoMotionViewModel: ObservableObject {
         spatialSolveTrace.solveTargetMode = solveTargetMode.rawValue
         spatialSolveTrace.depthMode = spatialRayPinDepthMode.rawValue
         status = rayAnimationSolveStatus
+        solveInputRevision &+= 1
+        requestViewportRefresh(reason: "spatial solve mode changed \(spatialRayPinDepthMode.rawValue)")
 
         diagnostics.log("""
         Solve Full Animation using LEFT-EYE ray pinning:
@@ -3040,6 +3054,17 @@ final class RotoMotionViewModel: ObservableObject {
                         estimatedRemainingSeconds: remaining,
                         validPercent: self.spatialDisparityLastFrameValidPercent
                     )
+
+                    let shouldLog =
+                        Date().timeIntervalSince(self.lastDisparityProgressLogTime) > 0.5 ||
+                        snapshot.stage.contains("SUCCESS") ||
+                        snapshot.stage.contains("FAILED") ||
+                        snapshot.stage.contains("cancel")
+
+                    if shouldLog {
+                        self.diagnostics.log(snapshot.statusText)
+                        self.lastDisparityProgressLogTime = Date()
+                    }
                 }
 
                 try? await Task.sleep(nanoseconds: 120_000_000)
@@ -3053,6 +3078,7 @@ final class RotoMotionViewModel: ObservableObject {
     ) {
         spatialDisparityProgressTask?.cancel()
         spatialDisparityProgressTask = nil
+        stopDisparityUIHeartbeat()
         spatialDisparityBuildProgress = min(1, max(0, progress))
         spatialDisparityBuildProgressText = text
     }
@@ -3082,6 +3108,35 @@ final class RotoMotionViewModel: ObservableObject {
         spatialDisparityElapsedSeconds = elapsedSeconds
         spatialDisparityEstimatedRemainingSeconds = estimatedRemainingSeconds
         spatialDisparityLastFrameValidPercent = validPercent
+        disparityProgressRevision &+= 1
+        objectWillChange.send()
+    }
+
+    @MainActor
+    func startDisparityUIHeartbeat() {
+        disparityUIHeartbeatTask?.cancel()
+
+        disparityUIHeartbeatTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+
+                await MainActor.run {
+                    guard let self,
+                          self.isBuildingSpatialDisparity else {
+                        return
+                    }
+
+                    self.disparityProgressRevision &+= 1
+                    self.objectWillChange.send()
+                }
+            }
+        }
+    }
+
+    @MainActor
+    func stopDisparityUIHeartbeat() {
+        disparityUIHeartbeatTask?.cancel()
+        disparityUIHeartbeatTask = nil
     }
 
     @MainActor
@@ -3114,28 +3169,135 @@ final class RotoMotionViewModel: ObservableObject {
         """
     }
 
-    func spatialDepthControlsChanged() {
+    @MainActor
+    func requestViewportRefresh(reason: String) {
+        viewportRefreshRevision &+= 1
+        lastViewportRefreshReason = reason
+        objectWillChange.send()
+    }
+
+    @MainActor
+    func invalidateBakeAndRefresh(reason: String) {
         bakedRigAnimation = nil
         bakedRigAnimationStatus = "Bake is stale. Re-bake rig animation for export."
         sessionIsDirty = true
+        solveInputRevision &+= 1
+        requestViewportRefresh(reason: reason)
+    }
+
+    func spatialDepthControlsChanged() {
+        spatialDepthControlRevision &+= 1
+        invalidateBakeAndRefresh(reason: "spatial depth controls changed")
+        diagnostics.log("""
+        Spatial depth controls changed:
+          manualDepthZoom: \(manualSpatialDepthZoom)
+          manualDepthOffset: \(manualSpatialDepthOffset)
+          autoDepthFit: \(autoSpatialDepthFitEnabled)
+          spatialDepthControlRevision: \(spatialDepthControlRevision)
+          viewportRefreshRevision: \(viewportRefreshRevision)
+        """)
         applyCurrentFrameToLiveRig()
     }
 
+    @MainActor
+    func setManualSpatialDepthZoom(_ value: Double) {
+        let clamped = max(0.35, min(2.0, value))
+
+        guard abs(manualSpatialDepthZoom - clamped) > 0.000001 else {
+            return
+        }
+
+        manualSpatialDepthZoom = clamped
+        spatialDepthControlRevision &+= 1
+
+        invalidateBakeAndRefresh(
+            reason: "manual spatial depth zoom changed to \(String(format: "%.4f", clamped))"
+        )
+        diagnostics.log("""
+        Spatial depth controls changed:
+          manualDepthZoom: \(manualSpatialDepthZoom)
+          manualDepthOffset: \(manualSpatialDepthOffset)
+          autoDepthFit: \(autoSpatialDepthFitEnabled)
+          spatialDepthControlRevision: \(spatialDepthControlRevision)
+          viewportRefreshRevision: \(viewportRefreshRevision)
+        """)
+        applyCurrentFrameToLiveRig()
+    }
+
+    @MainActor
+    func setManualSpatialDepthOffset(_ value: Double) {
+        let clamped = max(-8.0, min(8.0, value))
+
+        guard abs(manualSpatialDepthOffset - clamped) > 0.000001 else {
+            return
+        }
+
+        manualSpatialDepthOffset = clamped
+        spatialDepthControlRevision &+= 1
+
+        invalidateBakeAndRefresh(
+            reason: "manual spatial depth offset changed to \(String(format: "%.4f", clamped))"
+        )
+        diagnostics.log("""
+        Spatial depth controls changed:
+          manualDepthZoom: \(manualSpatialDepthZoom)
+          manualDepthOffset: \(manualSpatialDepthOffset)
+          autoDepthFit: \(autoSpatialDepthFitEnabled)
+          spatialDepthControlRevision: \(spatialDepthControlRevision)
+          viewportRefreshRevision: \(viewportRefreshRevision)
+        """)
+        applyCurrentFrameToLiveRig()
+    }
+
+    @MainActor
+    func setAutoSpatialDepthFitEnabled(_ value: Bool) {
+        guard autoSpatialDepthFitEnabled != value else {
+            return
+        }
+
+        autoSpatialDepthFitEnabled = value
+        spatialDepthControlRevision &+= 1
+
+        invalidateBakeAndRefresh(
+            reason: "auto spatial depth fit changed to \(value)"
+        )
+        diagnostics.log("""
+        Spatial depth controls changed:
+          manualDepthZoom: \(manualSpatialDepthZoom)
+          manualDepthOffset: \(manualSpatialDepthOffset)
+          autoDepthFit: \(autoSpatialDepthFitEnabled)
+          spatialDepthControlRevision: \(spatialDepthControlRevision)
+          viewportRefreshRevision: \(viewportRefreshRevision)
+        """)
+        applyCurrentFrameToLiveRig()
+    }
+
+    @MainActor
     func resetSpatialDepthPanZoom() {
         manualSpatialDepthZoom = 1.0
         manualSpatialDepthOffset = 0.0
+        spatialDepthControlRevision &+= 1
         spatialSolveStatus = "Spatial depth pan/zoom reset."
-        spatialDepthControlsChanged()
+        invalidateBakeAndRefresh(reason: "spatial depth pan/zoom reset")
+        diagnostics.log("""
+        Spatial depth controls changed:
+          manualDepthZoom: \(manualSpatialDepthZoom)
+          manualDepthOffset: \(manualSpatialDepthOffset)
+          autoDepthFit: \(autoSpatialDepthFitEnabled)
+          spatialDepthControlRevision: \(spatialDepthControlRevision)
+          viewportRefreshRevision: \(viewportRefreshRevision)
+        """)
+        applyCurrentFrameToLiveRig()
     }
 
+    @MainActor
     func nudgeSpatialDepthOffset(_ delta: Double) {
-        manualSpatialDepthOffset = max(-8.0, min(8.0, manualSpatialDepthOffset + delta))
-        spatialDepthControlsChanged()
+        setManualSpatialDepthOffset(manualSpatialDepthOffset + delta)
     }
 
+    @MainActor
     func nudgeSpatialDepthZoom(_ delta: Double) {
-        manualSpatialDepthZoom = max(0.25, min(3.0, manualSpatialDepthZoom + delta))
-        spatialDepthControlsChanged()
+        setManualSpatialDepthZoom(manualSpatialDepthZoom + delta)
     }
 
     private func phaseForDisparityProgressStage(
@@ -3822,6 +3984,7 @@ final class RotoMotionViewModel: ObservableObject {
             completedUnits: 0,
             totalUnits: totalProgressUnits
         )
+        startDisparityUIHeartbeat()
         startSpatialDisparityProgressPolling(progressTracker)
         updateSpatialSolveReadiness()
 
@@ -3839,6 +4002,10 @@ final class RotoMotionViewModel: ObservableObject {
 
         do {
             let buildResult = try await Task.detached(priority: .userInitiated) {
+                let runningOnMainThread = pthread_main_np() != 0
+                assert(!runningOnMainThread, "Disparity build must not run on the main thread.")
+                print("[DisparityBuild] runningOnMainThread: \(runningOnMainThread)")
+
                 let disparity = try SpatialDisparityMapBuilder.build(
                     leftFrames: leftFrames,
                     rightFrames: rightFrames,
@@ -3903,10 +4070,8 @@ final class RotoMotionViewModel: ObservableObject {
             )
 
             jointDepthEvidenceCapture = evidence
-            bakedRigAnimation = nil
             sessionArmaturePoseBuffer = nil
-            bakedRigAnimationStatus = "Bake is stale. Re-bake rig animation for export."
-            sessionIsDirty = true
+            invalidateBakeAndRefresh(reason: "spatial disparity build success")
 
             guard let first = disparity.frames.first else {
                 throw NSError(
@@ -5170,22 +5335,71 @@ final class RotoMotionViewModel: ObservableObject {
             values: eulerRadians
         )
 
-        heldRotationOverrideEulerXYZByJoint[joint] = eulerRadians
         liveRotationOverrideEulerXYZByJoint[joint] = eulerRadians
+        liveRotationPreviewFrameIndexByJoint[joint] = currentFrameIndex
+        heldRotationOverrideEulerXYZByJoint[joint] = eulerRadians
+        rotationOverrideRevision &+= 1
+        updateExactRotationKeyIfPresent(
+            joint: joint,
+            frameIndex: currentFrameIndex,
+            timeSeconds: currentVideoTimeSeconds,
+            eulerXYZ: eulerRadians
+        )
         isRotationGizmoDragging = true
-        rotationOverrideRevision += 1
-        invalidateBakedAnimationBecauseRotationOverridesChanged()
+        invalidateBakeAndRefresh(
+            reason: "selected joint Euler changed \(joint) frame \(currentFrameIndex)"
+        )
 
         rotationAuthoringStatus = """
         Manual Euler override for \(joint):
         X \(String(format: "%.2f", Double(eulerRadians.x) * radiansToDegrees))°
         Y \(String(format: "%.2f", Double(eulerRadians.y) * radiansToDegrees))°
         Z \(String(format: "%.2f", Double(eulerRadians.z) * radiansToDegrees))°
+        frame \(currentFrameIndex)
         """
         status = rotationAuthoringStatus
 
         applyCurrentFrameToLiveRig()
         refreshSelectedJointEulerFields()
+    }
+
+    @MainActor
+    private func updateExactRotationKeyIfPresent(
+        joint: String,
+        frameIndex: Int,
+        timeSeconds: Double,
+        eulerXYZ: SIMD3<Float>
+    ) {
+        var layer = rotationOverrideLayer
+        var keys = layer.keyframesByJoint[joint] ?? []
+
+        guard let index = keys.firstIndex(where: { $0.frameIndex == frameIndex }) else {
+            rotationOverrideLayer = layer
+            return
+        }
+
+        keys[index] = JointRotationOverrideLayer.Keyframe(
+            frameIndex: frameIndex,
+            timeSeconds: timeSeconds,
+            eulerXYZ: [
+                Double(eulerXYZ.x),
+                Double(eulerXYZ.y),
+                Double(eulerXYZ.z)
+            ]
+        )
+
+        keys.sort { $0.frameIndex < $1.frameIndex }
+        layer.keyframesByJoint[joint] = keys
+        rotationOverrideLayer = layer
+        rotationKeyRevision &+= 1
+
+        diagnostics.log("""
+        Rotation key updated from Euler field:
+          joint: \(joint)
+          frame: \(frameIndex)
+          rotationKeyRevision: \(rotationKeyRevision)
+          rotationOverrideRevision: \(rotationOverrideRevision)
+        """)
     }
 
     func setViewportRotationOverride(
@@ -5198,10 +5412,13 @@ final class RotoMotionViewModel: ObservableObject {
         )
 
         liveRotationOverrideEulerXYZByJoint[joint] = clamped
+        liveRotationPreviewFrameIndexByJoint[joint] = currentFrameIndex
         heldRotationOverrideEulerXYZByJoint[joint] = clamped
         isRotationGizmoDragging = true
-        rotationOverrideRevision += 1
-        invalidateBakedAnimationBecauseRotationOverridesChanged()
+        rotationOverrideRevision &+= 1
+        invalidateBakeAndRefresh(
+            reason: "viewport rotation override changed \(joint) frame \(currentFrameIndex)"
+        )
 
         if joint == selectedRotationJoint {
             isUpdatingEulerFieldsFromSelection = true
@@ -5258,7 +5475,7 @@ final class RotoMotionViewModel: ObservableObject {
 
         for joint in CanonicalRig.jointNames {
             guard let bone = session.bonesByCanonicalName[joint],
-                  let euler = rotationOverrideEulerForFrame(
+                  let euler = rotationOverrideEulerForViewportFrame(
                     joint: joint,
                     frameIndex: currentFrameIndex,
                     timeSeconds: currentVideoTimeSeconds
@@ -5277,7 +5494,7 @@ final class RotoMotionViewModel: ObservableObject {
     ) {
         for joint in CanonicalRig.jointNames {
             guard let bone = session.bonesByCanonicalName[joint],
-                  let euler = rotationOverrideEulerForFrame(
+                  let euler = rotationOverrideEulerForBakeFrame(
                     joint: joint,
                     frameIndex: frameIndex,
                     timeSeconds: timeSeconds
@@ -5368,7 +5585,7 @@ final class RotoMotionViewModel: ObservableObject {
         )
     }
 
-    func rotationOverrideEulerForFrame(
+    func rotationOverrideEulerForViewportFrame(
         joint: String,
         frameIndex: Int,
         timeSeconds: Double
@@ -5380,8 +5597,31 @@ final class RotoMotionViewModel: ObservableObject {
             overrideLayer: rotationOverrideLayer,
             heldRotationOverrideEulerXYZByJoint: heldRotationOverrideEulerXYZByJoint,
             liveRotationOverrideEulerXYZByJoint: liveRotationOverrideEulerXYZByJoint,
+            liveRotationPreviewFrameIndexByJoint: liveRotationPreviewFrameIndexByJoint,
             liveOverridesActive: isRotationGizmoDragging
         )
+    }
+
+    func rotationOverrideEulerForBakeFrame(
+        joint: String,
+        frameIndex: Int,
+        timeSeconds: Double
+    ) -> SIMD3<Float>? {
+        if let keyed = authoredEulerForFrame(
+            joint: joint,
+            frameIndex: frameIndex
+        ) {
+            return keyed
+        }
+
+        if let held = heldRotationOverrideEulerXYZByJoint[joint] {
+            return ManualRotationConstraint.clampedEulerXYZ(
+                joint: joint,
+                values: held
+            )
+        }
+
+        return nil
     }
 
     func replaceAuthoredJointRotations(
@@ -5419,9 +5659,12 @@ final class RotoMotionViewModel: ObservableObject {
 
     func endViewportRotationGizmoDrag() {
         liveRotationOverrideEulerXYZByJoint[selectedRotationJoint] = nil
+        liveRotationPreviewFrameIndexByJoint[selectedRotationJoint] = nil
         isRotationGizmoDragging = false
+        rotationOverrideRevision &+= 1
         rotationAuthoringStatus = "\(selectedRotationJoint) held override is active."
         status = rotationAuthoringStatus
+        requestViewportRefresh(reason: "viewport rotation gizmo drag ended \(selectedRotationJoint)")
         applyCurrentFrameToLiveRig()
         refreshSelectedJointEulerFields()
     }
@@ -5429,11 +5672,13 @@ final class RotoMotionViewModel: ObservableObject {
     func addRotationKeyForSelectedJoint() {
         let joint = selectedRotationJoint
 
-        var eulerRadians = SIMD3<Float>(
-            Float(selectedJointEulerDegreesX * degreesToRadians),
-            Float(selectedJointEulerDegreesY * degreesToRadians),
-            Float(selectedJointEulerDegreesZ * degreesToRadians)
-        )
+        var eulerRadians = liveRotationOverrideEulerXYZByJoint[joint]
+            ?? heldRotationOverrideEulerXYZByJoint[joint]
+            ?? SIMD3<Float>(
+                Float(selectedJointEulerDegreesX * degreesToRadians),
+                Float(selectedJointEulerDegreesY * degreesToRadians),
+                Float(selectedJointEulerDegreesZ * degreesToRadians)
+            )
 
         eulerRadians = ManualRotationConstraint.clampedEulerXYZ(
             joint: joint,
@@ -5450,25 +5695,33 @@ final class RotoMotionViewModel: ObservableObject {
             ]
         )
 
+        var layer = rotationOverrideLayer
+
         if cleanRotationKeysEnabled {
-            rotationOverrideLayer.keyframesByJoint[joint] = [key]
+            layer.keyframesByJoint[joint] = [key]
             rotationAuthoringStatus = "Clean-keyed \(joint): replaced all keys with one key at frame \(currentFrameIndex)."
         } else {
-            var keys = rotationOverrideLayer.keyframesByJoint[joint] ?? []
+            var keys = layer.keyframesByJoint[joint] ?? []
             keys.removeAll { $0.frameIndex == currentFrameIndex }
             keys.append(key)
             keys.sort { $0.frameIndex < $1.frameIndex }
-            rotationOverrideLayer.keyframesByJoint[joint] = keys
+            layer.keyframesByJoint[joint] = keys
             rotationAuthoringStatus = "Added rotation key for \(joint) at frame \(currentFrameIndex). Total keys: \(keys.count)."
         }
 
+        rotationOverrideLayer = layer
+
         heldRotationOverrideEulerXYZByJoint[joint] = eulerRadians
         liveRotationOverrideEulerXYZByJoint[joint] = eulerRadians
+        liveRotationPreviewFrameIndexByJoint[joint] = currentFrameIndex
         isRotationGizmoDragging = false
-        rotationOverrideRevision += 1
+        rotationKeyRevision &+= 1
+        rotationOverrideRevision &+= 1
 
         status = rotationAuthoringStatus
-        invalidateBakedAnimationBecauseRotationOverridesChanged()
+        invalidateBakeAndRefresh(
+            reason: "rotation key added \(joint) frame \(currentFrameIndex)"
+        )
         diagnostics.log("""
         Rotation key added:
           joint: \(joint)
@@ -5489,12 +5742,15 @@ final class RotoMotionViewModel: ObservableObject {
         let joint = selectedRotationJoint
         let oldCount = rotationOverrideLayer.keyframesByJoint[joint]?.count ?? 0
 
-        rotationOverrideLayer.keyframesByJoint[joint] = []
-        rotationOverrideRevision += 1
+        var layer = rotationOverrideLayer
+        layer.keyframesByJoint[joint] = []
+        rotationOverrideLayer = layer
+        rotationKeyRevision &+= 1
+        rotationOverrideRevision &+= 1
 
         rotationAuthoringStatus = "Cleared \(oldCount) rotation keys for \(joint). Held override remains."
         status = rotationAuthoringStatus
-        invalidateBakedAnimationBecauseRotationOverridesChanged()
+        invalidateBakeAndRefresh(reason: "rotation keys cleared \(joint)")
         diagnostics.log(rotationAuthoringStatus)
         applyCurrentFrameToLiveRig()
         refreshSelectedJointEulerFields()
@@ -5503,15 +5759,19 @@ final class RotoMotionViewModel: ObservableObject {
     func clearAllRotationOverrideForSelectedJoint() {
         let joint = selectedRotationJoint
 
-        rotationOverrideLayer.keyframesByJoint[joint] = []
+        var layer = rotationOverrideLayer
+        layer.keyframesByJoint[joint] = []
+        rotationOverrideLayer = layer
         heldRotationOverrideEulerXYZByJoint[joint] = nil
         liveRotationOverrideEulerXYZByJoint[joint] = nil
+        liveRotationPreviewFrameIndexByJoint[joint] = nil
         isRotationGizmoDragging = false
-        rotationOverrideRevision += 1
+        rotationKeyRevision &+= 1
+        rotationOverrideRevision &+= 1
 
         rotationAuthoringStatus = "Cleared all Euler rotation override data for \(joint)."
         status = rotationAuthoringStatus
-        invalidateBakedAnimationBecauseRotationOverridesChanged()
+        invalidateBakeAndRefresh(reason: "all rotation overrides cleared \(joint)")
         diagnostics.log(rotationAuthoringStatus)
         applyCurrentFrameToLiveRig()
         refreshSelectedJointEulerFields()
@@ -5522,7 +5782,7 @@ final class RotoMotionViewModel: ObservableObject {
     }
 
     func currentManualOverrideEuler(for joint: String) -> SIMD3<Float>? {
-        rotationOverrideEulerForFrame(
+        rotationOverrideEulerForViewportFrame(
             joint: joint,
             frameIndex: currentFrameIndex,
             timeSeconds: currentVideoTimeSeconds

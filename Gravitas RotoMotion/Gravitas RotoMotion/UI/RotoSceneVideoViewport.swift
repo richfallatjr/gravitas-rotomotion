@@ -116,8 +116,15 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let rotationOverrideLayer: JointRotationOverrideLayer
     let heldRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>]
     let liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>]
+    let liveRotationPreviewFrameIndexByJoint: [String: Int]
     let liveRotationOverridesActive: Bool
+    let viewportRefreshRevision: Int
     let rotationOverrideRevision: Int
+    let rotationKeyRevision: Int
+    let spatialDepthControlRevision: Int
+    let solveInputRevision: Int
+    let disparityProgressRevision: Int
+    let lastViewportRefreshReason: String
 
     let showRawVision: Bool
     let showNormalizedMeshy: Bool
@@ -210,8 +217,15 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             rotationOverrideLayer: rotationOverrideLayer,
             heldRotationOverrideEulerXYZByJoint: heldRotationOverrideEulerXYZByJoint,
             liveRotationOverrideEulerXYZByJoint: liveRotationOverrideEulerXYZByJoint,
+            liveRotationPreviewFrameIndexByJoint: liveRotationPreviewFrameIndexByJoint,
             liveRotationOverridesActive: liveRotationOverridesActive,
+            viewportRefreshRevision: viewportRefreshRevision,
             rotationOverrideRevision: rotationOverrideRevision,
+            rotationKeyRevision: rotationKeyRevision,
+            spatialDepthControlRevision: spatialDepthControlRevision,
+            solveInputRevision: solveInputRevision,
+            disparityProgressRevision: disparityProgressRevision,
+            lastViewportRefreshReason: lastViewportRefreshReason,
             showRawVision: showRawVision,
             showNormalizedMeshy: showNormalizedMeshy,
             showRightEyeVisionOverlay: showRightEyeVisionOverlay,
@@ -305,6 +319,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private var currentSkinnedRigSession: SkinnedRigSession?
         private var heldRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>] = [:]
         private var liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>] = [:]
+        private var liveRotationPreviewFrameIndexByJoint: [String: Int] = [:]
         private var activeGizmoAxis: ViewportJointRotationGizmo.Axis?
         private var activeGizmoJoint: String?
         private var activeGizmoPivotWorld: SIMD3<Float>?
@@ -315,6 +330,24 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private var lastRotationGizmoVisibilitySignature: String?
         private var lastRotationOverrideLogSignature: String?
         private var currentDisparityOverlaySignature: String?
+        private var lastFrameApplicationSignature: FrameApplicationSignature?
+
+        private struct FrameApplicationSignature: Equatable {
+            let frameIndex: Int
+            let timeSecondsRounded: Int
+            let solveTargetMode: String
+            let depthMode: String
+            let viewportRefreshRevision: Int
+            let rotationOverrideRevision: Int
+            let rotationKeyRevision: Int
+            let spatialDepthControlRevision: Int
+            let solveInputRevision: Int
+            let showSkinnedRig: Bool
+            let showSkinnedGeometry: Bool
+            let manualDepthZoomRounded: Int
+            let manualDepthOffsetRounded: Int
+            let autoDepthFitEnabled: Bool
+        }
 
         func makeView() -> SCNView {
             let view = RotoSCNView()
@@ -323,7 +356,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             view.backgroundColor = .black
             view.allowsCameraControl = false
             view.autoenablesDefaultLighting = false
-            view.rendersContinuously = true
+            view.rendersContinuously = false
             view.antialiasingMode = .multisampling4X
             view.isPlaying = true
 
@@ -475,8 +508,15 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             rotationOverrideLayer: JointRotationOverrideLayer,
             heldRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
             liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
+            liveRotationPreviewFrameIndexByJoint: [String: Int],
             liveRotationOverridesActive: Bool,
+            viewportRefreshRevision: Int,
             rotationOverrideRevision: Int,
+            rotationKeyRevision: Int,
+            spatialDepthControlRevision: Int,
+            solveInputRevision: Int,
+            disparityProgressRevision: Int,
+            lastViewportRefreshReason: String,
             showRawVision: Bool,
             showNormalizedMeshy: Bool,
             showRightEyeVisionOverlay: Bool,
@@ -513,10 +553,23 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             self.currentSkinnedRigSession = skinnedRigSession
             self.heldRotationOverrideEulerXYZByJoint = heldRotationOverrideEulerXYZByJoint
             self.liveRotationOverrideEulerXYZByJoint = liveRotationOverrideEulerXYZByJoint
+            self.liveRotationPreviewFrameIndexByJoint = liveRotationPreviewFrameIndexByJoint
             self.showRotationGizmo = showRotationGizmo
+            _ = disparityProgressRevision
 
             view.allowsCameraControl = false
             view.pointOfView = cameraNode
+
+            SCNTransaction.begin()
+            SCNTransaction.disableActions = true
+            defer {
+                SCNTransaction.commit()
+                view.isPlaying = true
+                view.rendersContinuously = false
+                view.setNeedsDisplay(view.bounds)
+                view.needsDisplay = true
+            }
+
             updateVideoPlaneZIfNeeded(currentVideoPlaneZ)
             updatePerspectiveCameraIfNeeded(
                 cameraFOVDegrees: cameraFOVDegrees,
@@ -532,6 +585,40 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             } else {
                 clearVideoPlaneIfNeeded()
             }
+
+            let frameApplicationSignature = FrameApplicationSignature(
+                frameIndex: frameIndex,
+                timeSecondsRounded: Int(((normalizedFrame?.timeSeconds ?? Double(frameIndex)) * 1000).rounded()),
+                solveTargetMode: solveTargetMode.rawValue,
+                depthMode: spatialRayPinDepthMode.rawValue,
+                viewportRefreshRevision: viewportRefreshRevision,
+                rotationOverrideRevision: rotationOverrideRevision,
+                rotationKeyRevision: rotationKeyRevision,
+                spatialDepthControlRevision: spatialDepthControlRevision,
+                solveInputRevision: solveInputRevision,
+                showSkinnedRig: showSkinnedRig,
+                showSkinnedGeometry: showSkinnedGeometry,
+                manualDepthZoomRounded: Int((manualSpatialDepthZoom * 10000).rounded()),
+                manualDepthOffsetRounded: Int((manualSpatialDepthOffset * 10000).rounded()),
+                autoDepthFitEnabled: autoSpatialDepthFitEnabled
+            )
+            let previousFrameApplicationSignature = lastFrameApplicationSignature
+            let mustReapplyFrame = frameApplicationSignature != previousFrameApplicationSignature
+
+            if mustReapplyFrame,
+               let previousFrameApplicationSignature,
+               previousFrameApplicationSignature.frameIndex == frameApplicationSignature.frameIndex {
+                print("""
+                [RotoSceneVideoViewport] static frame recompute
+                  frame: \(frameIndex)
+                  reason: \(lastViewportRefreshReason)
+                  viewportRefreshRevision: \(viewportRefreshRevision)
+                  rotationOverrideRevision: \(rotationOverrideRevision)
+                  rotationKeyRevision: \(rotationKeyRevision)
+                  spatialDepthControlRevision: \(spatialDepthControlRevision)
+                """)
+            }
+
             updateGroundPlane(groundPlane: groundPlane, visible: showGroundPlane)
             updateSkinnedRig(
                 view: view,
@@ -559,11 +646,13 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 rotationOverrideLayer: rotationOverrideLayer,
                 heldRotationOverrideEulerXYZByJoint: heldRotationOverrideEulerXYZByJoint,
                 liveRotationOverrideEulerXYZByJoint: liveRotationOverrideEulerXYZByJoint,
+                liveRotationPreviewFrameIndexByJoint: liveRotationPreviewFrameIndexByJoint,
                 liveRotationOverridesActive: liveRotationOverridesActive,
                 visible: showSkinnedRig,
                 showSkinnedGeometry: showSkinnedGeometry,
                 stereoToRigAlignment: stereoToRigAlignment
             )
+            lastFrameApplicationSignature = frameApplicationSignature
             rotationGizmo.root.isHidden = !showRotationGizmo
             logRotationGizmoVisibilityIfNeeded(showRotationGizmo: showRotationGizmo)
 
@@ -2008,6 +2097,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             rotationOverrideLayer: JointRotationOverrideLayer,
             heldRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
             liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
+            liveRotationPreviewFrameIndexByJoint: [String: Int],
             liveRotationOverridesActive: Bool,
             visible: Bool,
             showSkinnedGeometry: Bool,
@@ -2091,6 +2181,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                     session: session,
                     overrideLayer: rotationOverrideLayer,
                     liveOverridesActive: liveRotationOverridesActive,
+                    liveRotationPreviewFrameIndexByJoint: liveRotationPreviewFrameIndexByJoint,
                     frameIndex: normalizedFrame.frameIndex,
                     timeSeconds: normalizedFrame.timeSeconds
                 )
@@ -2204,6 +2295,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                     session: session,
                     overrideLayer: rotationOverrideLayer,
                     liveOverridesActive: liveRotationOverridesActive,
+                    liveRotationPreviewFrameIndexByJoint: liveRotationPreviewFrameIndexByJoint,
                     frameIndex: frame.frameIndex,
                     timeSeconds: frame.timeSeconds
                 )
@@ -2292,6 +2384,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             session: SkinnedRigSession,
             overrideLayer: JointRotationOverrideLayer,
             liveOverridesActive: Bool,
+            liveRotationPreviewFrameIndexByJoint: [String: Int],
             frameIndex: Int,
             timeSeconds: Double
         ) {
@@ -2307,6 +2400,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                     overrideLayer: overrideLayer,
                     heldRotationOverrideEulerXYZByJoint: heldRotationOverrideEulerXYZByJoint,
                     liveRotationOverrideEulerXYZByJoint: liveRotationOverrideEulerXYZByJoint,
+                    liveRotationPreviewFrameIndexByJoint: liveRotationPreviewFrameIndexByJoint,
                     liveOverridesActive: liveOverridesActive
                 ) else {
                     continue

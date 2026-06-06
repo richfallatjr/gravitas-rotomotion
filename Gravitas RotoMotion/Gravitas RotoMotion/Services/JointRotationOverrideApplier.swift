@@ -8,6 +8,7 @@ enum JointRotationOverrideApplier {
         overrideLayer: JointRotationOverrideLayer,
         heldRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
         liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>] = [:],
+        liveRotationPreviewFrameIndexByJoint: [String: Int] = [:],
         liveOverridesActive: Bool = false,
         frameIndex: Int? = nil,
         timeSeconds: Double
@@ -17,6 +18,7 @@ enum JointRotationOverrideApplier {
             overrideLayer: overrideLayer,
             heldRotationOverrideEulerXYZByJoint: heldRotationOverrideEulerXYZByJoint,
             liveRotationOverrideEulerXYZByJoint: liveRotationOverrideEulerXYZByJoint,
+            liveRotationPreviewFrameIndexByJoint: liveRotationPreviewFrameIndexByJoint,
             liveOverridesActive: liveOverridesActive,
             frameIndex: frameIndex,
             timeSeconds: timeSeconds
@@ -28,6 +30,7 @@ enum JointRotationOverrideApplier {
         overrideLayer: JointRotationOverrideLayer,
         heldRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
         liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
+        liveRotationPreviewFrameIndexByJoint: [String: Int] = [:],
         liveOverridesActive: Bool,
         frameIndex: Int?,
         timeSeconds: Double
@@ -44,6 +47,7 @@ enum JointRotationOverrideApplier {
                 overrideLayer: overrideLayer,
                 heldRotationOverrideEulerXYZByJoint: heldRotationOverrideEulerXYZByJoint,
                 liveRotationOverrideEulerXYZByJoint: liveRotationOverrideEulerXYZByJoint,
+                liveRotationPreviewFrameIndexByJoint: liveRotationPreviewFrameIndexByJoint,
                 liveOverridesActive: liveOverridesActive
             ) else {
                 continue
@@ -60,10 +64,27 @@ enum JointRotationOverrideApplier {
         overrideLayer: JointRotationOverrideLayer,
         heldRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
         liveRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>],
+        liveRotationPreviewFrameIndexByJoint: [String: Int] = [:],
         liveOverridesActive: Bool
     ) -> SIMD3<Float>? {
         _ = timeSeconds
-        _ = liveOverridesActive
+
+        if let frameIndex,
+           liveRotationPreviewFrameIndexByJoint[joint] == frameIndex,
+           let live = liveRotationOverrideEulerXYZByJoint[joint] {
+            return ManualRotationConstraint.clampedEulerXYZ(
+                joint: joint,
+                values: live
+            )
+        }
+
+        if liveOverridesActive,
+           let live = liveRotationOverrideEulerXYZByJoint[joint] {
+            return ManualRotationConstraint.clampedEulerXYZ(
+                joint: joint,
+                values: live
+            )
+        }
 
         let keys = (overrideLayer.keyframesByJoint[joint] ?? [])
             .sorted { $0.frameIndex < $1.frameIndex }
@@ -146,6 +167,7 @@ enum JointRotationOverrideApplier {
             overrideLayer: overrideLayer,
             heldRotationOverrideEulerXYZByJoint: [:],
             liveRotationOverrideEulerXYZByJoint: [:],
+            liveRotationPreviewFrameIndexByJoint: [:],
             liveOverridesActive: false
         )
     }
