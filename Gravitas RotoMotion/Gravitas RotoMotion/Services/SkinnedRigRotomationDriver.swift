@@ -103,7 +103,7 @@ enum RayPinDepthGuidanceBuilder {
     }
 }
 
-struct RayPinDepthCalibration {
+private struct DisparityDepthRemap {
     let valid: Bool
 
     /// sceneDepth = scale * disparityDepthMeters + offset
@@ -111,14 +111,48 @@ struct RayPinDepthCalibration {
     let offset: Float
 
     let anchorCount: Int
+    let boneResidualMean: Float
+    let boneResidualMax: Float
+    let bodyMedianDepthMeters: Float
+    let bodyDepthMinMeters: Float
+    let bodyDepthMaxMeters: Float
     let medianResidual: Float
 
-    static let invalid = RayPinDepthCalibration(
+    static let invalid = DisparityDepthRemap(
         valid: false,
         scale: 1,
         offset: 0,
         anchorCount: 0,
+        boneResidualMean: 0,
+        boneResidualMax: 0,
+        bodyMedianDepthMeters: 0,
+        bodyDepthMinMeters: 0,
+        bodyDepthMaxMeters: 0,
         medianResidual: 0
+    )
+}
+
+private struct DisparityDepthFitAdjustment {
+    let valid: Bool
+    let depthZoom: Float
+    let depthOffset: Float
+    let pivotSceneDepth: Float
+    let score: Float
+    let boneResidualMean: Float
+    let boneResidualMax: Float
+    let targetDistanceMean: Float
+    let exactTargetCount: Int
+
+    static let identity = DisparityDepthFitAdjustment(
+        valid: true,
+        depthZoom: 1,
+        depthOffset: 0,
+        pivotSceneDepth: 0,
+        score: 0,
+        boneResidualMean: 0,
+        boneResidualMax: 0,
+        targetDistanceMean: 0,
+        exactTargetCount: 0
     )
 }
 
@@ -140,16 +174,39 @@ struct DepthGuidedRayPinSolveStats {
     let affineOffset: Float
     let affineAnchorCount: Int
     let affineMedianResidual: Float
+    let autoDepthZoom: Float
+    let autoDepthOffset: Float
+    let finalDepthZoom: Float
+    let finalDepthOffset: Float
+    let depthFitZoom: Float
+    let depthFitOffset: Float
+    let depthFitPivotSceneDepth: Float
+    let depthFitScore: Float
+    let depthFitBoneResidualMean: Float
+    let depthFitBoneResidualMax: Float
+    let depthFitTargetDistanceMean: Float
     let avgRayDistance: Float
     let worstJoint: String
     let worstRayDistance: Float
 }
 
-enum RayPinDepthCalibrationSolver {
+private struct DriverPoseSnapshot {
+    let displayRootTransform: simd_float4x4
+    let boneTransforms: [String: simd_float4x4]
+}
+
+private struct ExactDepthSolveEvaluation {
+    let score: Float
+    let avgExactResidual: Float
+    let maxExactResidual: Float
+    let avgRayDistance: Float
+}
+
+private enum DisparityDepthRemapSolver {
     static func fit(
         session: SkinnedRigSession,
         depthGuidance: [String: RayPinDepthGuidance]
-    ) -> RayPinDepthCalibration {
+    ) -> DisparityDepthRemap {
         let anchors = [
             "Hips",
             "Spine02",
@@ -256,11 +313,19 @@ enum RayPinDepthCalibrationSolver {
           }.joined(separator: "\n"))
         """)
 
-        return RayPinDepthCalibration(
+        var bodyDepths = samples.map { $0.depthMeters }
+        bodyDepths.sort()
+
+        return DisparityDepthRemap(
             valid: true,
             scale: scale,
             offset: offset,
             anchorCount: samples.count,
+            boneResidualMean: medianResidual,
+            boneResidualMax: residuals.last ?? 0,
+            bodyMedianDepthMeters: bodyDepths[bodyDepths.count / 2],
+            bodyDepthMinMeters: bodyDepths.first ?? 0,
+            bodyDepthMaxMeters: bodyDepths.last ?? 0,
             medianResidual: medianResidual
         )
     }
@@ -310,6 +375,36 @@ enum RayPinStereoEnvelopeBuilder {
 }
 
 enum SkinnedRigRotomationDriver {
+    private static let depthFitCalibrationJoints: [String] = [
+        "Hips",
+        "Spine02",
+        "Spine01",
+        "Spine",
+        "neck",
+        "Head",
+        "LeftShoulder",
+        "RightShoulder",
+        "LeftUpLeg",
+        "RightUpLeg"
+    ]
+
+    private static let depthFitCalibrationBones: [(String, String, Float)] = [
+        ("Hips", "Spine02", 2.0),
+        ("Spine02", "Spine01", 2.0),
+        ("Spine01", "Spine", 2.0),
+        ("Spine", "neck", 2.0),
+        ("neck", "Head", 2.0),
+        ("LeftShoulder", "RightShoulder", 2.0),
+        ("Hips", "LeftUpLeg", 1.5),
+        ("Hips", "RightUpLeg", 1.5),
+        ("LeftArm", "LeftForeArm", 0.75),
+        ("LeftForeArm", "LeftHand", 0.75),
+        ("RightArm", "RightForeArm", 0.75),
+        ("RightForeArm", "RightHand", 0.75),
+        ("LeftLeg", "LeftFoot", 0.75),
+        ("RightLeg", "RightFoot", 0.75)
+    ]
+
     static let armChains: [[String]] = [
         ["LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand"],
         ["RightShoulder", "RightArm", "RightForeArm", "RightHand"]
@@ -423,6 +518,10 @@ enum SkinnedRigRotomationDriver {
         cameraOrigin: SIMD3<Float>,
         videoPlaneSize: CGSize,
         videoPlaneZ: Float,
+        depthFitSettings: SpatialRayPinDepthFitSettings = .default,
+        autoDepthFitEnabled: Bool = true,
+        manualDepthZoom: Float = 1,
+        manualDepthOffset: Float = 0,
         iterations: Int = 8
     ) -> DepthGuidedRayPinSolveStats {
         SCNTransaction.begin()
@@ -456,72 +555,136 @@ enum SkinnedRigRotomationDriver {
             iterations: legacyIterations
         )
 
-        let depthCalibration: RayPinDepthCalibration
+        var remap = DisparityDepthRemap.invalid
+        var autoDepthFitAdjustment = DisparityDepthFitAdjustment.identity
+        var depthFitAdjustment = DisparityDepthFitAdjustment.identity
 
         if depthMode == .disparityDepthGuided {
-            depthCalibration = RayPinDepthCalibrationSolver.fit(
-                session: session,
-                depthGuidance: depthGuidance
-            )
+            var bestSnapshot = makePoseSnapshot(session)
+            var bestRemap = remap
+            var bestAutoAdjustment = autoDepthFitAdjustment
+            var bestAdjustment = depthFitAdjustment
+            var bestScore = Float.greatestFiniteMagnitude
+            var previousScore = Float.greatestFiniteMagnitude
+            var acceptedExactPass = false
+            let maxPasses = max(depthFitSettings.maxRefinementPasses, 1)
 
-            if isReasonableCalibration(depthCalibration) {
-                placePelvisFromExactRayDepthTargets(
+            for pass in 0..<maxPasses {
+                remap = DisparityDepthRemapSolver.fit(
+                    session: session,
+                    depthGuidance: depthGuidance
+                )
+
+                guard isReasonableRemap(remap) else {
+                    print("""
+                    [DepthGuidedRayPinning] exact depth pass skipped
+                      reason: unreasonable disparity remap
+                      valid: \(remap.valid)
+                      scale: \(remap.scale)
+                      offset: \(remap.offset)
+                      anchors: \(remap.anchorCount)
+                      medianResidual: \(remap.medianResidual)
+                    """)
+                    break
+                }
+
+                autoDepthFitAdjustment = solveDepthFitAdjustment(
                     session: session,
                     rays: rays,
                     depthGuidance: depthGuidance,
-                    calibration: depthCalibration
+                    remap: remap,
+                    settings: depthFitSettings,
+                    manualZoom: nil,
+                    manualOffset: nil
                 )
 
-                for _ in 0..<iterations {
-                    solveExactDepthRayChain(
-                        ["LeftUpLeg", "LeftLeg", "LeftFoot", "LeftToeBase"],
-                        rays: rays,
-                        depthGuidance: depthGuidance,
-                        calibration: depthCalibration,
-                        session: session
-                    )
-                    solveExactDepthRayChain(
-                        ["RightUpLeg", "RightLeg", "RightFoot", "RightToeBase"],
-                        rays: rays,
-                        depthGuidance: depthGuidance,
-                        calibration: depthCalibration,
-                        session: session
-                    )
-                    solveExactDepthRayChain(
-                        ["Hips", "Spine02", "Spine01", "Spine", "neck", "Head", "headfront"],
-                        rays: rays,
-                        depthGuidance: depthGuidance,
-                        calibration: depthCalibration,
-                        session: session
-                    )
-                    solveExactDepthRayChain(
-                        ["LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand"],
-                        rays: rays,
-                        depthGuidance: depthGuidance,
-                        calibration: depthCalibration,
-                        session: session
-                    )
-                    solveExactDepthRayChain(
-                        ["RightShoulder", "RightArm", "RightForeArm", "RightHand"],
-                        rays: rays,
-                        depthGuidance: depthGuidance,
-                        calibration: depthCalibration,
-                        session: session
-                    )
+                depthFitAdjustment = composeDepthFitAdjustment(
+                    autoAdjustment: autoDepthFitAdjustment,
+                    autoDepthFitEnabled: autoDepthFitEnabled,
+                    manualDepthZoom: manualDepthZoom,
+                    manualDepthOffset: manualDepthOffset
+                )
+
+                depthFitAdjustment = scoreDepthFitAdjustment(
+                    depthFitAdjustment,
+                    session: session,
+                    rays: rays,
+                    depthGuidance: depthGuidance,
+                    remap: remap,
+                    settings: depthFitSettings
+                )
+
+                guard depthFitAdjustment.valid else {
+                    print("""
+                    [DepthGuidedRayPinning] exact depth pass skipped
+                      reason: invalid depth fit adjustment
+                      remapValid: \(remap.valid)
+                      autoExactTargetCount: \(autoDepthFitAdjustment.exactTargetCount)
+                      finalExactTargetCount: \(depthFitAdjustment.exactTargetCount)
+                    """)
+                    break
                 }
-            } else {
-                print("""
-                [DepthGuidedRayPinning] exact depth pass skipped
-                  reason: unreasonable calibration
-                  valid: \(depthCalibration.valid)
-                  scale: \(depthCalibration.scale)
-                  offset: \(depthCalibration.offset)
-                  anchors: \(depthCalibration.anchorCount)
-                  medianResidual: \(depthCalibration.medianResidual)
-                """)
+
+                runExactDepthPass(
+                    rays: rays,
+                    depthGuidance: depthGuidance,
+                    remap: remap,
+                    adjustment: depthFitAdjustment,
+                    session: session,
+                    iterations: iterations
+                )
+
+                let eval = evaluateExactDepthSolve(
+                    session: session,
+                    rays: rays,
+                    depthGuidance: depthGuidance,
+                    remap: remap,
+                    adjustment: depthFitAdjustment
+                )
+
+                if normalizedFrame.frameIndex == 0 || normalizedFrame.frameIndex % 30 == 0 {
+                    print("""
+                    [DepthGuidedRayPinning] refinement pass
+                      frame: \(normalizedFrame.frameIndex)
+                      pass: \(pass)
+                      autoDepthZoom: \(autoDepthFitAdjustment.depthZoom)
+                      autoDepthOffset: \(autoDepthFitAdjustment.depthOffset)
+                      manualDepthZoom: \(manualDepthZoom)
+                      manualDepthOffset: \(manualDepthOffset)
+                      depthZoom: \(depthFitAdjustment.depthZoom)
+                      depthOffset: \(depthFitAdjustment.depthOffset)
+                      fitScore: \(depthFitAdjustment.score)
+                      evalScore: \(eval.score)
+                      avgExactResidual: \(eval.avgExactResidual)
+                      maxExactResidual: \(eval.maxExactResidual)
+                      avgRayDistance: \(eval.avgRayDistance)
+                      boneResidualMean: \(depthFitAdjustment.boneResidualMean)
+                      targetDistanceMean: \(depthFitAdjustment.targetDistanceMean)
+                    """)
+                }
+
+                if eval.score < bestScore {
+                    bestScore = eval.score
+                    bestSnapshot = makePoseSnapshot(session)
+                    bestRemap = remap
+                    bestAutoAdjustment = autoDepthFitAdjustment
+                    bestAdjustment = depthFitAdjustment
+                    acceptedExactPass = true
+                }
+
+                if abs(previousScore - eval.score) < depthFitSettings.minImprovement {
+                    break
+                }
+
+                previousScore = eval.score
             }
-        } else {
-            depthCalibration = .invalid
+
+            if acceptedExactPass {
+                restorePoseSnapshot(bestSnapshot, session: session)
+                remap = bestRemap
+                autoDepthFitAdjustment = bestAutoAdjustment
+                depthFitAdjustment = bestAdjustment
+            }
         }
 
         SCNTransaction.commit()
@@ -530,7 +693,9 @@ enum SkinnedRigRotomationDriver {
             session: session,
             rays: rays,
             depthGuidance: depthGuidance,
-            calibration: depthCalibration,
+            remap: remap,
+            autoAdjustment: autoDepthFitAdjustment,
+            adjustment: depthFitAdjustment,
             frameIndex: normalizedFrame.frameIndex,
             depthMode: depthMode
         )
@@ -540,7 +705,12 @@ enum SkinnedRigRotomationDriver {
             session: session,
             rays: rays,
             depthGuidance: depthGuidance,
-            calibration: depthCalibration,
+            remap: remap,
+            autoAdjustment: autoDepthFitAdjustment,
+            adjustment: depthFitAdjustment,
+            autoDepthFitEnabled: autoDepthFitEnabled,
+            manualDepthZoom: manualDepthZoom,
+            manualDepthOffset: manualDepthOffset,
             depthMode: depthMode
         )
 
@@ -721,6 +891,405 @@ enum SkinnedRigRotomationDriver {
         }
     }
 
+    private static func runExactDepthPass(
+        rays: [String: JointRay],
+        depthGuidance: [String: RayPinDepthGuidance],
+        remap: DisparityDepthRemap,
+        adjustment: DisparityDepthFitAdjustment,
+        session: SkinnedRigSession,
+        iterations: Int
+    ) {
+        placePelvisFromExactRayDepthTargets(
+            session: session,
+            rays: rays,
+            depthGuidance: depthGuidance,
+            remap: remap,
+            adjustment: adjustment
+        )
+
+        for _ in 0..<iterations {
+            solveExactDepthRayChain(
+                ["LeftUpLeg", "LeftLeg", "LeftFoot", "LeftToeBase"],
+                rays: rays,
+                depthGuidance: depthGuidance,
+                remap: remap,
+                adjustment: adjustment,
+                session: session
+            )
+            solveExactDepthRayChain(
+                ["RightUpLeg", "RightLeg", "RightFoot", "RightToeBase"],
+                rays: rays,
+                depthGuidance: depthGuidance,
+                remap: remap,
+                adjustment: adjustment,
+                session: session
+            )
+            solveExactDepthRayChain(
+                ["Hips", "Spine02", "Spine01", "Spine", "neck", "Head", "headfront"],
+                rays: rays,
+                depthGuidance: depthGuidance,
+                remap: remap,
+                adjustment: adjustment,
+                session: session
+            )
+            solveExactDepthRayChain(
+                ["LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand"],
+                rays: rays,
+                depthGuidance: depthGuidance,
+                remap: remap,
+                adjustment: adjustment,
+                session: session
+            )
+            solveExactDepthRayChain(
+                ["RightShoulder", "RightArm", "RightForeArm", "RightHand"],
+                rays: rays,
+                depthGuidance: depthGuidance,
+                remap: remap,
+                adjustment: adjustment,
+                session: session
+            )
+        }
+    }
+
+    private static func solveDepthFitAdjustment(
+        session: SkinnedRigSession,
+        rays: [String: JointRay],
+        depthGuidance: [String: RayPinDepthGuidance],
+        remap: DisparityDepthRemap,
+        settings: SpatialRayPinDepthFitSettings,
+        manualZoom: Float?,
+        manualOffset: Float?
+    ) -> DisparityDepthFitAdjustment {
+        guard remap.valid else {
+            return .identity
+        }
+
+        let pivotSceneDepth = medianLegacySceneDepth(
+            session: session,
+            jointNames: depthFitCalibrationJoints
+        )
+
+        if let manualZoom,
+           let manualOffset {
+            let candidate = DisparityDepthFitAdjustment(
+                valid: true,
+                depthZoom: manualZoom,
+                depthOffset: manualOffset,
+                pivotSceneDepth: pivotSceneDepth,
+                score: 0,
+                boneResidualMean: 0,
+                boneResidualMax: 0,
+                targetDistanceMean: 0,
+                exactTargetCount: 0
+            )
+
+            return scoreDepthFitAdjustment(
+                candidate,
+                session: session,
+                rays: rays,
+                depthGuidance: depthGuidance,
+                remap: remap,
+                settings: settings
+            )
+        }
+
+        var best: DisparityDepthFitAdjustment?
+        let zoomSteps = max(settings.depthZoomSteps, 1)
+        let offsetSteps = max(settings.depthOffsetSteps, 1)
+
+        for zoomIndex in 0..<zoomSteps {
+            let zoomT = zoomSteps == 1
+                ? Float(0.5)
+                : Float(zoomIndex) / Float(zoomSteps - 1)
+            let depthZoom = settings.minDepthZoom +
+                zoomT * (settings.maxDepthZoom - settings.minDepthZoom)
+
+            for offsetIndex in 0..<offsetSteps {
+                let offsetT = offsetSteps == 1
+                    ? Float(0.5)
+                    : Float(offsetIndex) / Float(offsetSteps - 1)
+                let depthOffset = -settings.maxDepthOffsetSceneUnits +
+                    offsetT * settings.maxDepthOffsetSceneUnits * 2
+                let candidate = DisparityDepthFitAdjustment(
+                    valid: true,
+                    depthZoom: depthZoom,
+                    depthOffset: depthOffset,
+                    pivotSceneDepth: pivotSceneDepth,
+                    score: 0,
+                    boneResidualMean: 0,
+                    boneResidualMax: 0,
+                    targetDistanceMean: 0,
+                    exactTargetCount: 0
+                )
+                let scored = scoreDepthFitAdjustment(
+                    candidate,
+                    session: session,
+                    rays: rays,
+                    depthGuidance: depthGuidance,
+                    remap: remap,
+                    settings: settings
+                )
+
+                if best == nil || scored.score < best!.score {
+                    best = scored
+                }
+            }
+        }
+
+        return best ?? .identity
+    }
+
+    private static func scoreDepthFitAdjustment(
+        _ adjustment: DisparityDepthFitAdjustment,
+        session: SkinnedRigSession,
+        rays: [String: JointRay],
+        depthGuidance: [String: RayPinDepthGuidance],
+        remap: DisparityDepthRemap,
+        settings: SpatialRayPinDepthFitSettings
+    ) -> DisparityDepthFitAdjustment {
+        var scoredJoints = Set(depthFitCalibrationJoints)
+
+        for (a, b, _) in depthFitCalibrationBones {
+            scoredJoints.insert(a)
+            scoredJoints.insert(b)
+        }
+
+        var targetByJoint: [String: SIMD3<Float>] = [:]
+
+        for jointName in scoredJoints {
+            guard let ray = rays[jointName],
+                  let guidance = depthGuidance[jointName],
+                  let target = exactRayDepthPoint(
+                    ray: ray,
+                    guidance: guidance,
+                    remap: remap,
+                    adjustment: adjustment
+                  ) else {
+                continue
+            }
+
+            targetByJoint[jointName] = target
+        }
+
+        guard !targetByJoint.isEmpty else {
+            return DisparityDepthFitAdjustment(
+                valid: false,
+                depthZoom: adjustment.depthZoom,
+                depthOffset: adjustment.depthOffset,
+                pivotSceneDepth: adjustment.pivotSceneDepth,
+                score: Float.greatestFiniteMagnitude,
+                boneResidualMean: Float.greatestFiniteMagnitude,
+                boneResidualMax: Float.greatestFiniteMagnitude,
+                targetDistanceMean: Float.greatestFiniteMagnitude,
+                exactTargetCount: 0
+            )
+        }
+
+        var weightedResidualSum: Float = 0
+        var weightSum: Float = 0
+        var residualMax: Float = 0
+
+        for (a, b, weight) in depthFitCalibrationBones {
+            guard let targetA = targetByJoint[a],
+                  let targetB = targetByJoint[b],
+                  let boneA = session.bonesByCanonicalName[a],
+                  let boneB = session.bonesByCanonicalName[b] else {
+                continue
+            }
+
+            let currentLength = simd_length(boneB.simdWorldPosition - boneA.simdWorldPosition)
+            let targetLength = simd_length(targetB - targetA)
+            let residual = abs(targetLength - currentLength)
+
+            guard residual.isFinite else {
+                continue
+            }
+
+            weightedResidualSum += residual * weight
+            weightSum += weight
+            residualMax = max(residualMax, residual)
+        }
+
+        let boneResidualMean = weightSum > 0
+            ? weightedResidualSum / weightSum
+            : Float.greatestFiniteMagnitude
+        var targetDistances: [Float] = []
+
+        for (jointName, target) in targetByJoint {
+            if let bone = session.bonesByCanonicalName[jointName] {
+                let distance = simd_length(target - bone.simdWorldPosition)
+
+                if distance.isFinite {
+                    targetDistances.append(distance)
+                }
+            }
+        }
+
+        let targetDistanceMean = targetDistances.isEmpty
+            ? 0
+            : targetDistances.reduce(0, +) / Float(targetDistances.count)
+        let score = settings.boneLengthWeight * boneResidualMean +
+            settings.legacyPoseDistanceWeight * targetDistanceMean
+
+        return DisparityDepthFitAdjustment(
+            valid: score.isFinite,
+            depthZoom: adjustment.depthZoom,
+            depthOffset: adjustment.depthOffset,
+            pivotSceneDepth: adjustment.pivotSceneDepth,
+            score: score,
+            boneResidualMean: boneResidualMean,
+            boneResidualMax: residualMax,
+            targetDistanceMean: targetDistanceMean,
+            exactTargetCount: targetByJoint.count
+        )
+    }
+
+    private static func composeDepthFitAdjustment(
+        autoAdjustment: DisparityDepthFitAdjustment,
+        autoDepthFitEnabled: Bool,
+        manualDepthZoom: Float,
+        manualDepthOffset: Float
+    ) -> DisparityDepthFitAdjustment {
+        let clampedManualZoom = max(0.25, min(3.0, manualDepthZoom))
+        let clampedManualOffset = max(-8.0, min(8.0, manualDepthOffset))
+        let baseZoom: Float
+        let baseOffset: Float
+        let basePivot = autoAdjustment.pivotSceneDepth
+
+        if autoDepthFitEnabled {
+            baseZoom = autoAdjustment.depthZoom
+            baseOffset = autoAdjustment.depthOffset
+        } else {
+            baseZoom = 1
+            baseOffset = 0
+        }
+
+        return DisparityDepthFitAdjustment(
+            valid: autoAdjustment.valid,
+            depthZoom: baseZoom * clampedManualZoom,
+            depthOffset: baseOffset + clampedManualOffset,
+            pivotSceneDepth: basePivot,
+            score: autoAdjustment.score,
+            boneResidualMean: autoAdjustment.boneResidualMean,
+            boneResidualMax: autoAdjustment.boneResidualMax,
+            targetDistanceMean: autoAdjustment.targetDistanceMean,
+            exactTargetCount: autoAdjustment.exactTargetCount
+        )
+    }
+
+    private static func medianLegacySceneDepth(
+        session: SkinnedRigSession,
+        jointNames: [String]
+    ) -> Float {
+        var depths: [Float] = []
+
+        for jointName in jointNames {
+            guard let bone = session.bonesByCanonicalName[jointName] else {
+                continue
+            }
+
+            let depth = -bone.simdWorldPosition.z
+
+            if depth.isFinite,
+               depth > 0 {
+                depths.append(depth)
+            }
+        }
+
+        guard !depths.isEmpty else {
+            return 1
+        }
+
+        depths.sort()
+        return depths[depths.count / 2]
+    }
+
+    private static func makePoseSnapshot(
+        _ session: SkinnedRigSession
+    ) -> DriverPoseSnapshot {
+        var bones: [String: simd_float4x4] = [:]
+
+        for jointName in session.jointOrder {
+            if let bone = session.bonesByCanonicalName[jointName] {
+                bones[jointName] = bone.simdTransform
+            }
+        }
+
+        return DriverPoseSnapshot(
+            displayRootTransform: session.displayRootNode.simdTransform,
+            boneTransforms: bones
+        )
+    }
+
+    private static func restorePoseSnapshot(
+        _ snapshot: DriverPoseSnapshot,
+        session: SkinnedRigSession
+    ) {
+        session.displayRootNode.simdTransform = snapshot.displayRootTransform
+
+        for (jointName, transform) in snapshot.boneTransforms {
+            session.bonesByCanonicalName[jointName]?.simdTransform = transform
+        }
+    }
+
+    private static func evaluateExactDepthSolve(
+        session: SkinnedRigSession,
+        rays: [String: JointRay],
+        depthGuidance: [String: RayPinDepthGuidance],
+        remap: DisparityDepthRemap,
+        adjustment: DisparityDepthFitAdjustment
+    ) -> ExactDepthSolveEvaluation {
+        var exactResiduals: [Float] = []
+        var rayDistances: [Float] = []
+
+        for jointName in session.jointOrder {
+            guard let bone = session.bonesByCanonicalName[jointName],
+                  let ray = rays[jointName] else {
+                continue
+            }
+
+            let closest = closestPointOnRay(
+                ray: ray,
+                to: bone.simdWorldPosition
+            )
+            let rayDistance = simd_length(bone.simdWorldPosition - closest)
+
+            if rayDistance.isFinite {
+                rayDistances.append(rayDistance)
+            }
+
+            if let exact = exactRayDepthTarget(
+                jointName: jointName,
+                ray: ray,
+                guidance: depthGuidance[jointName],
+                remap: remap,
+                adjustment: adjustment
+            ) {
+                let exactResidual = simd_length(bone.simdWorldPosition - exact.point)
+
+                if exactResidual.isFinite {
+                    exactResiduals.append(exactResidual)
+                }
+            }
+        }
+
+        let avgExact = exactResiduals.isEmpty
+            ? 0
+            : exactResiduals.reduce(0, +) / Float(exactResiduals.count)
+        let maxExact = exactResiduals.max() ?? 0
+        let avgRay = rayDistances.isEmpty
+            ? 0
+            : rayDistances.reduce(0, +) / Float(rayDistances.count)
+        let score = avgExact + avgRay * 0.25
+
+        return ExactDepthSolveEvaluation(
+            score: score,
+            avgExactResidual: avgExact,
+            maxExactResidual: maxExact,
+            avgRayDistance: avgRay
+        )
+    }
+
     private static func solveLegacyRayPinChain(
         _ chain: [String],
         rays: [String: JointRay],
@@ -765,7 +1334,8 @@ enum SkinnedRigRotomationDriver {
         _ chain: [String],
         rays: [String: JointRay],
         depthGuidance: [String: RayPinDepthGuidance],
-        calibration: RayPinDepthCalibration,
+        remap: DisparityDepthRemap,
+        adjustment: DisparityDepthFitAdjustment,
         session: SkinnedRigSession
     ) {
         guard chain.count >= 2 else {
@@ -786,7 +1356,8 @@ enum SkinnedRigRotomationDriver {
                 jointName: childName,
                 ray: childRay,
                 guidance: depthGuidance[childName],
-                calibration: calibration
+                remap: remap,
+                adjustment: adjustment
             ) {
                 childTarget = exact.point
             } else {
@@ -835,21 +1406,18 @@ enum SkinnedRigRotomationDriver {
         jointName: String,
         ray: JointRay,
         guidance: RayPinDepthGuidance?,
-        calibration: RayPinDepthCalibration
+        remap: DisparityDepthRemap,
+        adjustment: DisparityDepthFitAdjustment
     ) -> ExactRayDepthTarget? {
         guard let guidance,
-              guidance.accepted,
+              let point = exactRayDepthPoint(
+                ray: ray,
+                guidance: guidance,
+                remap: remap,
+                adjustment: adjustment
+              ),
               let depthMeters = guidance.disparityDepthMeters,
-              depthMeters > 0,
-              calibration.valid else {
-            return nil
-        }
-
-        guard let point = pointOnRayAtDisparityDepth(
-            ray: ray,
-            depthMeters: depthMeters,
-            calibration: calibration
-        ) else {
+              depthMeters > 0 else {
             return nil
         }
 
@@ -866,7 +1434,8 @@ enum SkinnedRigRotomationDriver {
         session: SkinnedRigSession,
         rays: [String: JointRay],
         depthGuidance: [String: RayPinDepthGuidance],
-        calibration: RayPinDepthCalibration
+        remap: DisparityDepthRemap,
+        adjustment: DisparityDepthFitAdjustment
     ) {
         let joints = [
             "Hips",
@@ -882,7 +1451,8 @@ enum SkinnedRigRotomationDriver {
                     jointName: jointName,
                     ray: ray,
                     guidance: depthGuidance[jointName],
-                    calibration: calibration
+                    remap: remap,
+                    adjustment: adjustment
                   ) else {
                 continue
             }
@@ -924,21 +1494,43 @@ enum SkinnedRigRotomationDriver {
         )
     }
 
-    private static func pointOnRayAtDisparityDepth(
+    private static func exactRayDepthPoint(
         ray: JointRay,
-        depthMeters: Float,
-        calibration: RayPinDepthCalibration
+        guidance: RayPinDepthGuidance,
+        remap: DisparityDepthRemap,
+        adjustment: DisparityDepthFitAdjustment
     ) -> SIMD3<Float>? {
-        guard calibration.valid,
+        guard guidance.accepted,
+              let depthMeters = guidance.disparityDepthMeters,
               depthMeters.isFinite,
               depthMeters > 0,
-              calibration.scale.isFinite,
-              calibration.offset.isFinite else {
+              remap.valid,
+              remap.scale.isFinite,
+              remap.offset.isFinite,
+              adjustment.valid else {
             return nil
         }
 
-        let sceneDepth = calibration.scale * depthMeters + calibration.offset
+        let rawSceneDepth = remap.scale * depthMeters + remap.offset
+        let adjustedSceneDepth = adjustment.pivotSceneDepth +
+            adjustment.depthZoom * (rawSceneDepth - adjustment.pivotSceneDepth) +
+            adjustment.depthOffset
 
+        guard adjustedSceneDepth.isFinite,
+              adjustedSceneDepth > 0 else {
+            return nil
+        }
+
+        return pointOnRayAtSceneDepth(
+            ray: ray,
+            sceneDepth: adjustedSceneDepth
+        )
+    }
+
+    private static func pointOnRayAtSceneDepth(
+        ray: JointRay,
+        sceneDepth: Float
+    ) -> SIMD3<Float>? {
         guard sceneDepth.isFinite,
               sceneDepth > 0 else {
             return nil
@@ -961,19 +1553,19 @@ enum SkinnedRigRotomationDriver {
         return ray.point(at: t)
     }
 
-    private static func isReasonableCalibration(
-        _ calibration: RayPinDepthCalibration
+    private static func isReasonableRemap(
+        _ remap: DisparityDepthRemap
     ) -> Bool {
-        guard calibration.valid,
-              calibration.scale.isFinite,
-              calibration.offset.isFinite,
-              calibration.anchorCount >= 3 else {
+        guard remap.valid,
+              remap.scale.isFinite,
+              remap.offset.isFinite,
+              remap.anchorCount >= 3 else {
             return false
         }
 
-        guard calibration.scale > 0,
-              calibration.scale <= 10_000,
-              abs(calibration.offset) <= 10_000 else {
+        guard remap.scale > 0,
+              remap.scale <= 10_000,
+              abs(remap.offset) <= 10_000 else {
             return false
         }
 
@@ -1555,7 +2147,9 @@ enum SkinnedRigRotomationDriver {
         session: SkinnedRigSession,
         rays: [String: JointRay],
         depthGuidance: [String: RayPinDepthGuidance],
-        calibration: RayPinDepthCalibration,
+        remap: DisparityDepthRemap,
+        autoAdjustment: DisparityDepthFitAdjustment,
+        adjustment: DisparityDepthFitAdjustment,
         frameIndex: Int,
         depthMode: SpatialRayPinDepthMode
     ) -> DepthGuidedRayPinSolveStats {
@@ -1595,11 +2189,22 @@ enum SkinnedRigRotomationDriver {
             depthMode: depthMode,
             depthEvidenceJoints: depthGuidance.values.filter { $0.disparityDepthMeters != nil }.count,
             exactDepthTargets: depthGuidance.values.filter { $0.disparityDepthMeters != nil && $0.accepted }.count,
-            depthCalibrationValid: calibration.valid,
-            affineScale: calibration.scale,
-            affineOffset: calibration.offset,
-            affineAnchorCount: calibration.anchorCount,
-            affineMedianResidual: calibration.medianResidual,
+            depthCalibrationValid: remap.valid,
+            affineScale: remap.scale,
+            affineOffset: remap.offset,
+            affineAnchorCount: remap.anchorCount,
+            affineMedianResidual: remap.medianResidual,
+            autoDepthZoom: autoAdjustment.depthZoom,
+            autoDepthOffset: autoAdjustment.depthOffset,
+            finalDepthZoom: adjustment.depthZoom,
+            finalDepthOffset: adjustment.depthOffset,
+            depthFitZoom: adjustment.depthZoom,
+            depthFitOffset: adjustment.depthOffset,
+            depthFitPivotSceneDepth: adjustment.pivotSceneDepth,
+            depthFitScore: adjustment.score,
+            depthFitBoneResidualMean: adjustment.boneResidualMean,
+            depthFitBoneResidualMax: adjustment.boneResidualMax,
+            depthFitTargetDistanceMean: adjustment.targetDistanceMean,
             avgRayDistance: count > 0 ? sum / count : 0,
             worstJoint: worst,
             worstRayDistance: worstError
@@ -1611,7 +2216,12 @@ enum SkinnedRigRotomationDriver {
         session: SkinnedRigSession,
         rays: [String: JointRay],
         depthGuidance: [String: RayPinDepthGuidance],
-        calibration: RayPinDepthCalibration,
+        remap: DisparityDepthRemap,
+        autoAdjustment: DisparityDepthFitAdjustment,
+        adjustment: DisparityDepthFitAdjustment,
+        autoDepthFitEnabled: Bool,
+        manualDepthZoom: Float,
+        manualDepthOffset: Float,
         depthMode: SpatialRayPinDepthMode
     ) {
         guard stats.frameIndex == 0 || stats.frameIndex % 30 == 0 else {
@@ -1622,11 +2232,11 @@ enum SkinnedRigRotomationDriver {
         [DepthGuidedRayPinning] active spatial solve
           frame: \(stats.frameIndex)
           mode: \(depthMode.rawValue)
-          affineCalibrationValid: \(calibration.valid)
-          affineScale: \(calibration.scale)
-          affineOffset: \(calibration.offset)
-          affineAnchors: \(calibration.anchorCount)
-          affineMedianResidual: \(calibration.medianResidual)
+          affineCalibrationValid: \(remap.valid)
+          affineScale: \(remap.scale)
+          affineOffset: \(remap.offset)
+          affineAnchors: \(remap.anchorCount)
+          affineMedianResidual: \(remap.medianResidual)
           exactDepthTargets: \(stats.exactDepthTargets)
           usesExactPointOnRayAtDisparityDepth: true
           usesClosestRaySphereCandidateForDepthJoints: false
@@ -1638,11 +2248,39 @@ enum SkinnedRigRotomationDriver {
           worstRayDistance: \(String(format: "%.5f", stats.worstRayDistance))
         """)
 
+        print("""
+        [DepthGuidedRayPinning] depth pan zoom controls
+          frame: \(stats.frameIndex)
+          autoDepthFitEnabled: \(autoDepthFitEnabled)
+          manualDepthZoom: \(manualDepthZoom)
+          manualDepthOffset: \(manualDepthOffset)
+          autoDepthZoom: \(autoAdjustment.depthZoom)
+          autoDepthOffset: \(autoAdjustment.depthOffset)
+          finalDepthZoom: \(adjustment.depthZoom)
+          finalDepthOffset: \(adjustment.depthOffset)
+          pivotSceneDepth: \(adjustment.pivotSceneDepth)
+        """)
+
+        print("""
+        [DepthGuidedRayPinning] depth fit adjustment
+          frame: \(stats.frameIndex)
+          autoDepthFitEnabled: \(autoDepthFitEnabled)
+          depthZoom: \(adjustment.depthZoom)
+          depthOffset: \(adjustment.depthOffset)
+          pivotSceneDepth: \(adjustment.pivotSceneDepth)
+          score: \(adjustment.score)
+          boneResidualMean: \(adjustment.boneResidualMean)
+          boneResidualMax: \(adjustment.boneResidualMax)
+          targetDistanceMean: \(adjustment.targetDistanceMean)
+          exactTargetCount: \(adjustment.exactTargetCount)
+        """)
+
         logMajorJointExactTargets(
             session: session,
             rays: rays,
             depthGuidance: depthGuidance,
-            calibration: calibration
+            remap: remap,
+            adjustment: adjustment
         )
     }
 
@@ -1650,7 +2288,8 @@ enum SkinnedRigRotomationDriver {
         session: SkinnedRigSession,
         rays: [String: JointRay],
         depthGuidance: [String: RayPinDepthGuidance],
-        calibration: RayPinDepthCalibration
+        remap: DisparityDepthRemap,
+        adjustment: DisparityDepthFitAdjustment
     ) {
         let joints = [
             "Hips",
@@ -1678,12 +2317,17 @@ enum SkinnedRigRotomationDriver {
                     jointName: jointName,
                     ray: ray,
                     guidance: guidance,
-                    calibration: calibration
+                    remap: remap,
+                    adjustment: adjustment
                   ),
                   let bone = session.bonesByCanonicalName[jointName] else {
                 continue
             }
 
+            let rawSceneDepth = remap.scale * exact.depthMeters + remap.offset
+            let adjustedDepth = adjustment.pivotSceneDepth +
+                adjustment.depthZoom * (rawSceneDepth - adjustment.pivotSceneDepth) +
+                adjustment.depthOffset
             let residual = simd_length(bone.simdWorldPosition - exact.point)
             let zResidual = abs(bone.simdWorldPosition.z - exact.point.z)
 
@@ -1692,6 +2336,8 @@ enum SkinnedRigRotomationDriver {
               joint: \(jointName)
               source: \(exact.source)
               depthMeters: \(exact.depthMeters)
+              rawSceneDepth: \(rawSceneDepth)
+              adjustedDepth: \(adjustedDepth)
               exactTarget: \(exact.point)
               finalBone: \(bone.simdWorldPosition)
               residual: \(residual)

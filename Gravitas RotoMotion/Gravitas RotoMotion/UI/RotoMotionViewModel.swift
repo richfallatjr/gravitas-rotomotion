@@ -240,6 +240,14 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var spatialSolveProgressFraction: Double = 0
     @Published var spatialSolveProgressTitle = "Spatial solve idle."
     @Published var spatialSolveProgressDetail = ""
+    @Published var spatialRayPinDepthFitSettings = SpatialRayPinDepthFitSettings.default
+    @Published var autoSpatialDepthFitEnabled = true
+    @Published var manualSpatialDepthZoom: Double = 1.0
+    @Published var manualSpatialDepthOffset: Double = 0.0
+    @Published var lastAutoSpatialDepthZoom: Double = 1.0
+    @Published var lastAutoSpatialDepthOffset: Double = 0.0
+    @Published var lastSpatialDepthFitScore: Double = 0.0
+    @Published var lastSpatialDepthFitResidual: Double = 0.0
     @Published var showDisparityOnImagePlane = true
     @Published var disparityPlateOverlayOpacity: Double = 0.65
     @Published var selectedDisparityPlateOverlay: DisparityPlateOverlayKind = .depth
@@ -2603,7 +2611,11 @@ final class RotoMotionViewModel: ObservableObject {
                 session: session,
                 cameraOrigin: SIMD3<Float>(0, 0, 0),
                 videoPlaneSize: videoPlaneSize,
-                videoPlaneZ: currentVideoPlaneZ
+                videoPlaneZ: currentVideoPlaneZ,
+                depthFitSettings: spatialRayPinDepthFitSettings,
+                autoDepthFitEnabled: autoSpatialDepthFitEnabled,
+                manualDepthZoom: Float(manualSpatialDepthZoom),
+                manualDepthOffset: Float(manualSpatialDepthOffset)
             )
 
             applyRotationOverridesToRigForBakeFrame(
@@ -3075,6 +3087,10 @@ final class RotoMotionViewModel: ObservableObject {
     @MainActor
     func updateSpatialSolveTrace(_ trace: SpatialSolveTrace) {
         spatialSolveTrace = trace
+        lastAutoSpatialDepthZoom = Double(trace.autoDepthFitZoom)
+        lastAutoSpatialDepthOffset = Double(trace.autoDepthFitOffset)
+        lastSpatialDepthFitScore = Double(trace.depthFitScore)
+        lastSpatialDepthFitResidual = Double(trace.depthFitBoneResidualMean)
 
         spatialSolveProgressTitle = "Spatial Solve: \(trace.phase.rawValue)"
         spatialSolveProgressFraction = trace.phase == .frameAccepted ? 1 : spatialSolveProgressFraction
@@ -3086,6 +3102,8 @@ final class RotoMotionViewModel: ObservableObject {
         exact depth targets: \(trace.exactDepthTargets)
         affine calibration: \(trace.depthCalibrationValid) scale \(String(format: "%.4f", trace.affineScale)) offset \(String(format: "%.4f", trace.affineOffset))
         affine anchors/residual: \(trace.affineAnchorCount) / \(String(format: "%.4f", trace.affineMedianResidual))
+        depth fit: zoom \(String(format: "%.3f", trace.depthFitZoom)) offset \(String(format: "%.3f", trace.depthFitOffset)) pivot \(String(format: "%.3f", trace.depthFitPivotSceneDepth))
+        fit score: \(String(format: "%.5f", trace.depthFitScore)) bone \(String(format: "%.5f", trace.depthFitBoneResidualMean)) target \(String(format: "%.5f", trace.depthFitTargetDistanceMean))
         root: \(trace.displayRootPosition.simdFloat)
         mesh hidden: \(trace.meshHidden)
         projected: \(trace.meshProjectedOnScreen)
@@ -3094,6 +3112,30 @@ final class RotoMotionViewModel: ObservableObject {
         worst: \(trace.worstJoint) \(String(format: "%.5f", trace.worstRayDistance))
         rejected: \(trace.rejectionReason)
         """
+    }
+
+    func spatialDepthControlsChanged() {
+        bakedRigAnimation = nil
+        bakedRigAnimationStatus = "Bake is stale. Re-bake rig animation for export."
+        sessionIsDirty = true
+        applyCurrentFrameToLiveRig()
+    }
+
+    func resetSpatialDepthPanZoom() {
+        manualSpatialDepthZoom = 1.0
+        manualSpatialDepthOffset = 0.0
+        spatialSolveStatus = "Spatial depth pan/zoom reset."
+        spatialDepthControlsChanged()
+    }
+
+    func nudgeSpatialDepthOffset(_ delta: Double) {
+        manualSpatialDepthOffset = max(-8.0, min(8.0, manualSpatialDepthOffset + delta))
+        spatialDepthControlsChanged()
+    }
+
+    func nudgeSpatialDepthZoom(_ delta: Double) {
+        manualSpatialDepthZoom = max(0.25, min(3.0, manualSpatialDepthZoom + delta))
+        spatialDepthControlsChanged()
     }
 
     private func phaseForDisparityProgressStage(

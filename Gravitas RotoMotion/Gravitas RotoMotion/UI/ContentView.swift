@@ -220,6 +220,10 @@ struct ContentView: View {
                 stereoToRigAlignment: roto.stereoToRigAlignment,
                 solveTargetMode: roto.solveTargetMode,
                 spatialRayPinDepthMode: roto.spatialRayPinDepthMode,
+                spatialRayPinDepthFitSettings: roto.spatialRayPinDepthFitSettings,
+                autoSpatialDepthFitEnabled: roto.autoSpatialDepthFitEnabled,
+                manualSpatialDepthZoom: roto.manualSpatialDepthZoom,
+                manualSpatialDepthOffset: roto.manualSpatialDepthOffset,
                 rotationGizmoSpace: roto.rotationGizmoSpace,
                 selectedRotationJoint: roto.selectedRotationJoint,
                 onRotationGizmoEulerChanged: { joint, euler in
@@ -255,6 +259,14 @@ struct ContentView: View {
                 onSpatialSolveTrace: { trace in
                     Task { @MainActor in
                         roto.updateSpatialSolveTrace(trace)
+                    }
+                },
+                onSpatialDepthFitReadback: { autoZoom, autoOffset, score, residual in
+                    Task { @MainActor in
+                        roto.lastAutoSpatialDepthZoom = autoZoom
+                        roto.lastAutoSpatialDepthOffset = autoOffset
+                        roto.lastSpatialDepthFitScore = score
+                        roto.lastSpatialDepthFitResidual = residual
                     }
                 }
             )
@@ -579,6 +591,106 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                         .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                GroupBox("Spatial Depth Pan / Zoom") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle("Auto Depth Fit", isOn: $roto.autoSpatialDepthFitEnabled)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Depth Zoom")
+                                    .frame(width: 100, alignment: .leading)
+
+                                Slider(
+                                    value: $roto.manualSpatialDepthZoom,
+                                    in: 0.35...2.0
+                                )
+
+                                Text(String(format: "%.3fx", roto.manualSpatialDepthZoom))
+                                    .monospacedDigit()
+                                    .frame(width: 70, alignment: .trailing)
+                            }
+
+                            HStack {
+                                Button("-0.10") {
+                                    roto.nudgeSpatialDepthZoom(-0.10)
+                                }
+
+                                Button("-0.01") {
+                                    roto.nudgeSpatialDepthZoom(-0.01)
+                                }
+
+                                Button("+0.01") {
+                                    roto.nudgeSpatialDepthZoom(0.01)
+                                }
+
+                                Button("+0.10") {
+                                    roto.nudgeSpatialDepthZoom(0.10)
+                                }
+                            }
+                            .font(.caption)
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Depth Pan Z")
+                                    .frame(width: 100, alignment: .leading)
+
+                                Slider(
+                                    value: $roto.manualSpatialDepthOffset,
+                                    in: -8.0...8.0
+                                )
+
+                                Text(String(format: "%.3f", roto.manualSpatialDepthOffset))
+                                    .monospacedDigit()
+                                    .frame(width: 70, alignment: .trailing)
+                            }
+
+                            HStack {
+                                Button("-1.00") {
+                                    roto.nudgeSpatialDepthOffset(-1.0)
+                                }
+
+                                Button("-0.10") {
+                                    roto.nudgeSpatialDepthOffset(-0.1)
+                                }
+
+                                Button("+0.10") {
+                                    roto.nudgeSpatialDepthOffset(0.1)
+                                }
+
+                                Button("+1.00") {
+                                    roto.nudgeSpatialDepthOffset(1.0)
+                                }
+                            }
+                            .font(.caption)
+                        }
+
+                        Button("Reset Depth Pan / Zoom") {
+                            roto.resetSpatialDepthPanZoom()
+                        }
+
+                        Text("""
+                        Auto zoom: \(String(format: "%.3f", roto.lastAutoSpatialDepthZoom))
+                        Auto offset: \(String(format: "%.3f", roto.lastAutoSpatialDepthOffset))
+                        Fit score: \(String(format: "%.4f", roto.lastSpatialDepthFitScore))
+                        Residual: \(String(format: "%.4f", roto.lastSpatialDepthFitResidual))
+                        """)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .onChange(of: roto.autoSpatialDepthFitEnabled) { _, _ in
+                        roto.spatialDepthControlsChanged()
+                    }
+                    .onChange(of: roto.manualSpatialDepthZoom) { _, _ in
+                        roto.spatialDepthControlsChanged()
+                    }
+                    .onChange(of: roto.manualSpatialDepthOffset) { _, _ in
+                        roto.spatialDepthControlsChanged()
                     }
                 }
 

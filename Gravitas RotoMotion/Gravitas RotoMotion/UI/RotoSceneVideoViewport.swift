@@ -144,6 +144,10 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let stereoToRigAlignment: StereoToRigAlignment
     let solveTargetMode: RotoSolveTargetMode
     let spatialRayPinDepthMode: SpatialRayPinDepthMode
+    let spatialRayPinDepthFitSettings: SpatialRayPinDepthFitSettings
+    let autoSpatialDepthFitEnabled: Bool
+    let manualSpatialDepthZoom: Double
+    let manualSpatialDepthOffset: Double
     let rotationGizmoSpace: RotationGizmoSpace
     let selectedRotationJoint: String
     let onRotationGizmoEulerChanged: (_ joint: String, _ eulerXYZ: SIMD3<Float>) -> Void
@@ -152,6 +156,12 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let onVideoPlaneSizeChanged: ((CGSize) -> Void)?
     let onReferenceRigVisibilityStatusChanged: ((String) -> Void)?
     let onSpatialSolveTrace: (SpatialSolveTrace) -> Void
+    let onSpatialDepthFitReadback: (
+        _ autoZoom: Double,
+        _ autoOffset: Double,
+        _ score: Double,
+        _ residual: Double
+    ) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -168,6 +178,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         context.coordinator.onVideoPlaneSizeChanged = onVideoPlaneSizeChanged
         context.coordinator.onReferenceRigVisibilityStatusChanged = onReferenceRigVisibilityStatusChanged
         context.coordinator.onSpatialSolveTrace = onSpatialSolveTrace
+        context.coordinator.onSpatialDepthFitReadback = onSpatialDepthFitReadback
         context.coordinator.update(
             view: view,
             image: image,
@@ -226,6 +237,10 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             stereoToRigAlignment: stereoToRigAlignment,
             solveTargetMode: solveTargetMode,
             spatialRayPinDepthMode: spatialRayPinDepthMode,
+            spatialRayPinDepthFitSettings: spatialRayPinDepthFitSettings,
+            autoSpatialDepthFitEnabled: autoSpatialDepthFitEnabled,
+            manualSpatialDepthZoom: manualSpatialDepthZoom,
+            manualSpatialDepthOffset: manualSpatialDepthOffset,
             rotationGizmoSpace: rotationGizmoSpace,
             selectedRotationJoint: selectedRotationJoint
         )
@@ -260,6 +275,12 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         var onVideoPlaneSizeChanged: ((CGSize) -> Void)?
         var onReferenceRigVisibilityStatusChanged: ((String) -> Void)?
         var onSpatialSolveTrace: ((SpatialSolveTrace) -> Void)?
+        var onSpatialDepthFitReadback: ((
+            _ autoZoom: Double,
+            _ autoOffset: Double,
+            _ score: Double,
+            _ residual: Double
+        ) -> Void)?
 
         private var lastImageToken = -1
         private var lastImageObjectID: ObjectIdentifier?
@@ -481,6 +502,10 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             stereoToRigAlignment: StereoToRigAlignment,
             solveTargetMode: RotoSolveTargetMode,
             spatialRayPinDepthMode: SpatialRayPinDepthMode,
+            spatialRayPinDepthFitSettings: SpatialRayPinDepthFitSettings,
+            autoSpatialDepthFitEnabled: Bool,
+            manualSpatialDepthZoom: Double,
+            manualSpatialDepthOffset: Double,
             rotationGizmoSpace: RotationGizmoSpace,
             selectedRotationJoint: String
         ) {
@@ -520,6 +545,10 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 fusedStereoTargetFrame: fusedStereoTargetFrame,
                 solveTargetMode: solveTargetMode,
                 spatialRayPinDepthMode: spatialRayPinDepthMode,
+                spatialRayPinDepthFitSettings: spatialRayPinDepthFitSettings,
+                autoSpatialDepthFitEnabled: autoSpatialDepthFitEnabled,
+                manualSpatialDepthZoom: manualSpatialDepthZoom,
+                manualSpatialDepthOffset: manualSpatialDepthOffset,
                 referenceRigScaleMultiplier: referenceRigScaleMultiplier,
                 referenceRigX: referenceRigX,
                 referenceRigY: referenceRigY,
@@ -1929,6 +1958,14 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 affineOffset: stats.affineOffset,
                 affineAnchorCount: stats.affineAnchorCount,
                 affineMedianResidual: stats.affineMedianResidual,
+                autoDepthFitZoom: stats.autoDepthZoom,
+                autoDepthFitOffset: stats.autoDepthOffset,
+                depthFitZoom: stats.depthFitZoom,
+                depthFitOffset: stats.depthFitOffset,
+                depthFitPivotSceneDepth: stats.depthFitPivotSceneDepth,
+                depthFitScore: stats.depthFitScore,
+                depthFitBoneResidualMean: stats.depthFitBoneResidualMean,
+                depthFitTargetDistanceMean: stats.depthFitTargetDistanceMean,
                 displayRootPosition: SIMD3Codable(session.displayRootNode.simdPosition),
                 meshWorldBoundsMin: SIMD3Codable(visibility.worldMin),
                 meshWorldBoundsMax: SIMD3Codable(visibility.worldMax),
@@ -1957,6 +1994,10 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             fusedStereoTargetFrame: FusedStereoJointTargetCapture.Frame?,
             solveTargetMode: RotoSolveTargetMode,
             spatialRayPinDepthMode: SpatialRayPinDepthMode,
+            spatialRayPinDepthFitSettings: SpatialRayPinDepthFitSettings,
+            autoSpatialDepthFitEnabled: Bool,
+            manualSpatialDepthZoom: Double,
+            manualSpatialDepthOffset: Double,
             referenceRigScaleMultiplier: Double,
             referenceRigX: Double,
             referenceRigY: Double,
@@ -2032,7 +2073,18 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                     session: session,
                     cameraOrigin: SIMD3<Float>(0, 0, 0),
                     videoPlaneSize: videoPlaneSize,
-                    videoPlaneZ: currentVideoPlaneZ
+                    videoPlaneZ: currentVideoPlaneZ,
+                    depthFitSettings: spatialRayPinDepthFitSettings,
+                    autoDepthFitEnabled: autoSpatialDepthFitEnabled,
+                    manualDepthZoom: Float(manualSpatialDepthZoom),
+                    manualDepthOffset: Float(manualSpatialDepthOffset)
+                )
+
+                onSpatialDepthFitReadback?(
+                    Double(stats.autoDepthZoom),
+                    Double(stats.autoDepthOffset),
+                    Double(stats.depthFitScore),
+                    Double(stats.depthFitBoneResidualMean)
                 )
 
                 applyViewportRotationOverrides(

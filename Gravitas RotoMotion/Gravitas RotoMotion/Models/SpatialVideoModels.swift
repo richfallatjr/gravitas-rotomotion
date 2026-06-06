@@ -84,6 +84,22 @@ enum SpatialRayPinDepthMode: String, Codable {
     case leftEyeRayPinningFallback
 }
 
+struct SpatialRayPinDepthFitSettings: Codable {
+    var enabled: Bool = true
+    var maxDepthOffsetSceneUnits: Float = 2.5
+    var depthOffsetSteps: Int = 9
+    var minDepthZoom: Float = 0.55
+    var maxDepthZoom: Float = 1.25
+    var depthZoomSteps: Int = 8
+    var minImprovement: Float = 0.002
+    var maxRefinementPasses: Int = 4
+    var legacyPoseDistanceWeight: Float = 0.10
+    var boneLengthWeight: Float = 1.0
+    var torsoWeight: Float = 2.0
+
+    static let `default` = SpatialRayPinDepthFitSettings()
+}
+
 enum SpatialSolveReadiness: String, Codable {
     case notSpatial
     case needsVision
@@ -131,6 +147,14 @@ struct SpatialSolveTrace: Codable {
     var affineOffset: Float = 0
     var affineAnchorCount: Int = 0
     var affineMedianResidual: Float = 0
+    var autoDepthFitZoom: Float = 1
+    var autoDepthFitOffset: Float = 0
+    var depthFitZoom: Float = 1
+    var depthFitOffset: Float = 0
+    var depthFitPivotSceneDepth: Float = 0
+    var depthFitScore: Float = 0
+    var depthFitBoneResidualMean: Float = 0
+    var depthFitTargetDistanceMean: Float = 0
     var displayRootPosition = SIMD3Codable(SIMD3<Float>(0, 0, 0))
     var meshWorldBoundsMin = SIMD3Codable(SIMD3<Float>(0, 0, 0))
     var meshWorldBoundsMax = SIMD3Codable(SIMD3<Float>(0, 0, 0))
