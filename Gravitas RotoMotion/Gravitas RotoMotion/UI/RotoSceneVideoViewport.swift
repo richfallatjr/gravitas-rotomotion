@@ -122,6 +122,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let rotationOverrideRevision: Int
     let rotationKeyRevision: Int
     let spatialDepthControlRevision: Int
+    let visibilityToggleRevision: Int
     let solveInputRevision: Int
     let disparityProgressRevision: Int
     let lastViewportRefreshReason: String
@@ -223,6 +224,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             rotationOverrideRevision: rotationOverrideRevision,
             rotationKeyRevision: rotationKeyRevision,
             spatialDepthControlRevision: spatialDepthControlRevision,
+            visibilityToggleRevision: visibilityToggleRevision,
             solveInputRevision: solveInputRevision,
             disparityProgressRevision: disparityProgressRevision,
             lastViewportRefreshReason: lastViewportRefreshReason,
@@ -341,6 +343,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             let rotationOverrideRevision: Int
             let rotationKeyRevision: Int
             let spatialDepthControlRevision: Int
+            let visibilityToggleRevision: Int
             let solveInputRevision: Int
             let showSkinnedRig: Bool
             let showSkinnedGeometry: Bool
@@ -514,6 +517,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             rotationOverrideRevision: Int,
             rotationKeyRevision: Int,
             spatialDepthControlRevision: Int,
+            visibilityToggleRevision: Int,
             solveInputRevision: Int,
             disparityProgressRevision: Int,
             lastViewportRefreshReason: String,
@@ -595,6 +599,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 rotationOverrideRevision: rotationOverrideRevision,
                 rotationKeyRevision: rotationKeyRevision,
                 spatialDepthControlRevision: spatialDepthControlRevision,
+                visibilityToggleRevision: visibilityToggleRevision,
                 solveInputRevision: solveInputRevision,
                 showSkinnedRig: showSkinnedRig,
                 showSkinnedGeometry: showSkinnedGeometry,
@@ -616,6 +621,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                   rotationOverrideRevision: \(rotationOverrideRevision)
                   rotationKeyRevision: \(rotationKeyRevision)
                   spatialDepthControlRevision: \(spatialDepthControlRevision)
+                  visibilityToggleRevision: \(visibilityToggleRevision)
                 """)
             }
 

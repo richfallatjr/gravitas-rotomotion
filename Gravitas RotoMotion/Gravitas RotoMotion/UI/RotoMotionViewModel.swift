@@ -205,7 +205,9 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var spatialVideoStatus = "No spatial video loaded."
     @Published var spatialStereoAvailable = false
     @Published var spatialDepthStatus = "No stereo depth available."
-    @Published var showConditionedStereoSkeleton = true
+    @Published var showConditionedStereoSkeleton = true {
+        didSet { visibilityToggleChanged(name: "showConditionedStereoSkeleton", value: showConditionedStereoSkeleton) }
+    }
     @Published var stereoConditioningStatus = "No conditioned stereo targets."
     @Published var stereoConditioningSettings = StereoTargetConditioningSettings.default
     @Published var spatialDisparityMapCapture: SpatialDisparityMapCapture?
@@ -218,7 +220,9 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var spatialDisparityConfidencePreviewImage: NSImage?
     @Published var spatialDisparityRawPreviewImage: NSImage?
     @Published var spatialDisparityDebugFrameIndex = 0
-    @Published var showJointDepthValidationOverlay = true
+    @Published var showJointDepthValidationOverlay = true {
+        didSet { visibilityToggleChanged(name: "showJointDepthValidationOverlay", value: showJointDepthValidationOverlay) }
+    }
     @Published var stereoDisparitySettings = StereoDisparitySettings.default
     @Published var isBuildingSpatialDisparity = false
     @Published var spatialDisparityBuildProgress: Double = 0
@@ -237,6 +241,7 @@ final class RotoMotionViewModel: ObservableObject {
     @Published private(set) var viewportRefreshRevision: Int = 0
     @Published private(set) var rotationKeyRevision: Int = 0
     @Published private(set) var spatialDepthControlRevision: Int = 0
+    @Published private(set) var visibilityToggleRevision: Int = 0
     @Published private(set) var disparityProgressRevision: Int = 0
     @Published private(set) var solveInputRevision: Int = 0
     @Published var lastViewportRefreshReason: String = ""
@@ -255,13 +260,23 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var lastAutoSpatialDepthOffset: Double = 0.0
     @Published var lastSpatialDepthFitScore: Double = 0.0
     @Published var lastSpatialDepthFitResidual: Double = 0.0
-    @Published var showDisparityOnImagePlane = true
-    @Published var disparityPlateOverlayOpacity: Double = 0.65
-    @Published var selectedDisparityPlateOverlay: DisparityPlateOverlayKind = .depth
-    @Published var showSpatialTargetBalls = false
+    @Published var showDisparityOnImagePlane = true {
+        didSet { visibilityToggleChanged(name: "showDisparityOnImagePlane", value: showDisparityOnImagePlane) }
+    }
+    @Published var disparityPlateOverlayOpacity: Double = 0.65 {
+        didSet { visibilityControlChanged(name: "disparityPlateOverlayOpacity") }
+    }
+    @Published var selectedDisparityPlateOverlay: DisparityPlateOverlayKind = .depth {
+        didSet { visibilityControlChanged(name: "selectedDisparityPlateOverlay") }
+    }
+    @Published var showSpatialTargetBalls = false {
+        didSet { visibilityToggleChanged(name: "showSpatialTargetBalls", value: showSpatialTargetBalls) }
+    }
     @Published var spatialTargetBallScale: Double = 0.35
     @Published var fusedStereoJointTargetCapture: FusedStereoJointTargetCapture?
-    @Published var showFusedStereoTargets = true
+    @Published var showFusedStereoTargets = true {
+        didSet { visibilityToggleChanged(name: "showFusedStereoTargets", value: showFusedStereoTargets) }
+    }
     @Published var fusedStereoTargetStatus = "No fused stereo targets."
     @Published var stereoTargetFusionSettings = StereoTargetFusionSettings.default
     @Published var stereoToRigAlignment: StereoToRigAlignment = .invalid
@@ -329,7 +344,10 @@ final class RotoMotionViewModel: ObservableObject {
         didSet { persist(solveTargetMode.rawValue, AppStorageKeys.solveTargetMode) }
     }
     @Published var showStereo3DSkeleton = true {
-        didSet { persist(showStereo3DSkeleton, AppStorageKeys.showStereo3DSkeleton) }
+        didSet {
+            persist(showStereo3DSkeleton, AppStorageKeys.showStereo3DSkeleton)
+            visibilityToggleChanged(name: "showStereo3DSkeleton", value: showStereo3DSkeleton)
+        }
     }
     @Published var stereoVisionStatus = "No stereo Vision solve yet."
 
@@ -365,25 +383,46 @@ final class RotoMotionViewModel: ObservableObject {
     }
 
     @Published var showRawVisionPoints = true {
-        didSet { persist(showRawVisionPoints, AppStorageKeys.showRawVisionPoints) }
+        didSet {
+            persist(showRawVisionPoints, AppStorageKeys.showRawVisionPoints)
+            visibilityToggleChanged(name: "showRawVisionPoints", value: showRawVisionPoints)
+        }
     }
     @Published var showNormalizedMeshyPoints = true {
-        didSet { persist(showNormalizedMeshyPoints, AppStorageKeys.showNormalizedMeshyPoints) }
+        didSet {
+            persist(showNormalizedMeshyPoints, AppStorageKeys.showNormalizedMeshyPoints)
+            visibilityToggleChanged(name: "showNormalizedMeshyPoints", value: showNormalizedMeshyPoints)
+        }
     }
     @Published var showSmoothedMeshyPoints = true {
-        didSet { persist(showSmoothedMeshyPoints, AppStorageKeys.showSmoothedMeshyPoints) }
+        didSet {
+            persist(showSmoothedMeshyPoints, AppStorageKeys.showSmoothedMeshyPoints)
+            visibilityToggleChanged(name: "showSmoothedMeshyPoints", value: showSmoothedMeshyPoints)
+        }
     }
     @Published var showSmoothingDeltaVectors = true {
-        didSet { persist(showSmoothingDeltaVectors, AppStorageKeys.showSmoothingDeltaVectors) }
+        didSet {
+            persist(showSmoothingDeltaVectors, AppStorageKeys.showSmoothingDeltaVectors)
+            visibilityToggleChanged(name: "showSmoothingDeltaVectors", value: showSmoothingDeltaVectors)
+        }
     }
     @Published var showImportedRigModel = true {
-        didSet { persist(showImportedRigModel, AppStorageKeys.showImportedRigModel) }
+        didSet {
+            persist(showImportedRigModel, AppStorageKeys.showImportedRigModel)
+            visibilityToggleChanged(name: "showImportedRigModel", value: showImportedRigModel)
+        }
     }
     @Published var showImportedRigSkeleton = true {
-        didSet { persist(showImportedRigSkeleton, AppStorageKeys.showImportedRigSkeleton) }
+        didSet {
+            persist(showImportedRigSkeleton, AppStorageKeys.showImportedRigSkeleton)
+            visibilityToggleChanged(name: "showImportedRigSkeleton", value: showImportedRigSkeleton)
+        }
     }
     @Published var showFittedRig = true {
-        didSet { persist(showFittedRig, AppStorageKeys.showFittedRig) }
+        didSet {
+            persist(showFittedRig, AppStorageKeys.showFittedRig)
+            visibilityToggleChanged(name: "showFittedRig", value: showFittedRig)
+        }
     }
     @Published var rigOverlayScale = 1.0 {
         didSet { persist(rigOverlayScale, AppStorageKeys.rigOverlayScale) }
@@ -457,10 +496,16 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var skinnedRigSession: SkinnedRigSession?
     @Published var skinnedRigStatus = "No skinned rig loaded."
     @Published var showSkinnedRig = true {
-        didSet { persist(showSkinnedRig, AppStorageKeys.showSkinnedRig) }
+        didSet {
+            persist(showSkinnedRig, AppStorageKeys.showSkinnedRig)
+            visibilityToggleChanged(name: "showSkinnedRig", value: showSkinnedRig)
+        }
     }
     @Published var showSkinnedGeometry = true {
-        didSet { persist(showSkinnedGeometry, AppStorageKeys.showSkinnedGeometry) }
+        didSet {
+            persist(showSkinnedGeometry, AppStorageKeys.showSkinnedGeometry)
+            visibilityToggleChanged(name: "showSkinnedGeometry", value: showSkinnedGeometry)
+        }
     }
     @Published var viewportZoom: Double = 2.0 {
         didSet { persist(viewportZoom, AppStorageKeys.viewportZoom) }
@@ -561,7 +606,9 @@ final class RotoMotionViewModel: ObservableObject {
     @Published var rotationAuthoringStatus = "No held rotation override." {
         didSet { persist(rotationAuthoringStatus, AppStorageKeys.rotationAuthoringStatus) }
     }
-    @Published var showRotationGizmo = true
+    @Published var showRotationGizmo = true {
+        didSet { visibilityToggleChanged(name: "showRotationGizmo", value: showRotationGizmo) }
+    }
     @Published var rotationGizmoSpace: RotationGizmoSpace = .local
     @Published var rotationGizmoStatus = "No rotation gizmo interaction."
     @Published var heldRotationOverrideEulerXYZByJoint: [String: SIMD3<Float>] = [:]
@@ -588,13 +635,22 @@ final class RotoMotionViewModel: ObservableObject {
     }
 
     @Published var showVisionRays = true {
-        didSet { persist(showVisionRays, AppStorageKeys.showVisionRays) }
+        didSet {
+            persist(showVisionRays, AppStorageKeys.showVisionRays)
+            visibilityToggleChanged(name: "showVisionRays", value: showVisionRays)
+        }
     }
     @Published var showRaySolvedRig = true {
-        didSet { persist(showRaySolvedRig, AppStorageKeys.showRaySolvedRig) }
+        didSet {
+            persist(showRaySolvedRig, AppStorageKeys.showRaySolvedRig)
+            visibilityToggleChanged(name: "showRaySolvedRig", value: showRaySolvedRig)
+        }
     }
     @Published var showDebugSolvedSkeleton = false {
-        didSet { persist(showDebugSolvedSkeleton, AppStorageKeys.showDebugSolvedSkeleton) }
+        didSet {
+            persist(showDebugSolvedSkeleton, AppStorageKeys.showDebugSolvedSkeleton)
+            visibilityToggleChanged(name: "showDebugSolvedSkeleton", value: showDebugSolvedSkeleton)
+        }
     }
     @Published var rayLength = Double(RotoRayRigSolver.defaultRayLength) {
         didSet { persist(rayLength, AppStorageKeys.rayLength) }
@@ -3174,6 +3230,22 @@ final class RotoMotionViewModel: ObservableObject {
         viewportRefreshRevision &+= 1
         lastViewportRefreshReason = reason
         objectWillChange.send()
+    }
+
+    private func visibilityToggleChanged(
+        name: String,
+        value: Bool
+    ) {
+        visibilityControlChanged(name: "\(name)=\(value)")
+    }
+
+    private func visibilityControlChanged(name: String) {
+        guard !suppressSessionDirtyTracking else {
+            return
+        }
+
+        visibilityToggleRevision &+= 1
+        requestViewportRefresh(reason: "visibility changed \(name)")
     }
 
     @MainActor

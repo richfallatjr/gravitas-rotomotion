@@ -109,24 +109,21 @@ struct ContentView: View {
             }
             .disabled(runVisionDisabledReason != nil)
 
-            Button("Normalize Meshy24") {
-                roto.normalize()
+            Button("Solve Full Animation") {
+                Task {
+                    await roto.solveFullAnimationWithCameraRays()
+                    uiStatus = roto.status
+                    pipelineRenderToken += 1
+                }
+            }
+            .disabled(!canSolveFullAnimation)
+
+            Button("Bake Rig Animation For Export") {
+                roto.bakeLiveRigAnimationForExport()
+                uiStatus = roto.status
                 pipelineRenderToken += 1
-                uiStatus = roto.status
             }
-            .disabled(normalizeDisabledReason != nil)
-
-            Button("Save Raw Vision") {
-                roto.saveRawJSON()
-                uiStatus = roto.status
-            }
-            .disabled(roto.rawCapture == nil)
-
-            Button("Save Normalized") {
-                roto.saveNormalizedJSON()
-                uiStatus = roto.status
-            }
-            .disabled(roto.normalizedCapture == nil)
+            .disabled(!canBakeRigAnimationForExport)
 
             Spacer()
         }
@@ -199,6 +196,7 @@ struct ContentView: View {
                 rotationOverrideRevision: roto.rotationOverrideRevision,
                 rotationKeyRevision: roto.rotationKeyRevision,
                 spatialDepthControlRevision: roto.spatialDepthControlRevision,
+                visibilityToggleRevision: roto.visibilityToggleRevision,
                 solveInputRevision: roto.solveInputRevision,
                 disparityProgressRevision: roto.disparityProgressRevision,
                 lastViewportRefreshReason: roto.lastViewportRefreshReason,
@@ -1226,6 +1224,15 @@ struct ContentView: View {
             hasBakeSourceForCurrentMode
     }
 
+    private var canSolveFullAnimation: Bool {
+        roto.currentVideoPlaneSize != nil &&
+            (
+                roto.captureMode == .spatialVideo
+                    ? roto.normalizedLeftCapture != nil
+                    : roto.normalizedCapture != nil
+            )
+    }
+
     private var canExportAnimatedTargetUSDZ: Bool {
         roto.bakedRigAnimation != nil &&
             roto.sessionPoseSource == .posedArmatureLocalTransforms
@@ -1272,14 +1279,7 @@ struct ContentView: View {
                         pipelineRenderToken += 1
                     }
                 }
-                .disabled(
-                    roto.currentVideoPlaneSize == nil ||
-                    (
-                        roto.captureMode == .spatialVideo
-                            ? roto.normalizedLeftCapture == nil
-                            : roto.normalizedCapture == nil
-                    )
-                )
+                .disabled(!canSolveFullAnimation)
 
                 Button("Clear Ray Animation") {
                     roto.rayAnimationSolveResult = nil
