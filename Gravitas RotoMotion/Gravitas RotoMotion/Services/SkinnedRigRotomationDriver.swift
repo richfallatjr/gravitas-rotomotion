@@ -181,6 +181,7 @@ struct DepthGuidedRayPinSolveStats {
     let depthFitZoom: Float
     let depthFitOffset: Float
     let depthFitPivotSceneDepth: Float
+    let manualCameraOffsetWorld: SIMD3<Float>
     let depthFitScore: Float
     let depthFitBoneResidualMean: Float
     let depthFitBoneResidualMax: Float
@@ -520,8 +521,7 @@ enum SkinnedRigRotomationDriver {
         videoPlaneZ: Float,
         depthFitSettings: SpatialRayPinDepthFitSettings = .default,
         autoDepthFitEnabled: Bool = true,
-        manualDepthZoom: Float = 1,
-        manualDepthOffset: Float = 0,
+        manualCameraOffsetWorld: SIMD3<Float> = SIMD3<Float>(0, 0, 0),
         iterations: Int = 8
     ) -> DepthGuidedRayPinSolveStats {
         SCNTransaction.begin()
@@ -558,6 +558,7 @@ enum SkinnedRigRotomationDriver {
         var remap = DisparityDepthRemap.invalid
         var autoDepthFitAdjustment = DisparityDepthFitAdjustment.identity
         var depthFitAdjustment = DisparityDepthFitAdjustment.identity
+        var didAcceptExactDepthPass = false
 
         if depthMode == .disparityDepthGuided {
             var bestSnapshot = makePoseSnapshot(session)
@@ -600,9 +601,7 @@ enum SkinnedRigRotomationDriver {
 
                 depthFitAdjustment = composeDepthFitAdjustment(
                     autoAdjustment: autoDepthFitAdjustment,
-                    autoDepthFitEnabled: autoDepthFitEnabled,
-                    manualDepthZoom: manualDepthZoom,
-                    manualDepthOffset: manualDepthOffset
+                    autoDepthFitEnabled: autoDepthFitEnabled
                 )
 
                 depthFitAdjustment = scoreDepthFitAdjustment(
@@ -631,6 +630,7 @@ enum SkinnedRigRotomationDriver {
                     remap: remap,
                     adjustment: depthFitAdjustment,
                     session: session,
+                    manualCameraOffsetWorld: manualCameraOffsetWorld,
                     iterations: iterations
                 )
 
@@ -639,7 +639,8 @@ enum SkinnedRigRotomationDriver {
                     rays: rays,
                     depthGuidance: depthGuidance,
                     remap: remap,
-                    adjustment: depthFitAdjustment
+                    adjustment: depthFitAdjustment,
+                    manualCameraOffsetWorld: manualCameraOffsetWorld
                 )
 
                 if normalizedFrame.frameIndex == 0 || normalizedFrame.frameIndex % 30 == 0 {
@@ -649,8 +650,7 @@ enum SkinnedRigRotomationDriver {
                       pass: \(pass)
                       autoDepthZoom: \(autoDepthFitAdjustment.depthZoom)
                       autoDepthOffset: \(autoDepthFitAdjustment.depthOffset)
-                      manualDepthZoom: \(manualDepthZoom)
-                      manualDepthOffset: \(manualDepthOffset)
+                      manualCameraOffsetWorld: \(manualCameraOffsetWorld)
                       depthZoom: \(depthFitAdjustment.depthZoom)
                       depthOffset: \(depthFitAdjustment.depthOffset)
                       fitScore: \(depthFitAdjustment.score)
@@ -684,7 +684,13 @@ enum SkinnedRigRotomationDriver {
                 remap = bestRemap
                 autoDepthFitAdjustment = bestAutoAdjustment
                 depthFitAdjustment = bestAdjustment
+                didAcceptExactDepthPass = true
             }
+        }
+
+        if !didAcceptExactDepthPass,
+           simd_length_squared(manualCameraOffsetWorld) > 0.0000001 {
+            session.displayRootNode.simdPosition += manualCameraOffsetWorld
         }
 
         SCNTransaction.commit()
@@ -697,7 +703,8 @@ enum SkinnedRigRotomationDriver {
             autoAdjustment: autoDepthFitAdjustment,
             adjustment: depthFitAdjustment,
             frameIndex: normalizedFrame.frameIndex,
-            depthMode: depthMode
+            depthMode: depthMode,
+            manualCameraOffsetWorld: manualCameraOffsetWorld
         )
 
         logExactDepthRayPinFit(
@@ -709,8 +716,7 @@ enum SkinnedRigRotomationDriver {
             autoAdjustment: autoDepthFitAdjustment,
             adjustment: depthFitAdjustment,
             autoDepthFitEnabled: autoDepthFitEnabled,
-            manualDepthZoom: manualDepthZoom,
-            manualDepthOffset: manualDepthOffset,
+            manualCameraOffsetWorld: manualCameraOffsetWorld,
             depthMode: depthMode
         )
 
@@ -897,6 +903,7 @@ enum SkinnedRigRotomationDriver {
         remap: DisparityDepthRemap,
         adjustment: DisparityDepthFitAdjustment,
         session: SkinnedRigSession,
+        manualCameraOffsetWorld: SIMD3<Float>,
         iterations: Int
     ) {
         placePelvisFromExactRayDepthTargets(
@@ -904,7 +911,8 @@ enum SkinnedRigRotomationDriver {
             rays: rays,
             depthGuidance: depthGuidance,
             remap: remap,
-            adjustment: adjustment
+            adjustment: adjustment,
+            manualCameraOffsetWorld: manualCameraOffsetWorld
         )
 
         for _ in 0..<iterations {
@@ -914,7 +922,8 @@ enum SkinnedRigRotomationDriver {
                 depthGuidance: depthGuidance,
                 remap: remap,
                 adjustment: adjustment,
-                session: session
+                session: session,
+                manualCameraOffsetWorld: manualCameraOffsetWorld
             )
             solveExactDepthRayChain(
                 ["RightUpLeg", "RightLeg", "RightFoot", "RightToeBase"],
@@ -922,7 +931,8 @@ enum SkinnedRigRotomationDriver {
                 depthGuidance: depthGuidance,
                 remap: remap,
                 adjustment: adjustment,
-                session: session
+                session: session,
+                manualCameraOffsetWorld: manualCameraOffsetWorld
             )
             solveExactDepthRayChain(
                 ["Hips", "Spine02", "Spine01", "Spine", "neck", "Head", "headfront"],
@@ -930,7 +940,8 @@ enum SkinnedRigRotomationDriver {
                 depthGuidance: depthGuidance,
                 remap: remap,
                 adjustment: adjustment,
-                session: session
+                session: session,
+                manualCameraOffsetWorld: manualCameraOffsetWorld
             )
             solveExactDepthRayChain(
                 ["LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand"],
@@ -938,7 +949,8 @@ enum SkinnedRigRotomationDriver {
                 depthGuidance: depthGuidance,
                 remap: remap,
                 adjustment: adjustment,
-                session: session
+                session: session,
+                manualCameraOffsetWorld: manualCameraOffsetWorld
             )
             solveExactDepthRayChain(
                 ["RightShoulder", "RightArm", "RightForeArm", "RightHand"],
@@ -946,7 +958,8 @@ enum SkinnedRigRotomationDriver {
                 depthGuidance: depthGuidance,
                 remap: remap,
                 adjustment: adjustment,
-                session: session
+                session: session,
+                manualCameraOffsetWorld: manualCameraOffsetWorld
             )
         }
     }
@@ -1146,29 +1159,17 @@ enum SkinnedRigRotomationDriver {
 
     private static func composeDepthFitAdjustment(
         autoAdjustment: DisparityDepthFitAdjustment,
-        autoDepthFitEnabled: Bool,
-        manualDepthZoom: Float,
-        manualDepthOffset: Float
+        autoDepthFitEnabled: Bool
     ) -> DisparityDepthFitAdjustment {
-        let clampedManualZoom = max(0.25, min(3.0, manualDepthZoom))
-        let clampedManualOffset = max(-8.0, min(8.0, manualDepthOffset))
-        let baseZoom: Float
-        let baseOffset: Float
-        let basePivot = autoAdjustment.pivotSceneDepth
-
         if autoDepthFitEnabled {
-            baseZoom = autoAdjustment.depthZoom
-            baseOffset = autoAdjustment.depthOffset
-        } else {
-            baseZoom = 1
-            baseOffset = 0
+            return autoAdjustment
         }
 
         return DisparityDepthFitAdjustment(
             valid: autoAdjustment.valid,
-            depthZoom: baseZoom * clampedManualZoom,
-            depthOffset: baseOffset + clampedManualOffset,
-            pivotSceneDepth: basePivot,
+            depthZoom: 1,
+            depthOffset: 0,
+            pivotSceneDepth: autoAdjustment.pivotSceneDepth,
             score: autoAdjustment.score,
             boneResidualMean: autoAdjustment.boneResidualMean,
             boneResidualMax: autoAdjustment.boneResidualMax,
@@ -1237,7 +1238,8 @@ enum SkinnedRigRotomationDriver {
         rays: [String: JointRay],
         depthGuidance: [String: RayPinDepthGuidance],
         remap: DisparityDepthRemap,
-        adjustment: DisparityDepthFitAdjustment
+        adjustment: DisparityDepthFitAdjustment,
+        manualCameraOffsetWorld: SIMD3<Float>
     ) -> ExactDepthSolveEvaluation {
         var exactResiduals: [Float] = []
         var rayDistances: [Float] = []
@@ -1263,7 +1265,8 @@ enum SkinnedRigRotomationDriver {
                 ray: ray,
                 guidance: depthGuidance[jointName],
                 remap: remap,
-                adjustment: adjustment
+                adjustment: adjustment,
+                manualCameraOffsetWorld: manualCameraOffsetWorld
             ) {
                 let exactResidual = simd_length(bone.simdWorldPosition - exact.point)
 
@@ -1336,7 +1339,8 @@ enum SkinnedRigRotomationDriver {
         depthGuidance: [String: RayPinDepthGuidance],
         remap: DisparityDepthRemap,
         adjustment: DisparityDepthFitAdjustment,
-        session: SkinnedRigSession
+        session: SkinnedRigSession,
+        manualCameraOffsetWorld: SIMD3<Float>
     ) {
         guard chain.count >= 2 else {
             return
@@ -1357,7 +1361,8 @@ enum SkinnedRigRotomationDriver {
                 ray: childRay,
                 guidance: depthGuidance[childName],
                 remap: remap,
-                adjustment: adjustment
+                adjustment: adjustment,
+                manualCameraOffsetWorld: manualCameraOffsetWorld
             ) {
                 childTarget = exact.point
             } else {
@@ -1379,7 +1384,7 @@ enum SkinnedRigRotomationDriver {
                     parentWorld: parentWorld,
                     currentChildWorld: childWorld,
                     boneLength: boneLength
-                )
+                ) + manualCameraOffsetWorld
             }
 
             for ancestorIndex in stride(
@@ -1407,7 +1412,8 @@ enum SkinnedRigRotomationDriver {
         ray: JointRay,
         guidance: RayPinDepthGuidance?,
         remap: DisparityDepthRemap,
-        adjustment: DisparityDepthFitAdjustment
+        adjustment: DisparityDepthFitAdjustment,
+        manualCameraOffsetWorld: SIMD3<Float>
     ) -> ExactRayDepthTarget? {
         guard let guidance,
               let point = exactRayDepthPoint(
@@ -1423,7 +1429,7 @@ enum SkinnedRigRotomationDriver {
 
         return ExactRayDepthTarget(
             jointName: jointName,
-            point: point,
+            point: point + manualCameraOffsetWorld,
             depthMeters: depthMeters,
             source: guidance.source,
             confidence: guidance.confidence
@@ -1435,7 +1441,8 @@ enum SkinnedRigRotomationDriver {
         rays: [String: JointRay],
         depthGuidance: [String: RayPinDepthGuidance],
         remap: DisparityDepthRemap,
-        adjustment: DisparityDepthFitAdjustment
+        adjustment: DisparityDepthFitAdjustment,
+        manualCameraOffsetWorld: SIMD3<Float>
     ) {
         let joints = [
             "Hips",
@@ -1452,7 +1459,8 @@ enum SkinnedRigRotomationDriver {
                     ray: ray,
                     guidance: depthGuidance[jointName],
                     remap: remap,
-                    adjustment: adjustment
+                    adjustment: adjustment,
+                    manualCameraOffsetWorld: manualCameraOffsetWorld
                   ) else {
                 continue
             }
@@ -2151,7 +2159,8 @@ enum SkinnedRigRotomationDriver {
         autoAdjustment: DisparityDepthFitAdjustment,
         adjustment: DisparityDepthFitAdjustment,
         frameIndex: Int,
-        depthMode: SpatialRayPinDepthMode
+        depthMode: SpatialRayPinDepthMode,
+        manualCameraOffsetWorld: SIMD3<Float>
     ) -> DepthGuidedRayPinSolveStats {
         var worst = "none"
         var worstError: Float = 0
@@ -2201,6 +2210,7 @@ enum SkinnedRigRotomationDriver {
             depthFitZoom: adjustment.depthZoom,
             depthFitOffset: adjustment.depthOffset,
             depthFitPivotSceneDepth: adjustment.pivotSceneDepth,
+            manualCameraOffsetWorld: manualCameraOffsetWorld,
             depthFitScore: adjustment.score,
             depthFitBoneResidualMean: adjustment.boneResidualMean,
             depthFitBoneResidualMax: adjustment.boneResidualMax,
@@ -2220,8 +2230,7 @@ enum SkinnedRigRotomationDriver {
         autoAdjustment: DisparityDepthFitAdjustment,
         adjustment: DisparityDepthFitAdjustment,
         autoDepthFitEnabled: Bool,
-        manualDepthZoom: Float,
-        manualDepthOffset: Float,
+        manualCameraOffsetWorld: SIMD3<Float>,
         depthMode: SpatialRayPinDepthMode
     ) {
         guard stats.frameIndex == 0 || stats.frameIndex % 30 == 0 else {
@@ -2249,11 +2258,16 @@ enum SkinnedRigRotomationDriver {
         """)
 
         print("""
-        [DepthGuidedRayPinning] depth pan zoom controls
+        [DepthGuidedRayPinning] manual camera offset
+          frame: \(stats.frameIndex)
+          offsetWorld: \(manualCameraOffsetWorld)
+          exact targets include manual offset: true
+        """)
+
+        print("""
+        [DepthGuidedRayPinning] depth fit controls
           frame: \(stats.frameIndex)
           autoDepthFitEnabled: \(autoDepthFitEnabled)
-          manualDepthZoom: \(manualDepthZoom)
-          manualDepthOffset: \(manualDepthOffset)
           autoDepthZoom: \(autoAdjustment.depthZoom)
           autoDepthOffset: \(autoAdjustment.depthOffset)
           finalDepthZoom: \(adjustment.depthZoom)
@@ -2280,7 +2294,8 @@ enum SkinnedRigRotomationDriver {
             rays: rays,
             depthGuidance: depthGuidance,
             remap: remap,
-            adjustment: adjustment
+            adjustment: adjustment,
+            manualCameraOffsetWorld: manualCameraOffsetWorld
         )
     }
 
@@ -2289,7 +2304,8 @@ enum SkinnedRigRotomationDriver {
         rays: [String: JointRay],
         depthGuidance: [String: RayPinDepthGuidance],
         remap: DisparityDepthRemap,
-        adjustment: DisparityDepthFitAdjustment
+        adjustment: DisparityDepthFitAdjustment,
+        manualCameraOffsetWorld: SIMD3<Float>
     ) {
         let joints = [
             "Hips",
@@ -2318,7 +2334,8 @@ enum SkinnedRigRotomationDriver {
                     ray: ray,
                     guidance: guidance,
                     remap: remap,
-                    adjustment: adjustment
+                    adjustment: adjustment,
+                    manualCameraOffsetWorld: manualCameraOffsetWorld
                   ),
                   let bone = session.bonesByCanonicalName[jointName] else {
                 continue

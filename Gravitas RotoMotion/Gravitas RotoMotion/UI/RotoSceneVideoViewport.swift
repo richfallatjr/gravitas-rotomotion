@@ -121,7 +121,10 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let viewportRefreshRevision: Int
     let rotationOverrideRevision: Int
     let rotationKeyRevision: Int
+    let selectedJointRotationFieldRevision: Int
     let spatialDepthControlRevision: Int
+    let spatialCameraOffsetRevision: Int
+    let spatialSolveTriggerRevision: Int
     let visibilityToggleRevision: Int
     let solveInputRevision: Int
     let disparityProgressRevision: Int
@@ -154,8 +157,9 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
     let spatialRayPinDepthMode: SpatialRayPinDepthMode
     let spatialRayPinDepthFitSettings: SpatialRayPinDepthFitSettings
     let autoSpatialDepthFitEnabled: Bool
-    let manualSpatialDepthZoom: Double
-    let manualSpatialDepthOffset: Double
+    let manualSpatialCameraPanX: Double
+    let manualSpatialCameraPanY: Double
+    let manualSpatialCameraDepthZ: Double
     let rotationGizmoSpace: RotationGizmoSpace
     let selectedRotationJoint: String
     let onRotationGizmoEulerChanged: (_ joint: String, _ eulerXYZ: SIMD3<Float>) -> Void
@@ -223,7 +227,10 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             viewportRefreshRevision: viewportRefreshRevision,
             rotationOverrideRevision: rotationOverrideRevision,
             rotationKeyRevision: rotationKeyRevision,
+            selectedJointRotationFieldRevision: selectedJointRotationFieldRevision,
             spatialDepthControlRevision: spatialDepthControlRevision,
+            spatialCameraOffsetRevision: spatialCameraOffsetRevision,
+            spatialSolveTriggerRevision: spatialSolveTriggerRevision,
             visibilityToggleRevision: visibilityToggleRevision,
             solveInputRevision: solveInputRevision,
             disparityProgressRevision: disparityProgressRevision,
@@ -255,8 +262,9 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             spatialRayPinDepthMode: spatialRayPinDepthMode,
             spatialRayPinDepthFitSettings: spatialRayPinDepthFitSettings,
             autoSpatialDepthFitEnabled: autoSpatialDepthFitEnabled,
-            manualSpatialDepthZoom: manualSpatialDepthZoom,
-            manualSpatialDepthOffset: manualSpatialDepthOffset,
+            manualSpatialCameraPanX: manualSpatialCameraPanX,
+            manualSpatialCameraPanY: manualSpatialCameraPanY,
+            manualSpatialCameraDepthZ: manualSpatialCameraDepthZ,
             rotationGizmoSpace: rotationGizmoSpace,
             selectedRotationJoint: selectedRotationJoint
         )
@@ -333,6 +341,7 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
         private var lastRotationOverrideLogSignature: String?
         private var currentDisparityOverlaySignature: String?
         private var lastFrameApplicationSignature: FrameApplicationSignature?
+        private var lastSpatialSolveSignature: SpatialSolveSignature?
 
         private struct FrameApplicationSignature: Equatable {
             let frameIndex: Int
@@ -342,14 +351,34 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             let viewportRefreshRevision: Int
             let rotationOverrideRevision: Int
             let rotationKeyRevision: Int
+            let selectedJointRotationFieldRevision: Int
             let spatialDepthControlRevision: Int
+            let spatialCameraOffsetRevision: Int
+            let spatialSolveTriggerRevision: Int
             let visibilityToggleRevision: Int
             let solveInputRevision: Int
             let showSkinnedRig: Bool
             let showSkinnedGeometry: Bool
-            let manualDepthZoomRounded: Int
-            let manualDepthOffsetRounded: Int
+            let panXRounded: Int
+            let panYRounded: Int
+            let depthZRounded: Int
             let autoDepthFitEnabled: Bool
+        }
+
+        private struct SpatialSolveSignature: Equatable {
+            let frameIndex: Int
+            let timeMilliseconds: Int
+            let solveTargetMode: String
+            let depthMode: String
+            let autoDepthFitEnabled: Bool
+            let panXRounded: Int
+            let panYRounded: Int
+            let depthZRounded: Int
+            let spatialDepthControlRevision: Int
+            let spatialCameraOffsetRevision: Int
+            let spatialSolveTriggerRevision: Int
+            let viewportRefreshRevision: Int
+            let evidenceFrameIndex: Int?
         }
 
         func makeView() -> SCNView {
@@ -516,7 +545,10 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             viewportRefreshRevision: Int,
             rotationOverrideRevision: Int,
             rotationKeyRevision: Int,
+            selectedJointRotationFieldRevision: Int,
             spatialDepthControlRevision: Int,
+            spatialCameraOffsetRevision: Int,
+            spatialSolveTriggerRevision: Int,
             visibilityToggleRevision: Int,
             solveInputRevision: Int,
             disparityProgressRevision: Int,
@@ -548,8 +580,9 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             spatialRayPinDepthMode: SpatialRayPinDepthMode,
             spatialRayPinDepthFitSettings: SpatialRayPinDepthFitSettings,
             autoSpatialDepthFitEnabled: Bool,
-            manualSpatialDepthZoom: Double,
-            manualSpatialDepthOffset: Double,
+            manualSpatialCameraPanX: Double,
+            manualSpatialCameraPanY: Double,
+            manualSpatialCameraDepthZ: Double,
             rotationGizmoSpace: RotationGizmoSpace,
             selectedRotationJoint: String
         ) {
@@ -598,13 +631,17 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 viewportRefreshRevision: viewportRefreshRevision,
                 rotationOverrideRevision: rotationOverrideRevision,
                 rotationKeyRevision: rotationKeyRevision,
+                selectedJointRotationFieldRevision: selectedJointRotationFieldRevision,
                 spatialDepthControlRevision: spatialDepthControlRevision,
+                spatialCameraOffsetRevision: spatialCameraOffsetRevision,
+                spatialSolveTriggerRevision: spatialSolveTriggerRevision,
                 visibilityToggleRevision: visibilityToggleRevision,
                 solveInputRevision: solveInputRevision,
                 showSkinnedRig: showSkinnedRig,
                 showSkinnedGeometry: showSkinnedGeometry,
-                manualDepthZoomRounded: Int((manualSpatialDepthZoom * 10000).rounded()),
-                manualDepthOffsetRounded: Int((manualSpatialDepthOffset * 10000).rounded()),
+                panXRounded: Int((manualSpatialCameraPanX * 10000).rounded()),
+                panYRounded: Int((manualSpatialCameraPanY * 10000).rounded()),
+                depthZRounded: Int((manualSpatialCameraDepthZ * 10000).rounded()),
                 autoDepthFitEnabled: autoSpatialDepthFitEnabled
             )
             let previousFrameApplicationSignature = lastFrameApplicationSignature
@@ -620,9 +657,25 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                   viewportRefreshRevision: \(viewportRefreshRevision)
                   rotationOverrideRevision: \(rotationOverrideRevision)
                   rotationKeyRevision: \(rotationKeyRevision)
+                  selectedJointRotationFieldRevision: \(selectedJointRotationFieldRevision)
                   spatialDepthControlRevision: \(spatialDepthControlRevision)
+                  spatialCameraOffsetRevision: \(spatialCameraOffsetRevision)
+                  spatialSolveTriggerRevision: \(spatialSolveTriggerRevision)
                   visibilityToggleRevision: \(visibilityToggleRevision)
                 """)
+
+                if previousFrameApplicationSignature.rotationOverrideRevision != frameApplicationSignature.rotationOverrideRevision ||
+                    previousFrameApplicationSignature.rotationKeyRevision != frameApplicationSignature.rotationKeyRevision ||
+                    previousFrameApplicationSignature.selectedJointRotationFieldRevision != frameApplicationSignature.selectedJointRotationFieldRevision {
+                    print("""
+                    [RotoSceneVideoViewport] rotation authoring static-frame refresh
+                      frame: \(frameIndex)
+                      viewportRefreshRevision: \(viewportRefreshRevision)
+                      rotationOverrideRevision: \(rotationOverrideRevision)
+                      rotationKeyRevision: \(rotationKeyRevision)
+                      selectedJointRotationFieldRevision: \(selectedJointRotationFieldRevision)
+                    """)
+                }
             }
 
             updateGroundPlane(groundPlane: groundPlane, visible: showGroundPlane)
@@ -640,8 +693,13 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                 spatialRayPinDepthMode: spatialRayPinDepthMode,
                 spatialRayPinDepthFitSettings: spatialRayPinDepthFitSettings,
                 autoSpatialDepthFitEnabled: autoSpatialDepthFitEnabled,
-                manualSpatialDepthZoom: manualSpatialDepthZoom,
-                manualSpatialDepthOffset: manualSpatialDepthOffset,
+                manualSpatialCameraPanX: manualSpatialCameraPanX,
+                manualSpatialCameraPanY: manualSpatialCameraPanY,
+                manualSpatialCameraDepthZ: manualSpatialCameraDepthZ,
+                spatialCameraOffsetRevision: spatialCameraOffsetRevision,
+                spatialDepthControlRevision: spatialDepthControlRevision,
+                spatialSolveTriggerRevision: spatialSolveTriggerRevision,
+                viewportRefreshRevision: viewportRefreshRevision,
                 referenceRigScaleMultiplier: referenceRigScaleMultiplier,
                 referenceRigX: referenceRigX,
                 referenceRigY: referenceRigY,
@@ -2091,8 +2149,13 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             spatialRayPinDepthMode: SpatialRayPinDepthMode,
             spatialRayPinDepthFitSettings: SpatialRayPinDepthFitSettings,
             autoSpatialDepthFitEnabled: Bool,
-            manualSpatialDepthZoom: Double,
-            manualSpatialDepthOffset: Double,
+            manualSpatialCameraPanX: Double,
+            manualSpatialCameraPanY: Double,
+            manualSpatialCameraDepthZ: Double,
+            spatialCameraOffsetRevision: Int,
+            spatialDepthControlRevision: Int,
+            spatialSolveTriggerRevision: Int,
+            viewportRefreshRevision: Int,
             referenceRigScaleMultiplier: Double,
             referenceRigX: Double,
             referenceRigY: Double,
@@ -2154,6 +2217,58 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             if applySolvedPoseToReferenceRig,
                solveTargetMode == .spatialDepthGuidedRayPinned,
                let normalizedFrame {
+                let spatialSignature = SpatialSolveSignature(
+                    frameIndex: normalizedFrame.frameIndex,
+                    timeMilliseconds: Int((normalizedFrame.timeSeconds * 1000).rounded()),
+                    solveTargetMode: solveTargetMode.rawValue,
+                    depthMode: spatialRayPinDepthMode.rawValue,
+                    autoDepthFitEnabled: autoSpatialDepthFitEnabled,
+                    panXRounded: Int((manualSpatialCameraPanX * 10000).rounded()),
+                    panYRounded: Int((manualSpatialCameraPanY * 10000).rounded()),
+                    depthZRounded: Int((manualSpatialCameraDepthZ * 10000).rounded()),
+                    spatialDepthControlRevision: spatialDepthControlRevision,
+                    spatialCameraOffsetRevision: spatialCameraOffsetRevision,
+                    spatialSolveTriggerRevision: spatialSolveTriggerRevision,
+                    viewportRefreshRevision: viewportRefreshRevision,
+                    evidenceFrameIndex: jointDepthEvidenceFrame?.frameIndex
+                )
+                let previousSpatialSignature = lastSpatialSolveSignature
+                let mustRecomputeSpatialSolve = spatialSignature != previousSpatialSignature
+
+                if mustRecomputeSpatialSolve {
+                    print("""
+                    [RotoSceneVideoViewport] spatial solve recompute
+                      frame: \(normalizedFrame.frameIndex)
+                      sameFrame: \(previousSpatialSignature?.frameIndex == spatialSignature.frameIndex)
+                      autoDepthFitEnabled: \(autoSpatialDepthFitEnabled)
+                      panX: \(manualSpatialCameraPanX)
+                      panY: \(manualSpatialCameraPanY)
+                      depthZ: \(manualSpatialCameraDepthZ)
+                      spatialCameraOffsetRevision: \(spatialCameraOffsetRevision)
+                      spatialDepthControlRevision: \(spatialDepthControlRevision)
+                      spatialSolveTriggerRevision: \(spatialSolveTriggerRevision)
+                      viewportRefreshRevision: \(viewportRefreshRevision)
+                    """)
+                }
+
+                let manualOffsetWorld = cameraSpaceManualOffsetWorld(
+                    cameraNode: cameraNode,
+                    panX: manualSpatialCameraPanX,
+                    panY: manualSpatialCameraPanY,
+                    depthZ: manualSpatialCameraDepthZ
+                )
+
+                if mustRecomputeSpatialSolve {
+                    print("""
+                    [RotoSceneVideoViewport] manual spatial camera offset
+                      panX: \(manualSpatialCameraPanX)
+                      panY: \(manualSpatialCameraPanY)
+                      depthZ: \(manualSpatialCameraDepthZ)
+                      offsetWorld: \(manualOffsetWorld)
+                      sign: depthZ positive = toward camera
+                    """)
+                }
+
                 session.displayRootNode.isHidden = !visible
                 updateSkinnedGeometryVisibility(
                     session: session,
@@ -2172,9 +2287,29 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
                     videoPlaneZ: currentVideoPlaneZ,
                     depthFitSettings: spatialRayPinDepthFitSettings,
                     autoDepthFitEnabled: autoSpatialDepthFitEnabled,
-                    manualDepthZoom: Float(manualSpatialDepthZoom),
-                    manualDepthOffset: Float(manualSpatialDepthOffset)
+                    manualCameraOffsetWorld: manualOffsetWorld
                 )
+
+                if mustRecomputeSpatialSolve {
+                    print("""
+                    [RotoSceneVideoViewport] camera offset reached driver
+                      frame: \(normalizedFrame.frameIndex)
+                      autoDepthFitEnabled: \(autoSpatialDepthFitEnabled)
+                      panX: \(manualSpatialCameraPanX)
+                      panY: \(manualSpatialCameraPanY)
+                      depthZ: \(manualSpatialCameraDepthZ)
+                      stats.manualCameraOffsetWorld: \(stats.manualCameraOffsetWorld)
+                      stats.autoDepthZoom: \(stats.autoDepthZoom)
+                      stats.autoDepthOffset: \(stats.autoDepthOffset)
+                      stats.finalDepthZoom: \(stats.finalDepthZoom)
+                      stats.finalDepthOffset: \(stats.finalDepthOffset)
+                      stats.depthFitScore: \(stats.depthFitScore)
+                      stats.depthFitResidual: \(stats.depthFitBoneResidualMean)
+                    """)
+                    lastSpatialSolveSignature = spatialSignature
+                    view.setNeedsDisplay(view.bounds)
+                    view.needsDisplay = true
+                }
 
                 onSpatialDepthFitReadback?(
                     Double(stats.autoDepthZoom),
@@ -2984,6 +3119,45 @@ struct RotoSceneVideoViewport: NSViewRepresentable {
             }
 
             return simd_normalize(value)
+        }
+
+        private func cameraSpaceManualOffsetWorld(
+            cameraNode: SCNNode,
+            panX: Double,
+            panY: Double,
+            depthZ: Double
+        ) -> SIMD3<Float> {
+            let transform = cameraNode.simdWorldTransform
+            let cameraRight = normalizeSafe(
+                SIMD3<Float>(
+                    transform.columns.0.x,
+                    transform.columns.0.y,
+                    transform.columns.0.z
+                ),
+                fallback: SIMD3<Float>(1, 0, 0)
+            )
+            let cameraUp = normalizeSafe(
+                SIMD3<Float>(
+                    transform.columns.1.x,
+                    transform.columns.1.y,
+                    transform.columns.1.z
+                ),
+                fallback: SIMD3<Float>(0, 1, 0)
+            )
+
+            // SceneKit cameras look down local -Z. Positive local Z moves toward the camera.
+            let cameraToward = normalizeSafe(
+                SIMD3<Float>(
+                    transform.columns.2.x,
+                    transform.columns.2.y,
+                    transform.columns.2.z
+                ),
+                fallback: SIMD3<Float>(0, 0, 1)
+            )
+
+            return cameraRight * Float(panX)
+                + cameraUp * Float(panY)
+                + cameraToward * Float(depthZ)
         }
 
         private func forceReferenceRigVisible(_ root: SCNNode) {

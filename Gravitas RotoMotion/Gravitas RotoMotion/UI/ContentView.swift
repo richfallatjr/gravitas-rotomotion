@@ -44,6 +44,10 @@ struct ContentView: View {
             statusBar
         }
         .frame(minWidth: 1120, minHeight: 820)
+        .background(
+            RotationScrollWheelCapture(roto: roto)
+                .frame(width: 0, height: 0)
+        )
         .onAppear {
             print("[RotoMotion UI] Main ContentView appeared")
             roto.refreshSelectedJointEulerFields()
@@ -195,7 +199,10 @@ struct ContentView: View {
                 viewportRefreshRevision: roto.viewportRefreshRevision,
                 rotationOverrideRevision: roto.rotationOverrideRevision,
                 rotationKeyRevision: roto.rotationKeyRevision,
+                selectedJointRotationFieldRevision: roto.selectedJointRotationFieldRevision,
                 spatialDepthControlRevision: roto.spatialDepthControlRevision,
+                spatialCameraOffsetRevision: roto.spatialCameraOffsetRevision,
+                spatialSolveTriggerRevision: roto.spatialSolveTriggerRevision,
                 visibilityToggleRevision: roto.visibilityToggleRevision,
                 solveInputRevision: roto.solveInputRevision,
                 disparityProgressRevision: roto.disparityProgressRevision,
@@ -227,8 +234,9 @@ struct ContentView: View {
                 spatialRayPinDepthMode: roto.spatialRayPinDepthMode,
                 spatialRayPinDepthFitSettings: roto.spatialRayPinDepthFitSettings,
                 autoSpatialDepthFitEnabled: roto.autoSpatialDepthFitEnabled,
-                manualSpatialDepthZoom: roto.manualSpatialDepthZoom,
-                manualSpatialDepthOffset: roto.manualSpatialDepthOffset,
+                manualSpatialCameraPanX: roto.manualSpatialCameraPanX,
+                manualSpatialCameraPanY: roto.manualSpatialCameraPanY,
+                manualSpatialCameraDepthZ: roto.manualSpatialCameraDepthZ,
                 rotationGizmoSpace: roto.rotationGizmoSpace,
                 selectedRotationJoint: roto.selectedRotationJoint,
                 onRotationGizmoEulerChanged: { joint, euler in
@@ -318,7 +326,12 @@ struct ContentView: View {
                 frameCount: uiDecodedFrames.count,
                 keyframes: roto.rotationOverrideLayer.keyframesByJoint[roto.selectedRotationJoint] ?? []
             )
+            .id("\(roto.selectedRotationJoint)_\(roto.rotationKeyRevision)")
             .frame(height: 16)
+
+            Text("\(roto.selectedRotationJoint) keys: \(selectedRotationKeyCount)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -600,7 +613,7 @@ struct ContentView: View {
                     }
                 }
 
-                GroupBox("Spatial Depth Pan / Zoom") {
+                GroupBox("Spatial Camera Offset") {
                     VStack(alignment: .leading, spacing: 10) {
                         Toggle(
                             "Auto Depth Fit",
@@ -612,37 +625,37 @@ struct ContentView: View {
 
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
-                                Text("Depth Zoom")
-                                    .frame(width: 100, alignment: .leading)
+                                Text("Pan X")
+                                    .frame(width: 95, alignment: .leading)
 
                                 Slider(
                                     value: Binding(
-                                        get: { roto.manualSpatialDepthZoom },
-                                        set: { roto.setManualSpatialDepthZoom($0) }
+                                        get: { roto.manualSpatialCameraPanX },
+                                        set: { roto.setManualSpatialCameraPanX($0) }
                                     ),
-                                    in: 0.35...2.0
+                                    in: -25.0...25.0
                                 )
 
-                                Text(String(format: "%.3fx", roto.manualSpatialDepthZoom))
+                                Text(String(format: "%.3f", roto.manualSpatialCameraPanX))
                                     .monospacedDigit()
-                                    .frame(width: 70, alignment: .trailing)
+                                    .frame(width: 75, alignment: .trailing)
                             }
 
                             HStack {
-                                Button("-0.10") {
-                                    roto.nudgeSpatialDepthZoom(-0.10)
+                                Button("Left -1") {
+                                    roto.nudgeManualSpatialCameraPanX(-1.0)
                                 }
 
-                                Button("-0.01") {
-                                    roto.nudgeSpatialDepthZoom(-0.01)
+                                Button("-0.1") {
+                                    roto.nudgeManualSpatialCameraPanX(-0.1)
                                 }
 
-                                Button("+0.01") {
-                                    roto.nudgeSpatialDepthZoom(0.01)
+                                Button("+0.1") {
+                                    roto.nudgeManualSpatialCameraPanX(0.1)
                                 }
 
-                                Button("+0.10") {
-                                    roto.nudgeSpatialDepthZoom(0.10)
+                                Button("Right +1") {
+                                    roto.nudgeManualSpatialCameraPanX(1.0)
                                 }
                             }
                             .font(.caption)
@@ -650,52 +663,96 @@ struct ContentView: View {
 
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
-                                Text("Depth Pan Z")
-                                    .frame(width: 100, alignment: .leading)
+                                Text("Pan Y")
+                                    .frame(width: 95, alignment: .leading)
 
                                 Slider(
                                     value: Binding(
-                                        get: { roto.manualSpatialDepthOffset },
-                                        set: { roto.setManualSpatialDepthOffset($0) }
+                                        get: { roto.manualSpatialCameraPanY },
+                                        set: { roto.setManualSpatialCameraPanY($0) }
                                     ),
-                                    in: -8.0...8.0
+                                    in: -25.0...25.0
                                 )
 
-                                Text(String(format: "%.3f", roto.manualSpatialDepthOffset))
+                                Text(String(format: "%.3f", roto.manualSpatialCameraPanY))
                                     .monospacedDigit()
-                                    .frame(width: 70, alignment: .trailing)
+                                    .frame(width: 75, alignment: .trailing)
                             }
 
                             HStack {
-                                Button("-1.00") {
-                                    roto.nudgeSpatialDepthOffset(-1.0)
+                                Button("Down -1") {
+                                    roto.nudgeManualSpatialCameraPanY(-1.0)
                                 }
 
-                                Button("-0.10") {
-                                    roto.nudgeSpatialDepthOffset(-0.1)
+                                Button("-0.1") {
+                                    roto.nudgeManualSpatialCameraPanY(-0.1)
                                 }
 
-                                Button("+0.10") {
-                                    roto.nudgeSpatialDepthOffset(0.1)
+                                Button("+0.1") {
+                                    roto.nudgeManualSpatialCameraPanY(0.1)
                                 }
 
-                                Button("+1.00") {
-                                    roto.nudgeSpatialDepthOffset(1.0)
+                                Button("Up +1") {
+                                    roto.nudgeManualSpatialCameraPanY(1.0)
                                 }
                             }
                             .font(.caption)
                         }
 
-                        Button("Reset Depth Pan / Zoom") {
-                            roto.resetSpatialDepthPanZoom()
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Depth Z")
+                                    .frame(width: 95, alignment: .leading)
+
+                                Slider(
+                                    value: Binding(
+                                        get: { roto.manualSpatialCameraDepthZ },
+                                        set: { roto.setManualSpatialCameraDepthZ($0) }
+                                    ),
+                                    in: -25.0...25.0
+                                )
+
+                                Text(String(format: "%.3f", roto.manualSpatialCameraDepthZ))
+                                    .monospacedDigit()
+                                    .frame(width: 75, alignment: .trailing)
+                            }
+
+                            HStack {
+                                Button("Away -1") {
+                                    roto.nudgeManualSpatialCameraDepthZ(-1.0)
+                                }
+
+                                Button("-0.1") {
+                                    roto.nudgeManualSpatialCameraDepthZ(-0.1)
+                                }
+
+                                Button("+0.1") {
+                                    roto.nudgeManualSpatialCameraDepthZ(0.1)
+                                }
+
+                                Button("Toward +1") {
+                                    roto.nudgeManualSpatialCameraDepthZ(1.0)
+                                }
+                            }
+                            .font(.caption)
+                        }
+
+                        Button("Reset Camera Offset") {
+                            roto.resetSpatialCameraOffset()
                         }
 
                         Text("""
+                        X: \(String(format: "%.4f", roto.manualSpatialCameraPanX))
+                        Y: \(String(format: "%.4f", roto.manualSpatialCameraPanY))
+                        Z: \(String(format: "%.4f", roto.manualSpatialCameraDepthZ))
                         Auto zoom: \(String(format: "%.3f", roto.lastAutoSpatialDepthZoom))
                         Auto offset: \(String(format: "%.3f", roto.lastAutoSpatialDepthOffset))
                         Fit score: \(String(format: "%.4f", roto.lastSpatialDepthFitScore))
                         Residual: \(String(format: "%.4f", roto.lastSpatialDepthFitResidual))
-                        Rev: \(roto.spatialDepthControlRevision)
+                        Offset rev: \(roto.spatialCameraOffsetRevision)
+                        Solve trigger rev: \(roto.spatialSolveTriggerRevision)
+                        Viewport rev: \(roto.viewportRefreshRevision)
+                        Last trigger: \(roto.lastSpatialSolveTriggerReason)
                         """)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -945,7 +1002,13 @@ struct ContentView: View {
     private var rotationAuthoringPanel: some View {
         GroupBox("Rotation Authoring") {
             VStack(alignment: .leading, spacing: 8) {
-                Picker("Joint", selection: $roto.selectedRotationJoint) {
+                Picker(
+                    "Joint",
+                    selection: Binding(
+                        get: { roto.selectedRotationJoint },
+                        set: { roto.setSelectedRotationJoint($0) }
+                    )
+                ) {
                     ForEach(roto.editableJointNames, id: \.self) { joint in
                         Text(joint).tag(joint)
                     }
@@ -958,33 +1021,25 @@ struct ContentView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
-                        ScrollWheelDegreeField(
-                            label: "X",
-                            value: $roto.selectedJointEulerDegreesX,
-                            onValueChanged: { newValue in
-                                roto.setSelectedJointEulerDegrees(x: newValue)
-                            }
-                        )
+                        RotationEulerChannelRow(roto: roto, axis: .x)
+                        RotationEulerChannelRow(roto: roto, axis: .y)
+                        RotationEulerChannelRow(roto: roto, axis: .z)
 
-                        ScrollWheelDegreeField(
-                            label: "Y",
-                            value: $roto.selectedJointEulerDegreesY,
-                            onValueChanged: { newValue in
-                                roto.setSelectedJointEulerDegrees(y: newValue)
+                        HStack {
+                            Button("Clear Scroll Axis") {
+                                roto.selectRotationScrollAxis(nil)
                             }
-                        )
 
-                        ScrollWheelDegreeField(
-                            label: "Z",
-                            value: $roto.selectedJointEulerDegreesZ,
-                            onValueChanged: { newValue in
-                                roto.setSelectedJointEulerDegrees(z: newValue)
-                            }
-                        )
+                            Text("Selected: \(roto.selectedRotationFieldAxis?.displayName ?? "none")")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
 
-                        Text("Euler XYZ override. No W / quaternion channel.")
+                        Text(roto.selectedJointRotationFieldStatus)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
 
@@ -1876,6 +1931,16 @@ struct ContentView: View {
           firstTime: \(uiDecodedFrames.first?.timeSeconds ?? -1)
           lastTime: \(uiDecodedFrames.last?.timeSeconds ?? -1)
           loop: \(uiLoop)
+          spatialCameraPanX: \(roto.manualSpatialCameraPanX)
+          spatialCameraPanY: \(roto.manualSpatialCameraPanY)
+          spatialCameraDepthZ: \(roto.manualSpatialCameraDepthZ)
+        """)
+
+        roto.diagnostics.log("""
+        Playback started with spatial camera offset:
+          panX: \(roto.manualSpatialCameraPanX)
+          panY: \(roto.manualSpatialCameraPanY)
+          depthZ: \(roto.manualSpatialCameraDepthZ)
         """)
 
         playbackTask = Task { @MainActor in
@@ -2009,6 +2074,232 @@ struct ContentView: View {
         uiSecurityScopedAccessActive = false
     }
 
+}
+
+struct RotationEulerChannelRow: View {
+    @ObservedObject var roto: RotoMotionViewModel
+    let axis: RotationFieldAxis
+
+    private var value: Binding<Double> {
+        switch axis {
+        case .x:
+            return Binding(
+                get: { roto.selectedJointEulerDegreesX },
+                set: { roto.setSelectedJointEulerDegrees(x: $0) }
+            )
+        case .y:
+            return Binding(
+                get: { roto.selectedJointEulerDegreesY },
+                set: { roto.setSelectedJointEulerDegrees(y: $0) }
+            )
+        case .z:
+            return Binding(
+                get: { roto.selectedJointEulerDegreesZ },
+                set: { roto.setSelectedJointEulerDegrees(z: $0) }
+            )
+        }
+    }
+
+    private var isSelected: Bool {
+        roto.selectedRotationFieldAxis == axis
+    }
+
+    private var channelColor: Color {
+        if roto.selectedJointHasExactRotationKey {
+            return .yellow
+        }
+
+        if roto.selectedJointHasInterpolatedRotation {
+            return .gray
+        }
+
+        switch roto.selectedJointRotationFieldSource {
+        case .livePreview:
+            return .orange
+        case .heldOverride:
+            return .blue
+        case .solvedPose, .none:
+            return .gray
+        case .exactKey:
+            return .yellow
+        case .interpolatedKey:
+            return .gray
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(axis.displayName)
+                .font(.caption)
+                .monospaced()
+                .frame(width: 18)
+
+            TextField(
+                axis.displayName,
+                value: value,
+                format: .number.precision(.fractionLength(2))
+            )
+            .textFieldStyle(.roundedBorder)
+            .monospacedDigit()
+            .frame(width: 90)
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(
+                        isSelected ? channelColor : channelColor.opacity(0.55),
+                        lineWidth: isSelected ? 3 : 1
+                    )
+                    .shadow(
+                        color: isSelected ? channelColor.opacity(0.9) : .clear,
+                        radius: isSelected ? 5 : 0
+                    )
+            )
+            .onTapGesture {
+                roto.selectRotationScrollAxis(axis)
+            }
+
+            Text("°")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if roto.selectedJointHasExactRotationKey {
+                Text("KEY")
+                    .font(.caption2)
+                    .bold()
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Color.yellow)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+            } else if roto.selectedJointHasInterpolatedRotation {
+                Text("INBETWEEN")
+                    .font(.caption2)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Color.gray)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+            } else {
+                Text(roto.selectedJointRotationFieldSource.rawValue)
+                    .font(.caption2)
+                    .foregroundStyle(channelColor)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            roto.selectRotationScrollAxis(axis)
+        }
+    }
+}
+
+struct RotationScrollWheelCapture: NSViewRepresentable {
+    @ObservedObject var roto: RotoMotionViewModel
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        context.coordinator.install()
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.roto = roto
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(roto: roto)
+    }
+
+    final class Coordinator {
+        var roto: RotoMotionViewModel
+        private var monitor: Any?
+        private var accumulator: CGFloat = 0
+
+        init(roto: RotoMotionViewModel) {
+            self.roto = roto
+        }
+
+        deinit {
+            uninstall()
+        }
+
+        func install() {
+            guard monitor == nil else {
+                return
+            }
+
+            monitor = NSEvent.addLocalMonitorForEvents(
+                matching: .scrollWheel
+            ) { [weak self] event in
+                let dominant: CGFloat
+
+                if abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) {
+                    dominant = event.scrollingDeltaX
+                } else {
+                    dominant = event.scrollingDeltaY
+                }
+
+                let hasPreciseScrollingDeltas = event.hasPreciseScrollingDeltas
+
+                var consumed = false
+                MainActor.assumeIsolated {
+                    guard let self,
+                          let axis = self.roto.selectedRotationFieldAxis else {
+                        return
+                    }
+
+                    self.handle(
+                        dominantDelta: dominant,
+                        hasPreciseScrollingDeltas: hasPreciseScrollingDeltas,
+                        axis: axis
+                    )
+                    consumed = true
+                }
+
+                return consumed ? nil : event
+            }
+        }
+
+        func uninstall() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+        }
+
+        private func handle(
+            dominantDelta: CGFloat,
+            hasPreciseScrollingDeltas: Bool,
+            axis: RotationFieldAxis
+        ) {
+            guard abs(dominantDelta) > 0.0001 else {
+                return
+            }
+
+            accumulator += dominantDelta
+
+            let unitsPerStep: CGFloat = hasPreciseScrollingDeltas ? 10.0 : 1.0
+            let wholeSteps = Int((accumulator / unitsPerStep).rounded(.towardZero))
+
+            guard wholeSteps != 0 else {
+                return
+            }
+
+            accumulator -= CGFloat(wholeSteps) * unitsPerStep
+
+            Task { @MainActor in
+                self.roto.diagnostics.log("""
+                Rotation scroll wheel captured:
+                  joint: \(self.roto.selectedRotationJoint)
+                  axis: \(axis.rawValue)
+                  steps: \(wholeSteps)
+                  selectedAxis: \(self.roto.selectedRotationFieldAxis?.rawValue ?? "nil")
+                """)
+                self.roto.applyRotationScrollStep(
+                    axis: axis,
+                    steps: wholeSteps
+                )
+            }
+        }
+    }
 }
 
 struct ScrollWheelDegreeField: View {
